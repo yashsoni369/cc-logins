@@ -825,6 +825,20 @@ async fn fetch_active_usage_with_network(
             .map_err(|_| ActiveUsageError::Unavailable);
     }
 
+    if live_changed && !live.is_empty() {
+        let live_verdict = cached_active_usage_provenance(&current_account, &live);
+        let attributable = complete_oauth(&live)
+            && (same_oauth_lineage(&live, &backup)
+                || live_verdict == Some(ProvenanceVerdict::Owned));
+        if !attributable {
+            return Err(if live_verdict == Some(ProvenanceVerdict::Foreign) {
+                ActiveUsageError::ForeignCredential
+            } else {
+                ActiveUsageError::Unavailable
+            });
+        }
+    }
+
     let (working, restore_live) = if complete_oauth(&backup) && !oauth_expired(&backup) {
         let restore_live = live != backup;
         (backup, restore_live)
@@ -4091,6 +4105,51 @@ mod tests {
             Err(ActiveUsageError::Missing)
         );
         assert!(network.calls.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn active_refresh_never_overwrites_a_managed_key_that_landed_while_waiting() {
+        let _env = setup_env();
+        let observed = expiring_oauth_creds_json("old-refresh", "old-access", 1.0);
+        write_json_file(
+            &accounts_file(),
+            &serde_json::json!({"sequence":[1],"accounts":{"1":{"email":"alpha@example.com","organizationUuid":"org-1"}}}),
+        );
+        write_json_file(
+            &paths::global_config_path(),
+            &serde_json::json!({"oauthAccount":{"emailAddress":"alpha@example.com","organizationUuid":"org-1"}}),
+        );
+        let mut store = CredentialStore::new(GuiStoreHost);
+        store
+            .write_account_credentials("1", "alpha@example.com", &observed)
+            .unwrap();
+        std::fs::create_dir_all(paths::credentials_path().parent().unwrap()).unwrap();
+        std::fs::write(paths::credentials_path(), "sk-ant-api03-concurrent").unwrap();
+        let account = read_accounts().unwrap().remove(0);
+        let network = ActiveUsageNetwork {
+            refreshes: Mutex::new(VecDeque::new()),
+            usages: Mutex::new(VecDeque::new()),
+            calls: Mutex::new(Vec::new()),
+        };
+
+        assert_eq!(
+            fetch_active_usage_with_network(
+                &account,
+                &observed,
+                &observed,
+                &network,
+                Duration::from_secs(1),
+            )
+            .await,
+            Err(ActiveUsageError::Unavailable)
+        );
+        assert!(network.calls.lock().unwrap().is_empty());
+        assert_eq!(
+            CredentialStore::new(GuiStoreHost)
+                .read_active_credentials()
+                .value,
+            Some("sk-ant-api03-concurrent".into())
+        );
     }
 
     #[tokio::test]
