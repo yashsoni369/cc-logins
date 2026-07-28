@@ -55,9 +55,9 @@
 //!   only), and `global_config_path`/`credentials_path`/`claude_config_home`
 //!   for Claude Code's official files.
 //! - [`crate::oauth`] — usage fetch, token refresh, and (new) profile lookup.
-//!   `try_fetch_usage_for_account` is called with `is_active` set correctly,
-//!   which is what keeps this port honest about never refreshing the active
-//!   account's token (Claude Code owns those bytes). [`add_current_account`]
+//!   Inactive refreshes use the generation coordinator; active refreshes use
+//!   the narrower Claude-compatible lock path below so Claude Code and this
+//!   app cannot consume the same grant concurrently. [`add_current_account`]
 //!   and [`add_token`] call `oauth::fetch_oauth_profile` — advisory, `None`
 //!   on any failure — to resolve account identity for duplicate detection;
 //!   see the "Duplicate detection by account identity" section above
@@ -90,10 +90,10 @@
 //!    test below.
 //! 4. **Atomic writes.** All local writes in this module go through
 //!    [`atomic_write`] (write-temp-then-rename), matching `credentials.rs`.
-//! 5. **Never refresh the active account's token.** Enforced by
-//!    `oauth::try_fetch_usage_for_account`'s `is_active` flag, not by this
-//!    module — but this module is the caller that must (and does) pass it
-//!    correctly.
+//! 5. **Serialize every refresh of one account.** Active and inactive paths
+//!    share the per-account refresh lease. Active refresh then takes the
+//!    cswap, Claude credential, and GUI vault locks in that order and re-reads
+//!    identity and credentials before consuming a grant.
 //! 6. **`.claude.json` lives at the home dir, not inside `.claude/`.** Always
 //!    resolved via [`crate::paths::global_config_path`], never hand-rolled.
 
@@ -113,8 +113,8 @@ use crate::model::{
 use crate::oauth;
 use crate::oauth_quarantine::OAuthQuarantine;
 use crate::oauth_refresh::{
-    self, AccountIdentity, CompareAndStore, GenerationStore, RefreshCoordinator, StoredGeneration,
-    ValidatedCredential,
+    self, AccountIdentity, CompareAndStore, GenerationStore, RefreshCoordinator,
+    RefreshLeaseProvider, StoredGeneration, ValidatedCredential,
 };
 use crate::paths;
 
@@ -511,6 +511,19 @@ fn cached_active_usage_provenance(
         .copied()
 }
 
+fn cache_active_usage_provenance(account: &Account, credentials: &str, verdict: ProvenanceVerdict) {
+    if verdict == ProvenanceVerdict::Unresolved {
+        return;
+    }
+    let Some(key) = active_provenance_cache_key(account, credentials) else {
+        return;
+    };
+    active_provenance_cache()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .insert(key, verdict);
+}
+
 /// Mirrors cswap's uuid-first, tri-state profile-oracle decision. A partial
 /// profile can prove ownership through UUID, but a UUID-less slot needs the
 /// complete `(email, organization)` pair before either affirmation or
@@ -678,19 +691,24 @@ async fn fetch_active_usage_with_network(
     network: &dyn oauth::OAuthNetwork,
     lock_timeout: Duration,
 ) -> Result<oauth::UsageResult, ActiveUsageError> {
-    if !complete_oauth(observed_live) {
+    let observed_is_recoverable_wipe = observed_live.is_empty()
+        || (oauth::extract_oauth_data(observed_live).is_some() && !complete_oauth(observed_live));
+    if !complete_oauth(observed_live)
+        && (!observed_is_recoverable_wipe || !complete_oauth(observed_backup))
+    {
         return Err(ActiveUsageError::Missing);
     }
-    let observed_fingerprint = oauth::credential_fingerprint(observed_live)
-        .unwrap_or_else(|| oauth_refresh::credential_generation(observed_live));
-    if OAuthQuarantine::new(paths::backup_root())
-        .is_rejected(&account.stable_key(), &observed_fingerprint)
-    {
-        return Err(ActiveUsageError::ReloginRequired);
-    }
-
     let mut force_refresh = false;
-    if !oauth_expired(observed_live) {
+    if complete_oauth(observed_live) {
+        let observed_fingerprint = oauth::credential_fingerprint(observed_live)
+            .unwrap_or_else(|| oauth_refresh::credential_generation(observed_live));
+        if OAuthQuarantine::new(paths::backup_root())
+            .is_rejected(&account.stable_key(), &observed_fingerprint)
+        {
+            return Err(ActiveUsageError::ReloginRequired);
+        }
+    }
+    if complete_oauth(observed_live) && !oauth_expired(observed_live) {
         match fetch_normalized_usage(network, observed_live).await {
             Ok(usage) => {
                 let verdict =
@@ -730,6 +748,17 @@ async fn fetch_active_usage_with_network(
         });
     }
 
+    // Both active and inactive refresh paths take this per-account lease
+    // before any vault/Claude lock. A snapshot that classified this account
+    // as inactive can therefore finish and persist its successor before the
+    // active path re-reads live state, preventing duplicate grant use.
+    let refresh_leases = oauth_refresh::FileRefreshLeases::new(paths::backup_root(), lock_timeout);
+    let stable_key = account.stable_key();
+    let refresh_lease = refresh_leases
+        .acquire(&stable_key)
+        .await
+        .map_err(|_| ActiveUsageError::Unavailable)?;
+
     let timeout = lock_timeout;
     let locks = tokio::task::spawn_blocking(move || {
         crate::switch_transaction::acquire_active_refresh_locks(timeout)
@@ -752,8 +781,13 @@ async fn fetch_active_usage_with_network(
         .ok_or(ActiveUsageError::Unavailable)?;
     let (live, backup) = {
         let mut store = CredentialStore::new(GuiStoreHost);
+        let active = store.read_active_credentials();
+        if active.keychain_unavailable && active.value.as_deref().unwrap_or_default().is_empty() {
+            return Err(ActiveUsageError::Unavailable);
+        }
+        let live = active.value.ok_or(ActiveUsageError::Unavailable)?;
         (
-            store.read_active_credentials().value.unwrap_or_default(),
+            live,
             store.read_account_credentials(
                 &current_account.number.to_string(),
                 &current_account.email,
@@ -785,32 +819,43 @@ async fn fetch_active_usage_with_network(
             )
             .map_err(|_| ActiveUsageError::Unavailable)?;
         drop(locks);
+        drop(refresh_lease);
         return fetch_normalized_usage(network, &live)
             .await
             .map_err(|_| ActiveUsageError::Unavailable);
     }
 
-    let working = if complete_oauth(&backup) && !oauth_expired(&backup) {
-        if live != backup {
-            CredentialStore::new(GuiStoreHost)
-                .write_refreshed_oauth_credentials(&backup)
-                .map_err(|_| ActiveUsageError::Unavailable)?;
-        }
-        backup
+    let (working, restore_live) = if complete_oauth(&backup) && !oauth_expired(&backup) {
+        let restore_live = live != backup;
+        (backup, restore_live)
     } else if complete_oauth(&live)
         && (same_oauth_lineage(&live, &backup)
             || cached_active_usage_provenance(&current_account, &live)
                 == Some(ProvenanceVerdict::Owned))
     {
-        live
+        (live, false)
     } else if complete_oauth(&backup) {
-        backup
+        (backup, false)
     } else {
         return Err(ActiveUsageError::Unavailable);
     };
 
+    let working_fingerprint = oauth::credential_fingerprint(&working)
+        .unwrap_or_else(|| oauth_refresh::credential_generation(&working));
+    if OAuthQuarantine::new(paths::backup_root())
+        .is_rejected(&current_account.stable_key(), &working_fingerprint)
+    {
+        return Err(ActiveUsageError::ReloginRequired);
+    }
+    if restore_live {
+        CredentialStore::new(GuiStoreHost)
+            .write_refreshed_oauth_credentials(&working)
+            .map_err(|_| ActiveUsageError::Unavailable)?;
+    }
+
     if !oauth_expired(&working) && !force_refresh {
         drop(locks);
+        drop(refresh_lease);
         return fetch_normalized_usage(network, &working)
             .await
             .map_err(|_| ActiveUsageError::Unavailable);
@@ -853,6 +898,11 @@ async fn fetch_active_usage_with_network(
         (_, Err(_)) => return Err(ActiveUsageError::Unavailable),
         (Ok(()), Ok(())) => {}
     }
+    // This process consumed the predecessor grant, so the returned
+    // successor is definitively this slot's lineage. Keep that evidence even
+    // if the backup write failed; it licenses safe recovery at the next
+    // expiry, matching cswap's in-memory ownership memo.
+    cache_active_usage_provenance(&current_account, &successor, ProvenanceVerdict::Owned);
     let successor_fingerprint = oauth::credential_fingerprint(&successor)
         .unwrap_or_else(|| oauth_refresh::credential_generation(&successor));
     if let Err(error) = OAuthQuarantine::new(paths::backup_root())
@@ -861,6 +911,7 @@ async fn fetch_active_usage_with_network(
         log::warn!("could not clear obsolete OAuth quarantine after active refresh: {error}");
     }
     drop(locks);
+    drop(refresh_lease);
     fetch_normalized_usage(network, &successor)
         .await
         .map_err(|_| ActiveUsageError::Unavailable)
@@ -1037,8 +1088,9 @@ fn clear_replaced_quarantine(email: &str, organization_uuid: Option<&str>, crede
 /// [`Environment`] this port produces (WSL/profile environments are out of
 /// scope here; see `crate::wsl`).
 ///
-/// No lock is held anywhere in this function — rule 2 (never hold the
-/// credential/config lock across a network call). A per-account usage-fetch
+/// No credential store is carried across an await. Profile and final usage
+/// requests run unlocked; the active refresh grant uses the bounded lease and
+/// credential-lock exception documented above. A per-account usage-fetch
 /// failure degrades that account to [`UsageStatus::Stale`] rather than
 /// failing the whole snapshot; a disabled account's status is left alone
 /// either way. (This port has no persistent usage cache — `oauth.rs` and
@@ -1056,17 +1108,18 @@ pub async fn read_snapshot() -> Result<Snapshot, SwitchError> {
     // from upstream that no store or lock may be held across I/O. And
     // `CredentialStore` is not `Send`, so holding it across an `.await` makes
     // this future non-`Send`, which Tauri rejects outright for async commands.
-    let mut pending: Vec<(Account, String, String)> = Vec::with_capacity(accounts.len());
+    let mut pending: Vec<(Account, Option<credentials::ActiveCredentials>, String)> =
+        Vec::with_capacity(accounts.len());
     {
         let mut store = CredentialStore::new(GuiStoreHost);
         for account in accounts {
             let (creds, backup) = if account.active {
                 (
-                    store.read_active_credentials().value.unwrap_or_default(),
+                    Some(store.read_active_credentials()),
                     store.read_account_credentials(&account.number.to_string(), &account.email),
                 )
             } else {
-                (String::new(), String::new())
+                (None, String::new())
             };
             pending.push((account, creds, backup));
         }
@@ -1078,25 +1131,38 @@ pub async fn read_snapshot() -> Result<Snapshot, SwitchError> {
         let num = account.number.to_string();
 
         let result = if account.active {
-            if creds.is_empty() {
-                None
-            } else {
-                match fetch_active_usage(&account, &creds, &backup).await {
-                    Err(ActiveUsageError::ForeignCredential) => {
-                        account.usage_status = UsageStatus::ForeignCredential;
-                        log::warn!(
+            match creds {
+                None => Some(Err(oauth_refresh::RefreshCoordinatorError::RefreshFailed(
+                    None,
+                ))),
+                Some(active)
+                    if active.value.is_none()
+                        || (active.keychain_unavailable
+                            && active.value.as_deref().unwrap_or_default().is_empty()) =>
+                {
+                    Some(Err(oauth_refresh::RefreshCoordinatorError::RefreshFailed(
+                        None,
+                    )))
+                }
+                Some(active) => {
+                    let creds = active.value.unwrap_or_default();
+                    match fetch_active_usage(&account, &creds, &backup).await {
+                        Err(ActiveUsageError::ForeignCredential) => {
+                            account.usage_status = UsageStatus::ForeignCredential;
+                            log::warn!(
                             "active credential resolves to a different account than slot {num}; usage attribution suppressed"
                         );
-                        None
+                            None
+                        }
+                        Ok(usage) => Some(Ok(usage)),
+                        Err(ActiveUsageError::Missing) => None,
+                        Err(ActiveUsageError::ReloginRequired) => {
+                            Some(Err(oauth_refresh::RefreshCoordinatorError::ReloginRequired))
+                        }
+                        Err(ActiveUsageError::Unavailable) => Some(Err(
+                            oauth_refresh::RefreshCoordinatorError::RefreshFailed(None),
+                        )),
                     }
-                    Ok(usage) => Some(Ok(usage)),
-                    Err(ActiveUsageError::Missing) => None,
-                    Err(ActiveUsageError::ReloginRequired) => {
-                        Some(Err(oauth_refresh::RefreshCoordinatorError::ReloginRequired))
-                    }
-                    Err(ActiveUsageError::Unavailable) => Some(Err(
-                        oauth_refresh::RefreshCoordinatorError::RefreshFailed(None),
-                    )),
                 }
             }
         } else {
@@ -3944,6 +4010,204 @@ mod tests {
             store.read_account_credentials("1", "alpha@example.com"),
             successor
         );
+        assert_eq!(
+            *network.calls.lock().unwrap(),
+            vec!["refresh:old-refresh", "usage:new-access"]
+        );
+        assert_eq!(
+            cached_active_usage_provenance(&account, &successor),
+            Some(ProvenanceVerdict::Owned)
+        );
+    }
+
+    #[tokio::test]
+    async fn active_wiped_live_credentials_restore_a_usable_slot_backup() {
+        let _env = setup_env();
+        let backup =
+            expiring_oauth_creds_json("backup-refresh", "backup-access", 9_999_999_999_999_f64);
+        write_json_file(
+            &accounts_file(),
+            &serde_json::json!({"sequence":[1],"accounts":{"1":{"email":"alpha@example.com","organizationUuid":"org-1"}}}),
+        );
+        write_json_file(
+            &paths::global_config_path(),
+            &serde_json::json!({"oauthAccount":{"emailAddress":"alpha@example.com","organizationUuid":"org-1"}}),
+        );
+        let mut store = CredentialStore::new(GuiStoreHost);
+        store
+            .write_account_credentials("1", "alpha@example.com", &backup)
+            .unwrap();
+        let account = read_accounts().unwrap().remove(0);
+        let network = ActiveUsageNetwork {
+            refreshes: Mutex::new(VecDeque::new()),
+            usages: Mutex::new(VecDeque::from([Ok(
+                serde_json::json!({"five_hour":{"utilization":13.0}}),
+            )])),
+            calls: Mutex::new(Vec::new()),
+        };
+
+        let usage = fetch_active_usage_with_network(
+            &account,
+            "",
+            &backup,
+            &network,
+            Duration::from_secs(1),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(usage.five_hour.unwrap().pct, 13.0);
+        assert_eq!(*network.calls.lock().unwrap(), vec!["usage:backup-access"]);
+        assert_eq!(
+            CredentialStore::new(GuiStoreHost)
+                .read_active_credentials()
+                .value
+                .unwrap(),
+            backup
+        );
+    }
+
+    #[tokio::test]
+    async fn active_non_oauth_live_value_is_never_replaced_from_an_oauth_backup() {
+        let _env = setup_env();
+        let account = active_account(1);
+        let backup =
+            expiring_oauth_creds_json("backup-refresh", "backup-access", 9_999_999_999_999_f64);
+        let network = ActiveUsageNetwork {
+            refreshes: Mutex::new(VecDeque::new()),
+            usages: Mutex::new(VecDeque::new()),
+            calls: Mutex::new(Vec::new()),
+        };
+
+        assert_eq!(
+            fetch_active_usage_with_network(
+                &account,
+                "sk-ant-api03-managed",
+                &backup,
+                &network,
+                Duration::from_secs(1),
+            )
+            .await,
+            Err(ActiveUsageError::Missing)
+        );
+        assert!(network.calls.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn active_wipe_never_restores_a_quarantined_backup_generation() {
+        let _env = setup_env();
+        let backup =
+            expiring_oauth_creds_json("dead-refresh", "backup-access", 9_999_999_999_999_f64);
+        write_json_file(
+            &accounts_file(),
+            &serde_json::json!({"sequence":[1],"accounts":{"1":{"email":"alpha@example.com","organizationUuid":"org-1"}}}),
+        );
+        write_json_file(
+            &paths::global_config_path(),
+            &serde_json::json!({"oauthAccount":{"emailAddress":"alpha@example.com","organizationUuid":"org-1"}}),
+        );
+        let mut store = CredentialStore::new(GuiStoreHost);
+        store
+            .write_account_credentials("1", "alpha@example.com", &backup)
+            .unwrap();
+        let account = read_accounts().unwrap().remove(0);
+        OAuthQuarantine::new(paths::backup_root())
+            .reject(
+                &account.stable_key(),
+                &oauth::credential_fingerprint(&backup).unwrap(),
+                chrono::Utc::now(),
+            )
+            .unwrap();
+        let network = ActiveUsageNetwork {
+            refreshes: Mutex::new(VecDeque::new()),
+            usages: Mutex::new(VecDeque::new()),
+            calls: Mutex::new(Vec::new()),
+        };
+
+        assert_eq!(
+            fetch_active_usage_with_network(
+                &account,
+                "",
+                &backup,
+                &network,
+                Duration::from_secs(1),
+            )
+            .await,
+            Err(ActiveUsageError::ReloginRequired)
+        );
+        assert!(network.calls.lock().unwrap().is_empty());
+        assert_eq!(
+            CredentialStore::new(GuiStoreHost)
+                .read_active_credentials()
+                .value,
+            Some(String::new())
+        );
+    }
+
+    #[tokio::test]
+    async fn active_refresh_waits_for_the_same_per_account_lease_as_inactive_refresh() {
+        let _env = setup_env();
+        let original = expiring_oauth_creds_json("old-refresh", "old-access", 1.0);
+        let successor =
+            expiring_oauth_creds_json("new-refresh", "new-access", 9_999_999_999_999_f64);
+        write_json_file(
+            &accounts_file(),
+            &serde_json::json!({"sequence":[1],"accounts":{"1":{"email":"alpha@example.com","organizationUuid":"org-1"}}}),
+        );
+        write_json_file(
+            &paths::global_config_path(),
+            &serde_json::json!({"oauthAccount":{"emailAddress":"alpha@example.com","organizationUuid":"org-1"}}),
+        );
+        let mut store = CredentialStore::new(GuiStoreHost);
+        store.write_refreshed_oauth_credentials(&original).unwrap();
+        store
+            .write_account_credentials("1", "alpha@example.com", &original)
+            .unwrap();
+        let account = read_accounts().unwrap().remove(0);
+        let leases =
+            oauth_refresh::FileRefreshLeases::new(paths::backup_root(), Duration::from_secs(1));
+        let held = leases.acquire(&account.stable_key()).await.unwrap();
+        let network = ActiveUsageNetwork {
+            refreshes: Mutex::new(VecDeque::from([RefreshOutcome {
+                credentials: Some(successor),
+                error: None,
+                token_account: None,
+            }])),
+            usages: Mutex::new(VecDeque::from([Ok(
+                serde_json::json!({"five_hour":{"utilization":29.0}}),
+            )])),
+            calls: Mutex::new(Vec::new()),
+        };
+        let refresh = fetch_active_usage_with_network(
+            &account,
+            &original,
+            &original,
+            &network,
+            Duration::from_secs(1),
+        );
+        tokio::pin!(refresh);
+
+        tokio::select! {
+            result = &mut refresh => panic!("active refresh bypassed the held account lease: {result:?}"),
+            () = tokio::time::sleep(Duration::from_millis(50)) => {}
+        }
+        assert!(network.calls.lock().unwrap().is_empty());
+
+        let vault_path = paths::backup_root().join(".lock");
+        let vault_guard = tokio::time::timeout(
+            Duration::from_secs(1),
+            tokio::task::spawn_blocking(move || {
+                crate::locking::acquire_or_err(vault_path, Duration::from_millis(250))
+            }),
+        )
+        .await
+        .expect("active refresh held the vault while waiting for the account lease")
+        .unwrap()
+        .expect("inactive persistence could not acquire the vault behind the active waiter");
+        drop(vault_guard);
+
+        drop(held);
+        assert_eq!(refresh.await.unwrap().five_hour.unwrap().pct, 29.0);
         assert_eq!(
             *network.calls.lock().unwrap(),
             vec!["refresh:old-refresh", "usage:new-access"]

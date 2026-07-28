@@ -268,6 +268,8 @@ credential lock, its global-config lock, then this GUI's private vault lock. The
 and staleness values track Claude Code 2.1.218 through pinned cswap commit
 `65d208081a4985b9fd1786bc258d5172d196bee2`. No network call occurs while this **full** set is held;
 active refresh uses a narrower set without the config lock and a six-second request deadline.
+Both active and inactive refresh take the same per-account refresh lease first, so a stale snapshot
+cannot consume the same rotating grant through both paths.
 
 Switching is a durable transaction, not merely three atomic writes. Protected before-images and a
 secret-free phased journal recover the active credential backend, global config, and sequence after

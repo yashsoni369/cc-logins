@@ -47,6 +47,9 @@ when it happens.
   generations refresh under Claude-compatible credential locks, recheck account and
   lineage ownership before consuming a grant, and persist the successor to both the live
   credential and its slot backup. Exact `invalid_grant` results remain generation-bound.
+- Active recovery now restores a definitively wiped live OAuth store from the slot backup, keeps
+  read failures distinct from genuine absence, and shares the inactive path's per-account lease so
+  a concurrent snapshot cannot consume the same rotating grant twice.
 
 ### Security
 

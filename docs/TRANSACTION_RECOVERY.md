@@ -20,7 +20,9 @@ commit `65d208081a4985b9fd1786bc258d5172d196bee2`: credential locks become stale
 the config lock after 10 seconds. CC Logins refreshes lock mtimes every three seconds. Switching and
 identity/usage lookups never hold the full lock set across network work. Active-token refresh is the
 same bounded exception as current cswap: its six-second grant POST holds only the optional cswap,
-Claude credential, and GUI vault locks; it never holds or later nests the config lock.
+Claude credential, and GUI vault locks; it never holds or later nests the config lock. A shared
+per-account refresh lease precedes that set and also surrounds inactive refreshes, preventing a
+stale active/inactive classification from consuming one rotating grant twice.
 
 ## Credential provenance
 
