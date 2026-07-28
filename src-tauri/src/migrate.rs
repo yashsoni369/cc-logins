@@ -1,5 +1,5 @@
-//! One-time migration of this app's OWN data directory across the bundle
-//! identifier rename `dev.apex36.claude-account-switcher` -> `dev.apex36.cc-logins`.
+//! One-time migration of this app's OWN data directory across bundle
+//! identifier renames, currently `dev.apex36.cc-logins` -> `cc-logins`.
 //!
 //! Tauri derives `app_data_dir()` from the bundle identifier
 //! (`tauri.conf.json`'s `identifier`), so renaming that identifier moves
@@ -16,8 +16,10 @@
 //!
 //! # Safety model
 //!
-//! 1. **No-op if `new_dir` already has content.** Never overwrite a newer
-//!    store with an older one — this also makes the migration attempt
+//! 1. **No-op if `new_dir` already has managed app data.** Diagnostic
+//!    `app.log*` files do not count because logging historically used the
+//!    target `cc-logins` directory before the bundle identifier did. Never
+//!    overwrite a newer store with an older one — this also makes the migration attempt
 //!    idempotent: once it has succeeded, every later launch (which now finds
 //!    `new_dir` populated) skips straight past it.
 //! 2. **No-op if `old_dir` does not exist.** A fresh install (or a machine
@@ -87,10 +89,25 @@ pub enum MigrationOutcome {
     Failed { reason: String },
 }
 
+/// Try legacy app-data directories from newest to oldest, stopping as soon as
+/// one exists (or a migration attempt produces any result other than
+/// [`MigrationOutcome::NoOldData`]). This lets a user upgrade directly from
+/// either prior identifier without allowing an older store to overwrite a
+/// newer one.
+pub fn migrate_app_data_chain(old_dirs: &[PathBuf], new_dir: &Path) -> MigrationOutcome {
+    for old_dir in old_dirs {
+        let outcome = migrate_app_data(old_dir, new_dir);
+        if outcome != MigrationOutcome::NoOldData {
+            return outcome;
+        }
+    }
+    MigrationOutcome::NoOldData
+}
+
 /// Migrate `old_dir` into `new_dir` if, and only if, `new_dir` looks unused
 /// and `old_dir` looks real. See the module docs for the full safety model.
 pub fn migrate_app_data(old_dir: &Path, new_dir: &Path) -> MigrationOutcome {
-    if dir_has_content(new_dir) {
+    if dir_has_managed_content(new_dir) {
         log::info!(
             "cc-logins: app data dir {} already has content; skipping migration from {}",
             new_dir.display(),
@@ -169,9 +186,29 @@ pub fn migrate_app_data(old_dir: &Path, new_dir: &Path) -> MigrationOutcome {
 /// directory, or one that exists but is empty (Tauri may create
 /// `app_data_dir()` eagerly before this runs), both count as "no content" and
 /// do not block a migration.
+#[cfg(test)]
 fn dir_has_content(dir: &Path) -> bool {
     match fs::read_dir(dir) {
         Ok(mut entries) => entries.next().is_some(),
+        Err(_) => false,
+    }
+}
+
+fn is_diagnostic_log(path: &Path) -> bool {
+    path.file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| name == "app.log" || name.starts_with("app.log."))
+}
+
+/// The log path was already `<data-dir>/cc-logins/app.log` before the Tauri
+/// identifier changed to `cc-logins`. Those files may therefore pre-exist in
+/// an otherwise unused target directory and must not strand the real vault,
+/// settings, and history in the legacy identifier directory.
+fn dir_has_managed_content(dir: &Path) -> bool {
+    match fs::read_dir(dir) {
+        Ok(entries) => entries
+            .filter_map(Result::ok)
+            .any(|entry| !is_diagnostic_log(&entry.path())),
         Err(_) => false,
     }
 }
@@ -288,6 +325,10 @@ fn copy_dir_recursive(src: &Path, dst: &Path) -> std::io::Result<()> {
             copy_symlink(&src_path, &dst_path)?;
         } else if file_type.is_dir() {
             copy_dir_recursive(&src_path, &dst_path)?;
+        } else if is_diagnostic_log(&src_path) && dst_path.exists() {
+            // Keep the log already written at the canonical path. Diagnostic
+            // logs are not part of the state whose integrity is verified.
+            continue;
         } else {
             fs::copy(&src_path, &dst_path)?;
         }
@@ -457,6 +498,28 @@ mod tests {
     }
 
     #[test]
+    fn diagnostic_logs_in_target_do_not_block_or_get_overwritten_by_migration() {
+        let root = tempdir().unwrap();
+        let old_dir = root.path().join("dev.apex36.cc-logins");
+        let new_dir = root.path().join("cc-logins");
+        populate_old_dir(&old_dir);
+        fs::write(old_dir.join("app.log"), "legacy log").unwrap();
+        fs::create_dir_all(&new_dir).unwrap();
+        fs::write(new_dir.join("app.log"), "canonical log").unwrap();
+        fs::write(new_dir.join("app.log.old"), "canonical old log").unwrap();
+
+        let outcome = migrate_app_data(&old_dir, &new_dir);
+
+        assert!(matches!(outcome, MigrationOutcome::Migrated { .. }));
+        assert_eq!(
+            fs::read_to_string(new_dir.join("app.log")).unwrap(),
+            "canonical log"
+        );
+        assert!(new_dir.join("accounts").join("sequence.json").exists());
+        assert!(new_dir.join("history.sqlite3").exists());
+    }
+
+    #[test]
     fn no_op_when_old_dir_absent() {
         let root = tempdir().unwrap();
         let old_dir = root.path().join("old"); // never created
@@ -467,6 +530,43 @@ mod tests {
         assert_eq!(outcome, MigrationOutcome::NoOldData);
         assert!(!new_dir.exists());
         assert!(!old_dir.exists());
+    }
+
+    #[test]
+    fn migration_chain_prefers_the_most_recent_populated_identifier() {
+        let root = tempdir().unwrap();
+        let recent = root.path().join("dev.apex36.cc-logins");
+        let ancient = root.path().join("dev.apex36.claude-account-switcher");
+        let new_dir = root.path().join("cc-logins");
+        populate_old_dir(&recent);
+        fs::create_dir_all(&ancient).unwrap();
+        fs::write(ancient.join("settings.json"), r#"{"threshold":50}"#).unwrap();
+
+        let outcome = migrate_app_data_chain(&[recent.clone(), ancient.clone()], &new_dir);
+
+        assert!(matches!(outcome, MigrationOutcome::Migrated { .. }));
+        assert_eq!(
+            fs::read_to_string(new_dir.join("settings.json")).unwrap(),
+            r#"{"threshold":90}"#
+        );
+        assert!(
+            ancient.exists(),
+            "the older candidate must remain untouched"
+        );
+    }
+
+    #[test]
+    fn migration_chain_falls_back_to_the_older_identifier() {
+        let root = tempdir().unwrap();
+        let missing_recent = root.path().join("dev.apex36.cc-logins");
+        let ancient = root.path().join("dev.apex36.claude-account-switcher");
+        let new_dir = root.path().join("cc-logins");
+        populate_old_dir(&ancient);
+
+        let outcome = migrate_app_data_chain(&[missing_recent, ancient], &new_dir);
+
+        assert!(matches!(outcome, MigrationOutcome::Migrated { .. }));
+        assert!(new_dir.join("accounts").join("sequence.json").exists());
     }
 
     #[test]
@@ -569,5 +669,18 @@ mod tests {
         assert!(!dir_has_content(&missing));
         assert!(!dir_has_content(&empty));
         assert!(dir_has_content(&populated));
+    }
+
+    #[test]
+    fn managed_content_ignores_only_diagnostic_logs() {
+        let root = tempdir().unwrap();
+        let dir = root.path().join("cc-logins");
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("app.log"), "current").unwrap();
+        fs::write(dir.join("app.log.old"), "previous").unwrap();
+        assert!(!dir_has_managed_content(&dir));
+
+        fs::write(dir.join("settings.json"), "{}").unwrap();
+        assert!(dir_has_managed_content(&dir));
     }
 }

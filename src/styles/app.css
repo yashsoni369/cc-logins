@@ -500,6 +500,8 @@ hr.rule {
   font-size: 12px;
   color: var(--muted);
   border-right: 1px solid var(--line);
+  cursor: pointer;
+  user-select: none;
 }
 .seg span:last-child {
   border-right: 0;
