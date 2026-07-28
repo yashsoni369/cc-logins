@@ -630,8 +630,8 @@ fn wrap_platform_bytes(plaintext: &[u8]) -> (ProtectionScheme, Vec<u8>) {
 }
 
 /// Encode `plaintext` into the versioned on-disk envelope described above.
-fn wrap_credential(plaintext: &str) -> Vec<u8> {
-    let (scheme, protected) = wrap_platform_bytes(plaintext.as_bytes());
+pub(crate) fn protect_bytes(plaintext: &[u8]) -> Vec<u8> {
+    let (scheme, protected) = wrap_platform_bytes(plaintext);
     let envelope = CredentialEnvelope {
         v: CREDENTIAL_ENVELOPE_VERSION,
         scheme: scheme.as_str().to_string(),
@@ -639,6 +639,29 @@ fn wrap_credential(plaintext: &str) -> Vec<u8> {
     };
     // A struct of plain String fields cannot fail to serialize.
     serde_json::to_vec(&envelope).expect("credential envelope serialization cannot fail")
+}
+
+fn wrap_credential(plaintext: &str) -> Vec<u8> {
+    protect_bytes(plaintext.as_bytes())
+}
+
+pub(crate) fn unprotect_bytes(raw: &[u8]) -> Result<Vec<u8>, String> {
+    let envelope = serde_json::from_slice::<CredentialEnvelope>(raw)
+        .map_err(|error| format!("protected artifact is not a valid envelope: {error}"))?;
+    if envelope.v != CREDENTIAL_ENVELOPE_VERSION {
+        return Err(format!(
+            "unsupported protected artifact version {}",
+            envelope.v
+        ));
+    }
+    let protected = BASE64_STANDARD
+        .decode(&envelope.data)
+        .map_err(|error| format!("protected artifact data is not valid base64: {error}"))?;
+    match envelope.scheme.as_str() {
+        "dpapi" => unwrap_dpapi(&protected),
+        "plain" | "keychain" => Ok(protected),
+        other => Err(format!("unrecognized protected artifact scheme {other:?}")),
+    }
 }
 
 /// Decode a stored credential blob, accepting both the current versioned
@@ -660,17 +683,9 @@ fn unwrap_credential(raw: &str) -> Result<String, String> {
     let trimmed = raw.trim();
 
     if let Ok(envelope) = serde_json::from_str::<CredentialEnvelope>(trimmed) {
-        let protected = BASE64_STANDARD
-            .decode(&envelope.data)
-            .map_err(|e| format!("credential envelope's data field is not valid base64: {e}"))?;
-        let plaintext = match envelope.scheme.as_str() {
-            "dpapi" => unwrap_dpapi(&protected)?,
-            // The file backend never writes "keychain" envelopes (see the
-            // module doc comment), but a byte-for-byte future migration
-            // scenario is still handled rather than rejected outright.
-            "plain" | "keychain" => protected,
-            other => return Err(format!("unrecognized credential envelope scheme {other:?}")),
-        };
+        let raw = serde_json::to_vec(&envelope)
+            .map_err(|error| format!("could not normalize credential envelope: {error}"))?;
+        let plaintext = unprotect_bytes(&raw)?;
         return String::from_utf8(plaintext)
             .map_err(|e| format!("decrypted credential was not valid UTF-8: {e}"));
     }
@@ -872,6 +887,24 @@ mod macos_keychain {
 }
 
 use macos_keychain::KeychainError;
+
+#[cfg(target_os = "macos")]
+pub(crate) fn recovery_keychain_get(account: &str) -> Result<Option<String>, String> {
+    macos_keychain::get_password("cc-logins-switch-recovery", account)
+        .map_err(|error| error.to_string())
+}
+
+#[cfg(target_os = "macos")]
+pub(crate) fn recovery_keychain_set(account: &str, value: &str) -> Result<(), String> {
+    macos_keychain::set_password("cc-logins-switch-recovery", account, value)
+        .map_err(|error| error.to_string())
+}
+
+#[cfg(target_os = "macos")]
+pub(crate) fn recovery_keychain_delete(account: &str) -> Result<(), String> {
+    macos_keychain::delete_password("cc-logins-switch-recovery", account)
+        .map_err(|error| error.to_string())
+}
 
 // ---------------------------------------------------------------------------
 // CredentialStore.

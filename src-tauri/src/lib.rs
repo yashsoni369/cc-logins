@@ -23,6 +23,7 @@ pub mod oauth_quarantine;
 pub mod oauth_refresh;
 pub mod paths;
 pub mod poller;
+pub mod recovery_store;
 pub mod resilience;
 pub mod runtime;
 pub mod settings;
