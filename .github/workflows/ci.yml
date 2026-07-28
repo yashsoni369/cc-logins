@@ -4,6 +4,7 @@ on:
   push:
     branches: [main]
   pull_request:
+  workflow_dispatch:
 
 # Cancel superseded runs on the same ref so pushing twice in a row doesn't
 # burn double the CI minutes.
@@ -51,7 +52,13 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, windows-latest, macos-latest]
+        # Windows on every push; Linux and macOS on pull requests and manual
+        # runs only. They are the slow legs, and a push to main is usually the
+        # tail of a PR that already ran all three.
+        os: >-
+          ${{ fromJSON(github.event_name == 'push'
+              && '["windows-latest"]'
+              || '["ubuntu-latest","windows-latest","macos-latest"]') }}
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
@@ -105,8 +112,10 @@ jobs:
       - name: Build frontend (for tauri-build)
         run: pnpm build
 
+      # Runs on every leg, not just ubuntu: the matrix is now event-dependent,
+      # and gating this to one OS would silently stop checking formatting on
+      # pushes that no longer include it.
       - name: cargo fmt --check
-        if: matrix.os == 'ubuntu-latest'
         working-directory: src-tauri
         run: cargo fmt --all -- --check
 
