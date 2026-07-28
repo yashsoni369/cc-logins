@@ -2,8 +2,28 @@
   "name": "cc-logins",
   "private": true,
   "version": "0.1.0",
+  "description": "Quota visibility and account switching for Claude Code",
   "type": "module",
   "packageManager": "pnpm@10.14.0",
+  "author": "Yash Soni",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/yashsoni369/cc-logins.git"
+  },
+  "homepage": "https://github.com/yashsoni369/cc-logins",
+  "bugs": {
+    "url": "https://github.com/yashsoni369/cc-logins/issues"
+  },
+  "keywords": [
+    "claude",
+    "claude-code",
+    "account-switcher",
+    "quota",
+    "tauri",
+    "tray",
+    "desktop"
+  ],
   "scripts": {
     "dev": "vite",
     "build": "tsc && vite build",

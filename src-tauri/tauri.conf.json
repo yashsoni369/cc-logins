@@ -1,6 +1,7 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "cc-logins",
+  "productName": "CC Logins",
+  "mainBinaryName": "cc-logins",
   "version": "0.1.0",
   "identifier": "dev.apex36.cc-logins",
   "build": {
@@ -14,7 +15,7 @@
     "windows": [
       {
         "label": "main",
-        "title": "cc-logins",
+        "title": "CC Logins",
         "width": 1000,
         "height": 660,
         "minWidth": 720,
@@ -54,9 +55,16 @@
       "icons/icon.ico"
     ],
     "category": "DeveloperTool",
-    "shortDescription": "Switch between multiple Claude Code accounts",
+    "shortDescription": "Quota visibility and account switching for Claude Code",
     "longDescription": "A tray application that shows which Claude Code account is active, how much 5-hour and 7-day quota each account has left, and switches between them manually or automatically before a limit lands. It never routes model traffic and has no server.",
     "copyright": "MIT. Portions ported from claude-swap (MIT), realiti4/claude-swap.",
+    "licenseFile": "../LICENSE",
+    "homepage": "https://github.com/yashsoni369/cc-logins",
+    "publisher": "Yash Soni",
+    "macOS": {
+      "minimumSystemVersion": "10.15",
+      "signingIdentity": "-"
+    },
     "windows": {
       "nsis": {
         "installMode": "currentUser"

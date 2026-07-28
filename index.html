@@ -3,7 +3,12 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>cc-logins</title>
+    <!-- Makes the pre-paint background and default scrollbars follow the
+         theme, which is what actually removes the white flash on launch.
+         (`theme-color` does nothing in WebView2/WKWebView — it is an Android
+         Chrome/PWA feature — so it is deliberately absent.) -->
+    <meta name="color-scheme" content="dark light" />
+    <title>CC Logins</title>
     <script>
       // Prevents a flash of the wrong theme: applies the last-known resolved
       // theme (cached by src/lib/useTheme.ts) before the app bundle loads.
@@ -14,7 +19,7 @@
       // different value once it arrives.
       (function () {
         try {
-          var cached = localStorage.getItem("cswap:resolved-theme");
+          var cached = localStorage.getItem("cc-logins:resolved-theme");
           if (cached === "day") document.documentElement.setAttribute("data-theme", "light");
           else if (cached === "night") document.documentElement.setAttribute("data-theme", "dark");
         } catch (e) {}

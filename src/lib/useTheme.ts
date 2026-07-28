@@ -39,7 +39,7 @@ export type Theme = Settings["theme"];
 export type ResolvedTheme = "day" | "night";
 
 /** Must match the key read by the inline scripts in index.html / popover.html. */
-export const RESOLVED_THEME_STORAGE_KEY = "cswap:resolved-theme";
+export const RESOLVED_THEME_STORAGE_KEY = "cc-logins:resolved-theme";
 
 function systemPrefersDark(): boolean {
   return typeof window !== "undefined" && typeof window.matchMedia === "function"

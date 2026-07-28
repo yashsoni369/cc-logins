@@ -250,7 +250,7 @@ export const mockEnvironments: Environment[] = [
   {
     id: "wsl-ubuntu",
     label: "WSL · Ubuntu",
-    path: "~/.local/share/claude-swap",
+    path: "~/.local/share/dev.apex36.cc-logins",
     kind: "wsl",
     status: "asleep",
     lastSeenSeconds: 8040, // ~2h 14m

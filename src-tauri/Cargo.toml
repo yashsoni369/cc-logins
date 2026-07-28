@@ -1,10 +1,23 @@
 [package]
 name = "cc-logins"
 version = "0.1.0"
-description = "Tray application for switching between multiple Claude Code accounts"
+# Kept byte-identical to package.json's `description` and tauri.conf.json's
+# `bundle.shortDescription`. Tauri falls back to these Cargo fields when the
+# bundle config omits them, and they surface in the deb/RPM metadata, so drift
+# between the three shows up in shipped installers.
+description = "Quota visibility and account switching for Claude Code"
+# Tauri prefers Cargo `authors` over `bundle.publisher` for the deb Maintainer.
 authors = ["Yash Soni"]
+repository = "https://github.com/yashsoni369/cc-logins"
+homepage = "https://github.com/yashsoni369/cc-logins"
+# This is an application, never a published crate.
+publish = false
 edition = "2021"
-rust-version = "1.77"
+# 1.81, not Tauri's own 1.77 floor: `resilience.rs`'s panic hook takes a
+# `std::panic::PanicHookInfo`, which was only stabilised (renamed from
+# `PanicInfo`) in 1.81. Declaring 1.77 was inaccurate — `cargo clippy` caught
+# it via `clippy::incompatible_msrv`.
+rust-version = "1.81"
 license = "MIT"
 
 # Portions of the credential, path and usage logic are ported from

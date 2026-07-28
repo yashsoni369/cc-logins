@@ -109,7 +109,7 @@ recoverable and a wiped vault is not.
 
 Prerequisites:
 
-- [Rust](https://rustup.rs/), a recent stable toolchain (1.77 or newer)
+- [Rust](https://rustup.rs/), a recent stable toolchain (1.81 or newer)
 - [Node.js](https://nodejs.org/), a recent LTS (Vite 7 needs 20.19+ or 22.12+)
 - [pnpm](https://pnpm.io/) (this repo pins `pnpm@10.14.0` via `packageManager`)
 - Platform build tools for Tauri:
