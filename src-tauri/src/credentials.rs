@@ -65,6 +65,13 @@ use serde_json::{Map, Value};
 /// and new items can coexist during a migration.
 pub const SECURITY_SERVICE: &str = "claude-swap";
 
+/// This app's OWN Keychain service, distinct from the CLI's above.
+///
+/// Sharing `claude-swap` made `import_from_cswap` overwrite the CLI's backups
+/// whenever slot number and email matched — the normal case — contradicting its
+/// documented "read-only on the source" guarantee on macOS only.
+pub const GUI_SECURITY_SERVICE: &str = "cc-logins";
+
 /// Service name of Claude Code's *active* OAuth credential in the macOS
 /// Keychain (read by Claude Code itself; we read/write it when switching
 /// accounts).
@@ -161,6 +168,16 @@ pub use crate::paths::Platform;
 pub trait StoreHost {
     fn platform(&self) -> Platform;
     fn credentials_dir(&self) -> PathBuf;
+
+    /// Keychain service name for this host's per-account backups.
+    ///
+    /// Keychain items are keyed by service + account only — `credentials_dir`
+    /// is ignored on that backend — so two hosts sharing a service name share
+    /// one namespace no matter how separate their directories are. Defaults to
+    /// the CLI's, which is right for [`CswapStoreHost`]; this app overrides it.
+    fn keychain_service(&self) -> &str {
+        SECURITY_SERVICE
+    }
 }
 
 /// Which backend the most recent active-credential write landed on. Mirrors
@@ -1434,21 +1451,37 @@ impl<H: StoreHost> CredentialStore<H> {
     // successful Keychain write therefore reconciles the `.enc` away
     // (correctness-critical, not best-effort).
 
+    /// This host's Keychain service, owned so it can outlive a `&self` borrow
+    /// inside a `kc_call` closure.
+    fn kc_service(&self) -> String {
+        self.host.keychain_service().to_string()
+    }
+
+    /// Lowercased for identity keys, because Linux filenames are
+    /// case-sensitive and Windows/macOS are not — `User@X.com` and
+    /// `user@x.com` were two slots on one platform and one slot (silently
+    /// overwriting each other) on the others.
+    fn key_email(email: &str) -> String {
+        email.trim().to_ascii_lowercase()
+    }
+
     fn backup_enc_path(&self, account_num: &str, email: &str) -> PathBuf {
+        let email = Self::key_email(email);
         self.host
             .credentials_dir()
             .join(format!(".creds-{account_num}-{email}.enc"))
     }
 
     fn backup_username(&self, account_num: &str, email: &str) -> String {
-        format!("account-{account_num}-{email}")
+        format!("account-{account_num}-{}", Self::key_email(email))
     }
 
     /// Read a per-account backup from the Keychain only (no file fallback).
     /// `""` when absent; propagates a real Keychain failure.
     fn kc_read_backup(&mut self, account_num: &str, email: &str) -> Result<String, KeychainError> {
         let account = self.backup_username(account_num, email);
-        let creds = self.kc_call(|| macos_keychain::get_password(SECURITY_SERVICE, &account))?;
+        let service = self.kc_service();
+        let creds = self.kc_call(|| macos_keychain::get_password(&service, &account))?;
         Ok(creds.unwrap_or_default())
     }
 
@@ -1459,12 +1492,14 @@ impl<H: StoreHost> CredentialStore<H> {
         credentials: &str,
     ) -> Result<(), KeychainError> {
         let account = self.backup_username(account_num, email);
-        self.kc_call(|| macos_keychain::set_password(SECURITY_SERVICE, &account, credentials))
+        let service = self.kc_service();
+        self.kc_call(|| macos_keychain::set_password(&service, &account, credentials))
     }
 
     fn kc_delete_backup(&mut self, account_num: &str, email: &str) -> Result<(), KeychainError> {
         let account = self.backup_username(account_num, email);
-        self.kc_call(|| macos_keychain::delete_password(SECURITY_SERVICE, &account))
+        let service = self.kc_service();
+        self.kc_call(|| macos_keychain::delete_password(&service, &account))
     }
 
     fn kc_delete_backup_prev(
@@ -1473,7 +1508,8 @@ impl<H: StoreHost> CredentialStore<H> {
         email: &str,
     ) -> Result<(), KeychainError> {
         let account = self.prev_backup_username(account_num, email);
-        self.kc_call(|| macos_keychain::delete_password(SECURITY_SERVICE, &account))
+        let service = self.kc_service();
+        self.kc_call(|| macos_keychain::delete_password(&service, &account))
     }
 
     fn delete_backup_keychain_quiet(&mut self, account_num: &str, email: &str) {
@@ -1716,6 +1752,7 @@ impl<H: StoreHost> CredentialStore<H> {
     // copy just for recovery.
 
     fn prev_backup_path(&self, account_num: &str, email: &str) -> PathBuf {
+        let email = Self::key_email(email);
         self.host
             .credentials_dir()
             .join(format!(".creds-{account_num}-{email}.enc.prev"))
@@ -1728,12 +1765,36 @@ impl<H: StoreHost> CredentialStore<H> {
     /// Retain the slot's current backup as `.prev` before it is replaced.
     fn retain_previous_backup(&mut self, account_num: &str, email: &str, new_credentials: &str) {
         let current = self.read_account_credentials(account_num, email);
-        if current.is_empty() || current == new_credentials {
+
+        // Empty can mean "no backup" or "a backup exists that this platform
+        // cannot decode" — a DPAPI envelope read on Linux/macOS. Treating the
+        // second as the first destroyed the only copy on the next write, which
+        // this module's docs promise cannot happen. Keep the raw bytes.
+        if current.is_empty() {
+            let path = self.backup_enc_path(account_num, email);
+            if path.exists() {
+                let prev = self.prev_backup_path(account_num, email);
+                if let Err(e) = std::fs::copy(&path, &prev) {
+                    log::warn!(
+                        "Failed to retain an undecodable backup for account {account_num}: {e}"
+                    );
+                } else {
+                    log::warn!(
+                        "Backup for account {account_num} could not be decoded on this platform; \
+                         retained the raw bytes as .prev rather than overwriting them"
+                    );
+                }
+            }
+            return;
+        }
+
+        if current == new_credentials {
             return;
         }
         let result: Result<(), String> = if self.use_keychain() {
             let username = self.prev_backup_username(account_num, email);
-            self.kc_call(|| macos_keychain::set_password(SECURITY_SERVICE, &username, &current))
+            let service = self.kc_service();
+            self.kc_call(|| macos_keychain::set_password(&service, &username, &current))
                 .map_err(|e| e.to_string())
         } else {
             let path = self.prev_backup_path(account_num, email);
@@ -1765,7 +1826,8 @@ impl<H: StoreHost> CredentialStore<H> {
         }
         if self.host.platform() == Platform::Macos {
             let username = self.prev_backup_username(account_num, email);
-            match self.kc_call(|| macos_keychain::get_password(SECURITY_SERVICE, &username)) {
+            let service = self.kc_service();
+            match self.kc_call(|| macos_keychain::get_password(&service, &username)) {
                 Ok(v) => return v.unwrap_or_default(),
                 Err(e) => log::warn!("Failed to read .prev from Keychain: {e}"),
             }

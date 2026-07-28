@@ -55,17 +55,73 @@ const POLL_INTERVAL: Duration = Duration::from_millis(500);
 /// implements.
 const LOGIN_TIMEOUT: Duration = Duration::from_secs(10 * 60);
 
+/// A "tracking" child that exits faster than this never really hosted the
+/// window (unsupported flag, or an undocumented hand-off), so its exit is not
+/// a cancellation: fall back to polling for the credential instead.
+const MIN_WINDOW_LIFETIME: Duration = Duration::from_secs(3);
+
+/// A Linux terminal emulator, its documented "run this argv" flags, and
+/// whether the process we spawn actually lives as long as the window.
+#[derive(Debug, Clone, Copy)]
+struct LinuxTerminal {
+    /// Binary name looked up on `PATH`.
+    bin: &'static str,
+    /// Options ending in the flag that takes `program args...` as the
+    /// remainder of the command line.
+    prefix: &'static [&'static str],
+    /// `true` only when the spawned process *is* the window, so its exit
+    /// means "the user closed it". `false` when it forks or hands off.
+    tracks_window_lifetime: bool,
+}
+
 /// Linux terminal emulators to try, in preference order. The first one found
 /// on `PATH` is used; if none is, the caller gets [`LoginError::NoTerminalAvailable`]
 /// so the UI can fall back to the paste-a-token path instead of failing
 /// obscurely.
-const LINUX_TERMINALS: &[&str] = &[
-    "x-terminal-emulator",
-    "gnome-terminal",
-    "konsole",
-    "xfce4-terminal",
-    "xterm",
+const LINUX_TERMINALS: &[LinuxTerminal] = &[
+    // `--wait` blocks until the terminal's child exits (it otherwise hands
+    // off to gnome-terminal-server); `--` replaces the deprecated `-e`.
+    LinuxTerminal {
+        bin: "gnome-terminal",
+        prefix: &["--wait", "--"],
+        tracks_window_lifetime: true,
+    },
+    // Konsole forks by default; `--nofork`/`--separate` keeps it in the
+    // foreground, and `-e` catches every following argument.
+    LinuxTerminal {
+        bin: "konsole",
+        prefix: &["--nofork", "-e"],
+        tracks_window_lifetime: true,
+    },
+    // `-e` here takes a single command *string*; `-x` takes the remainder as
+    // an argv. `--disable-server` stops it attaching to an existing instance.
+    LinuxTerminal {
+        bin: "xfce4-terminal",
+        prefix: &["--disable-server", "-x"],
+        tracks_window_lifetime: true,
+    },
+    // `-e` is program + argv and must be last; the xterm process is the window.
+    LinuxTerminal {
+        bin: "xterm",
+        prefix: &["-e"],
+        tracks_window_lifetime: true,
+    },
+    // Last resort: an alternatives symlink to an unknown terminal. Only the
+    // Debian Policy `-e command [args]` form is safe, and its exit is not.
+    LinuxTerminal {
+        bin: "x-terminal-emulator",
+        prefix: &["-e"],
+        tracks_window_lifetime: false,
+    },
 ];
+
+/// Shape used for a terminal name not in [`LINUX_TERMINALS`]: the most
+/// conservative one, trusting neither extra flags nor the child's exit.
+const UNKNOWN_LINUX_TERMINAL: LinuxTerminal = LinuxTerminal {
+    bin: "",
+    prefix: &["-e"],
+    tracks_window_lifetime: false,
+};
 
 // ---------------------------------------------------------------------------
 // Public types
@@ -148,12 +204,29 @@ fn find_on_path(name: &str) -> Option<PathBuf> {
     for dir in std::env::split_paths(&path_var) {
         for candidate in &candidates {
             let full = dir.join(candidate);
-            if full.is_file() {
+            if is_executable_file(&full) {
                 return Some(full);
             }
         }
     }
     None
+}
+
+/// A regular file the current user could actually exec. On unix a
+/// non-executable `claude` earlier on `PATH` must not shadow the real one.
+#[cfg(unix)]
+fn is_executable_file(path: &Path) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::metadata(path)
+        .map(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
+        .unwrap_or(false)
+}
+
+/// Windows has no executable bit — extension matching (`PATHEXT`) already
+/// does this job in [`exe_candidates`].
+#[cfg(not(unix))]
+fn is_executable_file(path: &Path) -> bool {
+    path.is_file()
 }
 
 #[cfg(windows)]
@@ -197,13 +270,11 @@ enum LaunchPlan {
     Argv {
         program: String,
         args: Vec<String>,
-        /// `true` when the spawned child *is* the terminal window (Linux: we
-        /// spawn the terminal emulator directly), so the child process
-        /// exiting means the window closed and can be used to detect
-        /// cancellation. `false` when the spawned process only hands off to
-        /// a window it doesn't own the lifetime of (macOS: `osascript`
-        /// returns as soon as it has told Terminal.app to run the script,
-        /// not when that window closes).
+        /// `true` when the spawned child *is* the terminal window, so its
+        /// exit means the window closed (per-terminal on Linux — see
+        /// [`LINUX_TERMINALS`]). `false` when it only hands off to a window
+        /// whose lifetime it does not own (macOS `osascript`, a forking or
+        /// client/server terminal), where its exit says nothing at all.
         tracks_window_lifetime: bool,
     },
 }
@@ -268,35 +339,27 @@ fn macos_launch_plan(config_dir: &Path) -> LaunchPlan {
 }
 
 /// The launch argv for a specific Linux terminal binary (already resolved to
-/// exist on `PATH` by the caller). `gnome-terminal` uses the modern `--`
-/// separator; every other terminal in [`LINUX_TERMINALS`] accepts the older
-/// `-e <program> <args...>` form (an argv, not a shell string — passing the
-/// whole shell command as one `-e` argument is a common bug: several of
-/// these terminals then try to exec a literal file named that whole string).
+/// exist on `PATH` by the caller). Each terminal's flags come from its own
+/// [`LINUX_TERMINALS`] entry; the tail is always `bash -c <shell command>`,
+/// an argv rather than one shell string.
 fn linux_launch_plan(terminal: &str, config_dir: &Path) -> LaunchPlan {
+    let spec = LINUX_TERMINALS
+        .iter()
+        .copied()
+        .find(|t| t.bin == terminal)
+        .unwrap_or(UNKNOWN_LINUX_TERMINAL);
     let shell_cmd = format!(
         "export CLAUDE_CONFIG_DIR={}; claude auth login",
         shell_quote_single(&config_dir.display().to_string())
     );
-    let args = if terminal == "gnome-terminal" {
-        vec![
-            "--".to_string(),
-            "bash".to_string(),
-            "-c".to_string(),
-            shell_cmd,
-        ]
-    } else {
-        vec![
-            "-e".to_string(),
-            "bash".to_string(),
-            "-c".to_string(),
-            shell_cmd,
-        ]
-    };
+    let mut args: Vec<String> = spec.prefix.iter().map(|s| (*s).to_string()).collect();
+    args.push("bash".to_string());
+    args.push("-c".to_string());
+    args.push(shell_cmd);
     LaunchPlan::Argv {
         program: terminal.to_string(),
         args,
-        tracks_window_lifetime: true,
+        tracks_window_lifetime: spec.tracks_window_lifetime,
     }
 }
 
@@ -305,7 +368,10 @@ fn linux_launch_plan(terminal: &str, config_dir: &Path) -> LaunchPlan {
 /// without depending on what is actually installed on the machine running
 /// the tests.
 fn find_linux_terminal(exists: impl Fn(&str) -> bool) -> Option<&'static str> {
-    LINUX_TERMINALS.iter().copied().find(|t| exists(t))
+    LINUX_TERMINALS
+        .iter()
+        .find(|t| exists(t.bin))
+        .map(|t| t.bin)
 }
 
 /// Build the launch plan for the current platform. `Err(NoTerminalAvailable)`
@@ -460,7 +526,8 @@ fn run_login_blocking(
     };
 
     let credentials_path = config_dir.join(".credentials.json");
-    let deadline = Instant::now() + LOGIN_TIMEOUT;
+    let started = Instant::now();
+    let deadline = started + LOGIN_TIMEOUT;
 
     loop {
         if let Some(creds) = try_read_valid_credential(&credentials_path) {
@@ -475,6 +542,19 @@ fn run_login_blocking(
         if let Some(child) = window_child.as_mut() {
             let wait_result = child.try_wait();
             match wait_result {
+                Ok(Some(status)) if started.elapsed() < MIN_WINDOW_LIFETIME => {
+                    window_child = None;
+                    if !status.success() {
+                        // Too fast *and* failed: the emulator rejected our
+                        // flags, so no window ever opened. Don't wait 10 min.
+                        return Err(LoginError::Io(io::Error::other(
+                            "terminal emulator exited immediately without opening a window",
+                        )));
+                    }
+                    // Exited cleanly and instantly: a hand-off to a window we
+                    // can't observe. Keep polling for the credential.
+                    log::info!("login terminal handed off; falling back to credential polling");
+                }
                 Ok(Some(_status)) => {
                     // Window closed. Give the filesystem one last instant in
                     // case completion raced the window closing itself, then
@@ -741,18 +821,46 @@ mod tests {
 
     // -- Linux terminal selection ---------------------------------------------
 
+    /// Destructure a Linux plan into (args, tracks_window_lifetime), checking
+    /// the program name and the always-identical `bash -c <cmd>` tail.
+    fn linux_plan_parts(terminal: &str, dir: &Path) -> (Vec<String>, bool) {
+        match linux_launch_plan(terminal, dir) {
+            LaunchPlan::Argv {
+                program,
+                args,
+                tracks_window_lifetime,
+            } => {
+                assert_eq!(program, terminal);
+                let n = args.len();
+                assert_eq!(args[n - 3], "bash");
+                assert_eq!(args[n - 2], "-c");
+                assert!(args[n - 1].contains("CLAUDE_CONFIG_DIR="));
+                assert!(args[n - 1].contains("claude auth login"));
+                (args, tracks_window_lifetime)
+            }
+            other => panic!("expected Argv, got {other:?}"),
+        }
+    }
+
     #[test]
     fn find_linux_terminal_honors_preference_order() {
-        // Pretend both gnome-terminal and xterm exist: x-terminal-emulator
-        // is not present, so gnome-terminal (next in LINUX_TERMINALS) wins.
+        // gnome-terminal outranks xterm.
         let found = find_linux_terminal(|name| matches!(name, "gnome-terminal" | "xterm"));
         assert_eq!(found, Some("gnome-terminal"));
     }
 
     #[test]
-    fn find_linux_terminal_falls_back_to_last_resort_xterm() {
-        let found = find_linux_terminal(|name| name == "xterm");
+    fn find_linux_terminal_prefers_known_terminals_over_x_terminal_emulator() {
+        // x-terminal-emulator points at an unknown target, so it is the last
+        // resort — never chosen while a terminal we have flags for exists.
+        let found = find_linux_terminal(|name| matches!(name, "x-terminal-emulator" | "xterm"));
         assert_eq!(found, Some("xterm"));
+    }
+
+    #[test]
+    fn find_linux_terminal_falls_back_to_x_terminal_emulator() {
+        let found = find_linux_terminal(|name| name == "x-terminal-emulator");
+        assert_eq!(found, Some("x-terminal-emulator"));
     }
 
     #[test]
@@ -761,54 +869,86 @@ mod tests {
     }
 
     #[test]
-    fn linux_launch_plan_gnome_terminal_uses_double_dash_separator() {
+    fn linux_launch_plan_gnome_terminal_waits_and_uses_double_dash() {
         let dir = Path::new("/tmp/claude-login-abc");
-        match linux_launch_plan("gnome-terminal", dir) {
-            LaunchPlan::Argv {
-                program,
-                args,
-                tracks_window_lifetime,
-            } => {
-                assert_eq!(program, "gnome-terminal");
-                assert_eq!(args[0], "--");
-                assert_eq!(args[1], "bash");
-                assert_eq!(args[2], "-c");
-                assert!(args[3].contains("CLAUDE_CONFIG_DIR="));
-                assert!(args[3].contains("claude auth login"));
-                // We spawn the terminal emulator directly here: its exit
-                // really does mean the window closed.
-                assert!(tracks_window_lifetime);
-            }
-            other => panic!("expected Argv, got {other:?}"),
-        }
+        let (args, tracks) = linux_plan_parts("gnome-terminal", dir);
+        // `--wait` makes the process outlive the hand-off to
+        // gnome-terminal-server, so its exit honestly means "window closed".
+        assert_eq!(args[0], "--wait");
+        assert_eq!(args[1], "--");
+        assert!(tracks);
+    }
+
+    #[test]
+    fn linux_launch_plan_konsole_uses_nofork_before_dash_e() {
+        let dir = Path::new("/tmp/claude-login-abc");
+        let (args, tracks) = linux_plan_parts("konsole", dir);
+        // -e swallows everything after it, so --nofork must precede it.
+        assert_eq!(args[0], "--nofork");
+        assert_eq!(args[1], "-e");
+        assert!(tracks);
+    }
+
+    #[test]
+    fn linux_launch_plan_xfce4_uses_dash_x_not_dash_e() {
+        let dir = Path::new("/tmp/claude-login-abc");
+        let (args, tracks) = linux_plan_parts("xfce4-terminal", dir);
+        // -e takes a single command string; -x takes the remainder as argv.
+        assert_eq!(args[0], "--disable-server");
+        assert_eq!(args[1], "-x");
+        assert!(!args.contains(&"-e".to_string()));
+        assert!(tracks);
     }
 
     #[test]
     fn linux_launch_plan_xterm_uses_dash_e_argv_form() {
         let dir = Path::new("/tmp/claude-login-abc");
-        match linux_launch_plan("xterm", dir) {
-            LaunchPlan::Argv { program, args, .. } => {
-                assert_eq!(program, "xterm");
-                // -e takes a program + its own argv, NOT one shell-string
-                // argument — passing `"bash -c '...'"` as a single -e
-                // argument is the classic bug this shape avoids.
-                assert_eq!(args, vec!["-e", "bash", "-c", args[3].as_str()]);
-            }
-            other => panic!("expected Argv, got {other:?}"),
+        let (args, tracks) = linux_plan_parts("xterm", dir);
+        // -e takes a program + its own argv, NOT one shell-string argument.
+        assert_eq!(args[0], "-e");
+        assert_eq!(args.len(), 4);
+        assert!(tracks);
+    }
+
+    #[test]
+    fn linux_launch_plan_x_terminal_emulator_is_conservative() {
+        let dir = Path::new("/tmp/claude-login-abc");
+        let (args, tracks) = linux_plan_parts("x-terminal-emulator", dir);
+        // Only the Debian Policy `-e command [args]` form, and its target may
+        // fork — so its exit must never be read as a cancellation.
+        assert_eq!(args[0], "-e");
+        assert_eq!(args.len(), 4);
+        assert!(!tracks);
+    }
+
+    #[test]
+    fn linux_launch_plan_unknown_terminal_falls_back_to_conservative_shape() {
+        let dir = Path::new("/tmp/claude-login-abc");
+        let (args, tracks) = linux_plan_parts("some-future-terminal", dir);
+        assert_eq!(args[0], "-e");
+        assert!(!tracks);
+    }
+
+    #[test]
+    fn linux_terminal_table_flags_end_with_a_remainder_taking_flag() {
+        // Every entry's last prefix option must be the one that consumes
+        // `program args...`, or the tail would be parsed as options.
+        for t in LINUX_TERMINALS {
+            let last = t.prefix.last().copied().unwrap_or_default();
+            assert!(
+                matches!(last, "-e" | "-x" | "--"),
+                "{} ends its flags with {last:?}",
+                t.bin
+            );
         }
     }
 
     #[test]
     fn linux_shell_command_quotes_path_containing_spaces_and_quotes() {
         let dir = Path::new("/tmp/Jane's dir");
-        match linux_launch_plan("xterm", dir) {
-            LaunchPlan::Argv { args, .. } => {
-                let shell_cmd = &args[3];
-                // Single-quoted with the embedded `'` escaped via '\''.
-                assert!(shell_cmd.contains("'/tmp/Jane'\\''s dir'"));
-            }
-            other => panic!("expected Argv, got {other:?}"),
-        }
+        let (args, _) = linux_plan_parts("xterm", dir);
+        // Single-quoted with the embedded `'` escaped via '\''.
+        assert!(args[3].contains("'/tmp/Jane'\\''s dir'"));
     }
 
     // -- shell / AppleScript quoting helpers ----------------------------------
@@ -827,6 +967,18 @@ mod tests {
 
     // -- claude_binary / find_on_path ------------------------------------------
 
+    /// Write `name` into `dir`; on unix also give it `mode`.
+    fn plant_binary(dir: &Path, name: &str, _mode: u32) -> PathBuf {
+        let path = dir.join(name);
+        std::fs::write(&path, b"#!/bin/sh\n").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(_mode)).unwrap();
+        }
+        path
+    }
+
     #[test]
     fn find_on_path_locates_a_planted_executable() {
         let _lock = crate::test_support::env_lock();
@@ -835,15 +987,47 @@ mod tests {
         let file_name = "claude.cmd";
         #[cfg(not(windows))]
         let file_name = "claude";
-        std::fs::write(dir.path().join(file_name), b"@echo off\n").unwrap();
+        let planted = plant_binary(dir.path(), file_name, 0o755);
 
         let _path_guard = crate::test_support::EnvGuard::set(
             "PATH",
             dir.path().to_str().expect("utf8 temp path"),
         );
 
-        let found = claude_binary();
-        assert_eq!(found, Some(dir.path().join(file_name)));
+        assert_eq!(claude_binary(), Some(planted));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn find_on_path_skips_a_non_executable_file() {
+        let _lock = crate::test_support::env_lock();
+        let dir = TempDir::new().unwrap();
+        // A readable but non-executable `claude` must not shadow the real
+        // one — spawning it would fail opaquely with EACCES.
+        plant_binary(dir.path(), "claude", 0o644);
+
+        let _path_guard = crate::test_support::EnvGuard::set(
+            "PATH",
+            dir.path().to_str().expect("utf8 temp path"),
+        );
+
+        assert_eq!(claude_binary(), None);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn find_on_path_skips_non_executable_and_finds_the_later_real_one() {
+        let _lock = crate::test_support::env_lock();
+        let shadow = TempDir::new().unwrap();
+        let real = TempDir::new().unwrap();
+        plant_binary(shadow.path(), "claude", 0o644);
+        let planted = plant_binary(real.path(), "claude", 0o755);
+
+        let joined = std::env::join_paths([shadow.path(), real.path()]).unwrap();
+        let _path_guard =
+            crate::test_support::EnvGuard::set("PATH", joined.to_str().expect("utf8 temp path"));
+
+        assert_eq!(claude_binary(), Some(planted));
     }
 
     #[test]

@@ -13,6 +13,14 @@
 //! else. A healthy account is drawn in a near-neutral ink on the transparent
 //! face with no colour at all.
 //!
+//! ## Why colour is not the only state channel
+//!
+//! macOS renders the tray icon as a template image — AppKit keeps the alpha
+//! channel and throws the colour away, so the ramp above is invisible there.
+//! State is therefore *also* encoded as **severity pips** under the numerals
+//! (see [`State::severity_pips`]): none / one / two for healthy / caution /
+//! critical. Shape survives an alpha-only render; colour does not.
+//!
 //! ## Ambient theme vs. app theme
 //!
 //! The icon must also read against the **OS taskbar/menu-bar background**,
@@ -172,6 +180,25 @@ impl State {
         }
     }
 
+    /// Number of severity pips drawn under the numerals — the colour-free
+    /// half of the state encoding, and the only half macOS shows.
+    ///
+    /// Counting marks beats every ring-based alternative here: the ring is
+    /// dropped entirely below 24px, dashing it would collide with [`Stale`],
+    /// and thickness changes are not readable in isolation. Pips ride with
+    /// the glyph run, so they exist at every size.
+    ///
+    /// [`Stale`]: State::Stale
+    fn severity_pips(self) -> u32 {
+        match self {
+            State::Caution => 1,
+            State::Critical => 2,
+            // Healthy is unmarked; the rest carry their own glyph or ring
+            // treatment (arrow, dash, dashed track) already.
+            _ => 0,
+        }
+    }
+
     /// The unfilled portion of the ring. "Dimmer than the primary ink,
     /// legible against the ambient background" in both themes: on a dark
     /// taskbar that means lighter-than-background grey; on a light taskbar
@@ -297,6 +324,16 @@ pub fn render(spec: IconSpec, size: u32) -> Vec<u8> {
             let gx = ox + i as u32 * (GLYPH_W + GLYPH_GAP) * scale;
             blit_glyph(&mut pm, g, gx, oy, scale, ink);
         }
+
+        // The colour-free state signal. Drawn regardless of `draw_ring`, so
+        // it is still there at 16px where the ring is not.
+        draw_pips(
+            &mut pm,
+            spec.state.severity_pips(),
+            oy + total_h,
+            scale,
+            ink,
+        );
     }
 
     demultiply(pm)
@@ -426,14 +463,64 @@ fn blit_glyph(pm: &mut Pixmap, glyph: &[u8; 5], ox: u32, oy: u32, scale: u32, co
     }
 }
 
+/// Draw `count` square severity pips, centred in a row just under the glyph
+/// run. A pip is one glyph pixel square, spaced one pip apart so two never
+/// merge into one blob at 16px.
+fn draw_pips(pm: &mut Pixmap, count: u32, glyph_bottom: u32, scale: u32, color: Color) {
+    if count == 0 {
+        return;
+    }
+    let size = pm.width();
+    let run_w = count * scale + (count - 1) * scale;
+    let x0 = size.saturating_sub(run_w) / 2;
+    // Clamp so the row stays on-canvas when the glyphs sit low.
+    let y0 = (glyph_bottom + scale.div_ceil(2)).min(size.saturating_sub(scale));
+    for i in 0..count {
+        fill_rect(pm, x0 + i * scale * 2, y0, scale, scale, color);
+    }
+}
+
+/// Fill an axis-aligned rect of solid colour, clipped to the pixmap.
+fn fill_rect(pm: &mut Pixmap, x0: u32, y0: u32, w: u32, h: u32, color: Color) {
+    let (pw, ph) = (pm.width(), pm.height());
+    let c = color.premultiply().to_color_u8();
+    let data = pm.pixels_mut();
+    for y in y0..(y0 + h).min(ph) {
+        for x in x0..(x0 + w).min(pw) {
+            data[(y * pw + x) as usize] = c;
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     const THEMES: [AmbientTheme; 2] = [AmbientTheme::Dark, AmbientTheme::Light];
+    /// 44 is the macOS tray size, 32 the Windows/Linux one (see `poller.rs`).
+    const SIZES: [u32; 6] = [16, 20, 24, 32, 44, 64];
 
     fn luma(c: Color) -> f32 {
         0.299 * c.red() + 0.587 * c.green() + 0.114 * c.blue()
+    }
+
+    /// Same reading, different state — isolates the state encoding.
+    fn spec_with(state: State, theme: AmbientTheme) -> IconSpec {
+        IconSpec {
+            utilisation: Some(50.0),
+            state,
+            spin: 0.0,
+            theme,
+        }
+    }
+
+    /// What macOS actually keeps of a template image: the alpha channel.
+    fn alpha_mask(spec: IconSpec, size: u32) -> Vec<u8> {
+        render(spec, size).chunks(4).map(|px| px[3]).collect()
+    }
+
+    fn coverage(spec: IconSpec, size: u32) -> usize {
+        alpha_mask(spec, size).iter().filter(|a| **a > 0).count()
     }
 
     #[test]
@@ -561,6 +648,84 @@ mod tests {
         // And still legibly lighter than pure black, i.e. not collapsed to ink.
         assert!(luma(State::Caution.ink(AmbientTheme::Light)) > 0.05);
         assert!(luma(State::Critical.ink(AmbientTheme::Light)) > 0.05);
+    }
+
+    #[test]
+    fn severity_pip_count_rises_with_state() {
+        assert_eq!(State::Ok.severity_pips(), 0);
+        assert_eq!(State::Caution.severity_pips(), 1);
+        assert_eq!(State::Critical.severity_pips(), 2);
+        // States with their own glyph or ring treatment must not add pips,
+        // or they would read as a quota severity they don't have.
+        assert_eq!(State::Stale.severity_pips(), 0);
+        assert_eq!(State::Unconfigured.severity_pips(), 0);
+        assert_eq!(State::Switching.severity_pips(), 0);
+    }
+
+    #[test]
+    fn quota_states_are_distinguishable_without_colour() {
+        // The property that matters on macOS: template rendering keeps only
+        // alpha, so the masks alone must already tell the states apart.
+        let states = [State::Ok, State::Caution, State::Critical];
+        for theme in THEMES {
+            for size in SIZES {
+                let masks: Vec<_> = states
+                    .iter()
+                    .map(|s| alpha_mask(spec_with(*s, theme), size))
+                    .collect();
+                for i in 0..masks.len() {
+                    for j in (i + 1)..masks.len() {
+                        assert_ne!(
+                            masks[i], masks[j],
+                            "{theme:?}@{size}px: {:?} and {:?} render identically in alpha",
+                            states[i], states[j]
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn pips_survive_the_sizes_that_drop_the_ring() {
+        // 16 and 20 render no ring at all, so every ring-based encoding would
+        // vanish there. Coverage must still step up once per severity level.
+        for size in SIZES {
+            let ok = coverage(spec_with(State::Ok, AmbientTheme::Dark), size);
+            let caution = coverage(spec_with(State::Caution, AmbientTheme::Dark), size);
+            let critical = coverage(spec_with(State::Critical, AmbientTheme::Dark), size);
+            assert!(
+                ok < caution && caution < critical,
+                "{size}px: coverage should grow with severity, got {ok}/{caution}/{critical}"
+            );
+        }
+    }
+
+    #[test]
+    fn pips_do_not_collide_with_the_stale_dashes() {
+        // Stale already dashes the ring; pips must stay a separate signal and
+        // must not make a stale reading look like a caution one.
+        for size in SIZES {
+            let stale = alpha_mask(spec_with(State::Stale, AmbientTheme::Dark), size);
+            for state in [State::Caution, State::Critical] {
+                assert_ne!(
+                    alpha_mask(spec_with(state, AmbientTheme::Dark), size),
+                    stale,
+                    "{size}px: {state:?} is indistinguishable from Stale in alpha"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn pips_stay_inside_the_icon() {
+        // A clipped pip would silently downgrade Critical to Caution.
+        for size in SIZES {
+            let cover = |s| coverage(spec_with(s, AmbientTheme::Dark), size);
+            let one = cover(State::Caution) - cover(State::Ok);
+            let two = cover(State::Critical) - cover(State::Ok);
+            assert_eq!(two, one * 2, "{size}px: second pip is clipped or merged");
+        }
     }
 
     #[test]

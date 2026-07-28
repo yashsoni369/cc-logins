@@ -180,6 +180,11 @@ impl StoreHost for GuiStoreHost {
     fn credentials_dir(&self) -> PathBuf {
         credentials_dir()
     }
+    /// Our own namespace. The default is the CLI's, and sharing it made
+    /// `import_from_cswap` overwrite the CLI's own Keychain backups on macOS.
+    fn keychain_service(&self) -> &str {
+        crate::credentials::GUI_SECURITY_SERVICE
+    }
 }
 
 // ---------------------------------------------------------------------------
