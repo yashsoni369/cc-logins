@@ -1,13 +1,22 @@
-# cc-logins
+<div align="center">
+
+<img src="src-tauri/icons/128x128.png" alt="" width="96" height="96" />
+
+# CC Logins
+
+**Quota visibility and account switching for Claude Code**
+
+[![CI](https://img.shields.io/github/actions/workflow/status/yashsoni369/cc-logins/ci.yml?branch=main&style=flat-square&label=CI)](https://github.com/yashsoni369/cc-logins/actions/workflows/ci.yml)
+[![License](https://img.shields.io/github/license/yashsoni369/cc-logins?style=flat-square)](LICENSE)
+[![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux-lightgrey?style=flat-square)](#install)
+[![Built with Tauri](https://img.shields.io/badge/built%20with-Tauri%202-24c8db?style=flat-square)](https://v2.tauri.app/)
+
+</div>
 
 A tray application for developers who hold more than one Claude subscription and run Claude Code
 all day. It shows which account is active and how much 5-hour and 7-day quota each account has
 left, and switches between them — one click, or automatically before a limit lands. Windows,
 macOS, and Linux.
-
-The shipped app identifies itself as **cc-logins**. The repository directory itself is still named
-`claude-swap-gui`, a working title from before the project had a real name — only the folder path
-is unchanged; the package, bundle identifier, and product name are all `cc-logins` now.
 
 This project is young (`0.1.0`) and pre-release. Expect rough edges.
 
@@ -39,6 +48,32 @@ That's a description of what the app does, not a legal opinion — read Anthropi
 if you're deciding whether multi-account use fits your situation. This project takes no position
 beyond staying on the side of it described above.
 
+## Install
+
+**There are no binary releases yet.** The first tagged release will attach installers for Windows
+(`.exe`), macOS (`.dmg`, Apple Silicon and Intel), and Linux (`.deb`, `.AppImage`) to the
+[releases page](https://github.com/yashsoni369/cc-logins/releases). Until then, build from source —
+see [Building from source](#building-from-source).
+
+### Builds will be unsigned
+
+When releases do arrive they will be **unsigned**, and you should know what that looks like before
+you download one:
+
+- **Windows** shows "Windows protected your PC". Click **More info**, then **Run anyway**.
+- **macOS** refuses to open it. Right-click the app → **Open**, or clear the quarantine flag:
+  ```sh
+  xattr -d com.apple.quarantine /Applications/CC\ Logins.app
+  ```
+  Prefer that over `xattr -cr`, which strips *every* extended attribute rather than just the
+  download flag.
+
+The reason is cost, not evasion: a signing certificate is an ongoing expense (Apple) or requires an
+established open-source track record (Windows, via programs like the SignPath Foundation). This is
+the current state and it's written down rather than glossed over — but it does mean **you should
+verify what you're running before trusting it with your tokens.** Building from source is the
+strongest check available today.
+
 ## What makes this different from another account switcher
 
 - **Local usage history and burn-rate charts.** Every reading is written to a local SQLite
@@ -66,6 +101,22 @@ beyond staying on the side of it described above.
   staleness label instead, and waking it up to get a fresh reading is an explicit, user-initiated
   action.
 
+## How often it checks usage
+
+Anthropic's usage endpoint allows only about 30 reads per hour per account, so the polling cadence
+is fixed rather than configurable: roughly every 5 minutes, tightening automatically as an account
+approaches its limit and backing off after a rate limit. A **Refresh** button on the Accounts
+screen and in the tray popover fetches on demand, itself rate-limited so it can't outpace the
+background poller.
+
+## Where your data lives
+
+| What | Location |
+|---|---|
+| Account vault | `%APPDATA%\dev.apex36.cc-logins\accounts` (Windows) · `~/Library/Application Support/dev.apex36.cc-logins/accounts` (macOS) · `~/.local/share/dev.apex36.cc-logins/accounts` (Linux) |
+| Settings and usage history | the same `dev.apex36.cc-logins` directory |
+| Log file | `%APPDATA%\cc-logins\app.log` · `~/Library/Application Support/cc-logins/app.log` · `~/.local/share/cc-logins/app.log` |
+
 ## Relationship to the `cswap` CLI
 
 [claude-swap](https://github.com/realiti4/claude-swap) (`cswap`) is an existing, more mature
@@ -77,13 +128,12 @@ usage-tracking logic are ported from `claude-swap` (MIT-licensed, ported with at
 
 It keeps its own credential vault in its own app-data directory — never inside `cswap`'s directory
 — so a bug in this project can't corrupt `cswap`'s accounts, or vice versa. The two tools still
-interoperate where it counts: this app can read `cswap`'s store to import accounts, and it locks
-the shared credentials file using the same cross-process file-locking protocol `cswap` does
-(`flock` on Linux/macOS, `LockFileEx` on Windows), so a `cswap` process running in a terminal and
-this app sitting in the tray can touch the same files without corrupting each other. That lock
-compatibility is checked by an automated test that runs the real, installed `claude_swap` Python
-package on one side and this app's Rust lock implementation on the other, contending for the same
-lock file — not two separate reimplementations that happen to agree.
+interoperate where it counts: it locks the shared credentials file using the same cross-process
+file-locking protocol `cswap` does (`flock` on Linux/macOS, `LockFileEx` on Windows), so a `cswap`
+process running in a terminal and this app sitting in the tray can touch the same files without
+corrupting each other. That lock compatibility is checked by an automated test that runs the real,
+installed `claude_swap` Python package on one side and this app's Rust lock implementation on the
+other, contending for the same lock file — not two separate reimplementations that happen to agree.
 
 ### How credentials are stored
 
@@ -115,8 +165,8 @@ Prerequisites:
 - Platform build tools for Tauri:
   - **Windows**: [MSVC Build Tools](https://visualstudio.microsoft.com/visual-cpp-build-tools/)
   - **macOS**: Xcode Command Line Tools (`xcode-select --install`)
-  - **Linux**: `webkit2gtk`, plus the other packages listed in
-    [Tauri's Linux prerequisites](https://v2.tauri.app/start/prerequisites/#linux)
+  - **Linux**: `webkit2gtk` and friends — see
+    [Tauri's Linux prerequisites](https://v2.tauri.app/start/prerequisites/)
 
 Then:
 
@@ -126,14 +176,12 @@ pnpm tauri dev      # run it locally
 pnpm tauri build    # produce an installer for your platform
 ```
 
-## Signing
+## Contributing
 
-Builds are currently **unsigned**. On Windows, expect a SmartScreen warning ("Windows protected
-your PC"); on macOS, expect Gatekeeper to refuse to open it until you right-click → Open, or clear
-the quarantine attribute yourself. This is not a bug report waiting to happen — it's the current
-state, and it will stay true until this project has a code-signing certificate, which costs money
-(Apple) or requires an established open-source track record (Windows, via programs like the
-SignPath Foundation). Verify what you're running before you trust it with your tokens.
+Bug reports and PRs are welcome — see [CONTRIBUTING.md](CONTRIBUTING.md), and please open an issue
+before starting anything large. Security issues go through a
+[private advisory](https://github.com/yashsoni369/cc-logins/security/advisories/new), never a
+public issue; see [SECURITY.md](SECURITY.md).
 
 ## License
 
