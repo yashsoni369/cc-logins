@@ -74,6 +74,11 @@ pub enum FaultPoint {
     AfterCommitSync,
     BeforeVerification,
     BeforeCleanup,
+    BeforeRollbackSequence,
+    BeforeRollbackConfig,
+    BeforeRollbackCredential,
+    BeforeRollbackVerification,
+    BeforeRecoveryCleanup,
 }
 
 pub trait FaultInjector: Send + Sync {
@@ -640,7 +645,14 @@ pub fn recover_pending_switch() -> Result<RecoveryDisposition, TransactionError>
 pub(crate) fn recover_pending_switch_with(
     timeout: Duration,
 ) -> Result<RecoveryDisposition, TransactionError> {
-    let result = recover_pending_switch_inner(timeout);
+    recover_pending_switch_with_faults(timeout, &NoFaults)
+}
+
+fn recover_pending_switch_with_faults(
+    timeout: Duration,
+    faults: &dyn FaultInjector,
+) -> Result<RecoveryDisposition, TransactionError> {
+    let result = recover_pending_switch_inner(timeout, faults);
     if let Err(error) = &result {
         set_recovery_requirement(Some(error.to_string()));
     }
@@ -649,6 +661,7 @@ pub(crate) fn recover_pending_switch_with(
 
 fn recover_pending_switch_inner(
     timeout: Duration,
+    faults: &dyn FaultInjector,
 ) -> Result<RecoveryDisposition, TransactionError> {
     let root = crate::paths::backup_root();
     let journal_store = JournalStore::new(&root);
@@ -692,19 +705,23 @@ fn recover_pending_switch_inner(
                 errors.push(format!("outgoing generation: {error}"));
             }
         }
+        faults.hit(FaultPoint::BeforeRollbackSequence)?;
         if let Err(error) =
             crate::durable_fs::restore(&root.join("sequence.json"), &sequence, Some(0o600))
         {
             errors.push(format!("sequence: {error}"));
         }
+        faults.hit(FaultPoint::BeforeRollbackConfig)?;
         if let Err(error) =
             crate::durable_fs::restore(&crate::paths::global_config_path(), &config, Some(0o600))
         {
             errors.push(format!("global config: {error}"));
         }
+        faults.hit(FaultPoint::BeforeRollbackCredential)?;
         if let Err(error) = store.restore_active_state(&active) {
             errors.push(format!("active credential: {error}"));
         }
+        faults.hit(FaultPoint::BeforeRollbackVerification)?;
         if store.verify_active_state(&active).is_err()
             || crate::durable_fs::snapshot(&crate::paths::global_config_path())
                 .ok()
@@ -728,6 +745,7 @@ fn recover_pending_switch_inner(
         }
     };
 
+    faults.hit(FaultPoint::BeforeRecoveryCleanup)?;
     remove_journal_stages(&journal);
     recovery.remove_transaction(&transaction_id)?;
     journal_store.remove(&transaction_id)?;
@@ -854,8 +872,43 @@ mod tests {
         }
     }
 
-    fn transaction_fixture(
-        env: &TestEnv,
+    struct AbortFault(FaultPoint);
+
+    impl FaultInjector for AbortFault {
+        fn hit(&self, point: FaultPoint) -> Result<(), InjectedFault> {
+            if self.0 == point {
+                std::process::abort();
+            }
+            Ok(())
+        }
+    }
+
+    fn fault_from_name(name: &str) -> FaultPoint {
+        match name {
+            "AfterJournalSync" => FaultPoint::AfterJournalSync,
+            "AfterActiveCredentialInstall" => FaultPoint::AfterActiveCredentialInstall,
+            "AfterGlobalConfigInstall" => FaultPoint::AfterGlobalConfigInstall,
+            "AfterSequenceInstall" => FaultPoint::AfterSequenceInstall,
+            "AfterCommitSync" => FaultPoint::AfterCommitSync,
+            "BeforeRollbackConfig" => FaultPoint::BeforeRollbackConfig,
+            other => panic!("unknown crash fault point {other}"),
+        }
+    }
+
+    fn age_crashed_claude_locks() {
+        for path in [
+            crate::paths::oauth_refresh_lock_dir(),
+            crate::paths::credentials_lock_dir(),
+            crate::paths::global_config_lock_dir(),
+        ] {
+            if path.exists() {
+                crate::claude_locks::age_lock_for_test(&path, Duration::from_secs(61)).unwrap();
+            }
+        }
+    }
+
+    fn transaction_fixture_at(
+        vault: &std::path::Path,
     ) -> (
         CredentialStore<TestHost>,
         SwitchPlan,
@@ -881,13 +934,13 @@ mod tests {
             }
         });
         let sequence = serde_json::to_vec_pretty(&sequence_value).unwrap();
-        let sequence_path = env.vault.path().join("sequence.json");
+        let sequence_path = vault.join("sequence.json");
         fs::write(&sequence_path, &sequence).unwrap();
         let Value::Object(sequence_map) = sequence_value else {
             unreachable!()
         };
         let store = CredentialStore::new(TestHost {
-            credentials: env.vault.path().join("credentials"),
+            credentials: vault.join("credentials"),
         });
         let plan = SwitchPlan {
             target: JournalTarget {
@@ -906,10 +959,22 @@ mod tests {
             outgoing: OutgoingDestination::Managed {
                 number: "1".to_string(),
                 email: "old@example.com".to_string(),
-                config_backup_path: env.vault.path().join("configs/old.json"),
+                config_backup_path: vault.join("configs/old.json"),
             },
         };
         (store, plan, active, config, sequence)
+    }
+
+    fn transaction_fixture(
+        env: &TestEnv,
+    ) -> (
+        CredentialStore<TestHost>,
+        SwitchPlan,
+        Vec<u8>,
+        Vec<u8>,
+        Vec<u8>,
+    ) {
+        transaction_fixture_at(env.vault.path())
     }
 
     #[test]
@@ -1150,6 +1215,143 @@ mod tests {
         ));
         assert_eq!(fs::read(crate::paths::credentials_path()).unwrap(), before);
         set_recovery_requirement(None);
+    }
+
+    #[test]
+    fn process_death_child() {
+        let Ok(vault) = std::env::var("CC_LOGINS_CRASH_TEST_VAULT") else {
+            return;
+        };
+        let _store_root = StoreRootGuard::set(PathBuf::from(&vault));
+        if let Ok(point) = std::env::var("CC_LOGINS_CRASH_TEST_RECOVERY_POINT") {
+            let _ = recover_pending_switch_with_faults(
+                Duration::from_secs(2),
+                &AbortFault(fault_from_name(&point)),
+            );
+            panic!("recovery crash fault was not reached");
+        }
+        let point = fault_from_name(
+            &std::env::var("CC_LOGINS_CRASH_TEST_POINT")
+                .expect("crash child requires a fault point"),
+        );
+        let (mut store, plan, _, _, _) = transaction_fixture_at(std::path::Path::new(&vault));
+        let _locks = acquire_live_state_locks(Duration::from_secs(2)).unwrap();
+        let _ = execute_locked(&mut store, plan, &AbortFault(point));
+        panic!("crash fault was not reached");
+    }
+
+    #[test]
+    fn crash_restart_matrix_recovers_after_real_process_termination() {
+        for (point, committed) in [
+            ("AfterJournalSync", false),
+            ("AfterActiveCredentialInstall", false),
+            ("AfterGlobalConfigInstall", false),
+            ("AfterSequenceInstall", false),
+            ("AfterCommitSync", true),
+        ] {
+            let env = setup();
+            let (_, plan, active, config, sequence) = transaction_fixture(&env);
+            let status = std::process::Command::new(std::env::current_exe().unwrap())
+                .arg("--exact")
+                .arg("switch_transaction::tests::process_death_child")
+                .arg("--nocapture")
+                .env("CC_LOGINS_CRASH_TEST_VAULT", env.vault.path())
+                .env("CC_LOGINS_CRASH_TEST_POINT", point)
+                .env("HOME", env._home_dir.path())
+                .env("USERPROFILE", env._home_dir.path())
+                .env("CLAUDE_CONFIG_DIR", env._config_dir.path())
+                .env_remove("XDG_DATA_HOME")
+                .env_remove("WSL_DISTRO_NAME")
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .status()
+                .unwrap();
+            assert!(!status.success(), "child did not terminate at {point}");
+            assert!(JournalStore::new(env.vault.path()).path().exists());
+            age_crashed_claude_locks();
+
+            let disposition = recover_pending_switch_with(Duration::from_secs(2)).unwrap();
+            if committed {
+                assert!(matches!(
+                    disposition,
+                    RecoveryDisposition::VerifiedCommitted { .. }
+                ));
+                assert_ne!(fs::read(crate::paths::credentials_path()).unwrap(), active);
+            } else {
+                assert!(matches!(
+                    disposition,
+                    RecoveryDisposition::RolledBack { .. }
+                ));
+                assert_eq!(fs::read(crate::paths::credentials_path()).unwrap(), active);
+                assert_eq!(
+                    fs::read(crate::paths::global_config_path()).unwrap(),
+                    config
+                );
+                assert_eq!(fs::read(&plan.sequence_path).unwrap(), sequence);
+            }
+            assert!(!JournalStore::new(env.vault.path()).path().exists());
+            drop(env);
+        }
+    }
+
+    #[test]
+    fn second_process_death_during_recovery_remains_recoverable() {
+        let env = setup();
+        let (_, plan, active, config, sequence) = transaction_fixture(&env);
+        let executable = std::env::current_exe().unwrap();
+        let child_args = [
+            "--exact",
+            "switch_transaction::tests::process_death_child",
+            "--nocapture",
+        ];
+        let first = std::process::Command::new(&executable)
+            .args(child_args)
+            .env("CC_LOGINS_CRASH_TEST_VAULT", env.vault.path())
+            .env("CC_LOGINS_CRASH_TEST_POINT", "AfterActiveCredentialInstall")
+            .env("HOME", env._home_dir.path())
+            .env("USERPROFILE", env._home_dir.path())
+            .env("CLAUDE_CONFIG_DIR", env._config_dir.path())
+            .env_remove("XDG_DATA_HOME")
+            .env_remove("WSL_DISTRO_NAME")
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .unwrap();
+        assert!(!first.success());
+        age_crashed_claude_locks();
+
+        let second = std::process::Command::new(&executable)
+            .args(child_args)
+            .env("CC_LOGINS_CRASH_TEST_VAULT", env.vault.path())
+            .env(
+                "CC_LOGINS_CRASH_TEST_RECOVERY_POINT",
+                "BeforeRollbackConfig",
+            )
+            .env("HOME", env._home_dir.path())
+            .env("USERPROFILE", env._home_dir.path())
+            .env("CLAUDE_CONFIG_DIR", env._config_dir.path())
+            .env_remove("CC_LOGINS_CRASH_TEST_POINT")
+            .env_remove("XDG_DATA_HOME")
+            .env_remove("WSL_DISTRO_NAME")
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .unwrap();
+        assert!(!second.success());
+        assert!(JournalStore::new(env.vault.path()).path().exists());
+        age_crashed_claude_locks();
+
+        assert!(matches!(
+            recover_pending_switch_with(Duration::from_secs(2)).unwrap(),
+            RecoveryDisposition::RolledBack { .. }
+        ));
+        assert_eq!(fs::read(crate::paths::credentials_path()).unwrap(), active);
+        assert_eq!(
+            fs::read(crate::paths::global_config_path()).unwrap(),
+            config
+        );
+        assert_eq!(fs::read(plan.sequence_path).unwrap(), sequence);
+        assert!(!JournalStore::new(env.vault.path()).path().exists());
     }
 
     #[test]

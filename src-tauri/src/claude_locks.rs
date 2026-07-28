@@ -194,6 +194,11 @@ fn set_directory_modified(path: &Path, time: SystemTime) -> io::Result<()> {
     fs::File::open(path)?.set_modified(time)
 }
 
+#[cfg(test)]
+pub(crate) fn age_lock_for_test(path: &Path, age: Duration) -> io::Result<()> {
+    set_directory_modified(path, SystemTime::now() - age)
+}
+
 #[cfg(windows)]
 fn set_directory_modified(path: &Path, time: SystemTime) -> io::Result<()> {
     use std::os::windows::ffi::OsStrExt;

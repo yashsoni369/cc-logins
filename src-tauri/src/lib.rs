@@ -336,6 +336,39 @@ pub fn run() {
                 });
             }
 
+            // A hard process termination leaves Claude Code's proper-lockfile
+            // directories behind. cswap/Claude deliberately protect a fresh
+            // credential lock for 60 seconds, so the synchronous startup
+            // attempt may truthfully defer recovery. Retry off the UI thread
+            // until that compatibility boundary passes; stop after six
+            // attempts and leave the durable recoveryRequired gate in place.
+            if switch_transaction::recovery_requirement().is_some() {
+                tauri::async_runtime::spawn(async move {
+                    for attempt in 1..=6 {
+                        tokio::time::sleep(std::time::Duration::from_secs(10)).await;
+                        let result = tokio::task::spawn_blocking(|| {
+                            switch_transaction::recover_pending_switch()
+                        })
+                        .await;
+                        match result {
+                            Ok(Ok(disposition)) => {
+                                log::warn!(
+                                    "background switch recovery succeeded on attempt {attempt}: \
+                                     {disposition:?}"
+                                );
+                                break;
+                            }
+                            Ok(Err(error)) => log::warn!(
+                                "background switch recovery attempt {attempt} deferred: {error}"
+                            ),
+                            Err(error) => log::warn!(
+                                "background switch recovery task {attempt} failed: {error}"
+                            ),
+                        }
+                    }
+                });
+            }
+
             let quota_i = MenuItem::with_id(app, "quota", "Show quota panel", true, None::<&str>)?;
             let open_i = MenuItem::with_id(app, "open", "Open dashboard", true, None::<&str>)?;
             let switch_i = MenuItem::with_id(app, "switch", "Switch account…", true, None::<&str>)?;
