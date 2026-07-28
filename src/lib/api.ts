@@ -20,11 +20,14 @@
 
 import type {
   Account,
+  DaemonStatus,
   DataLocations,
   DayStat,
   Environment,
   HistorySummary,
   Settings,
+  SettingsPatch,
+  SettingsSnapshot,
   Snapshot,
 } from "@/types";
 import { stableKey } from "@/types";
@@ -50,17 +53,30 @@ export type IpcErrorKind =
   | "noTerminalAvailable"
   | "alreadyRegistered"
   | "cannotDisableActive"
+  | "settingsConflict"
   | "internal";
 
 export class IpcError extends Error {
   readonly kind: IpcErrorKind;
   readonly detail?: string;
+  readonly expectedRevision?: number;
+  readonly actualRevision?: number;
 
-  constructor(kind: IpcErrorKind, detail?: string) {
+  constructor(kind: IpcErrorKind, rawDetail?: unknown) {
+    const detail = typeof rawDetail === "string" ? rawDetail : undefined;
     super(detail ? `${kind}: ${detail}` : kind);
     this.name = "IpcError";
     this.kind = kind;
     this.detail = detail;
+    if (kind === "settingsConflict" && rawDetail && typeof rawDetail === "object") {
+      const conflict = rawDetail as { expectedRevision?: unknown; actualRevision?: unknown };
+      if (typeof conflict.expectedRevision === "number") {
+        this.expectedRevision = conflict.expectedRevision;
+      }
+      if (typeof conflict.actualRevision === "number") {
+        this.actualRevision = conflict.actualRevision;
+      }
+    }
   }
 
   /** No accounts are managed yet. A normal first-run state, not a failure. */
@@ -110,7 +126,7 @@ export class IpcError extends Error {
 
 function toIpcError(raw: unknown): IpcError {
   if (raw && typeof raw === "object" && "kind" in raw) {
-    const { kind, detail } = raw as { kind: IpcErrorKind; detail?: string };
+    const { kind, detail } = raw as { kind: IpcErrorKind; detail?: unknown };
     return new IpcError(kind, detail);
   }
   return new IpcError("internal", String(raw));
@@ -240,6 +256,22 @@ export async function onSnapshotUpdated(handler: (snapshot: Snapshot) => void): 
   if (!hasBackend()) return () => {};
   const { listen } = await import("@tauri-apps/api/event");
   return listen<Snapshot>("snapshot://updated", (event) => handler(event.payload));
+}
+
+export async function onSettingsUpdated(
+  handler: (snapshot: SettingsSnapshot) => void,
+): Promise<Unlisten> {
+  if (!hasBackend()) return () => {};
+  const { listen } = await import("@tauri-apps/api/event");
+  return listen<SettingsSnapshot>("settings://updated", (event) => handler(event.payload));
+}
+
+export async function onDaemonStatusUpdated(
+  handler: (status: DaemonStatus) => void,
+): Promise<Unlisten> {
+  if (!hasBackend()) return () => {};
+  const { listen } = await import("@tauri-apps/api/event");
+  return listen<DaemonStatus>("daemon://status", (event) => handler(event.payload));
 }
 
 // ─── writers ─────────────────────────────────────────────────────────────────
@@ -436,6 +468,7 @@ export async function historyAvailable(): Promise<Sourced<boolean>> {
 /** Mirrors `Settings::default()` in `src-tauri/src/settings.rs`. */
 export const DEFAULT_SETTINGS: Settings = {
   autoSwitchEnabled: false,
+  autoSwitchPausedUntil: null,
   threshold: 90,
   cooldownSeconds: 300,
   hysteresisPct: 10,
@@ -451,9 +484,17 @@ export const DEFAULT_SETTINGS: Settings = {
 };
 
 /** Current settings. Falls back to the same defaults the backend ships with. */
+export async function getSettingsSnapshot(): Promise<Sourced<SettingsSnapshot>> {
+  if (!hasBackend()) {
+    return { data: { revision: 0, settings: DEFAULT_SETTINGS }, live: false };
+  }
+  return { data: await call<SettingsSnapshot>("get_settings"), live: true };
+}
+
+/** @deprecated Use the revision-safe `useSettings` owner. */
 export async function getSettings(): Promise<Sourced<Settings>> {
-  if (!hasBackend()) return { data: DEFAULT_SETTINGS, live: false };
-  return { data: await call<Settings>("get_settings"), live: true };
+  const snapshot = await getSettingsSnapshot();
+  return { data: snapshot.data.settings, live: snapshot.live };
 }
 
 /**
@@ -466,11 +507,54 @@ export async function getSettings(): Promise<Sourced<Settings>> {
  * `switchAccount`: silently reporting a save that did not happen would be a
  * lie about something the user just explicitly asked to persist.
  */
-export async function setSettings(settings: Settings): Promise<Settings> {
+export async function updateSettings(
+  expectedRevision: number,
+  patch: SettingsPatch,
+): Promise<SettingsSnapshot> {
   if (!hasBackend()) {
     throw new IpcError("internal", "Not running in the desktop app, so settings cannot be saved.");
   }
-  return call<Settings>("set_settings", { settings });
+  return call<SettingsSnapshot>("update_settings", {
+    input: { expectedRevision, patch },
+  });
+}
+
+/** @deprecated Removed once all consumers use named-field patches. */
+export async function setSettings(settings: Settings): Promise<Settings> {
+  const current = await getSettingsSnapshot();
+  const saved = await updateSettings(current.data.revision, settings);
+  return saved.settings;
+}
+
+export async function snoozeAutoSwitch(durationSeconds: number): Promise<SettingsSnapshot> {
+  if (!hasBackend()) {
+    throw new IpcError("internal", "Not running in the desktop app, so settings cannot be saved.");
+  }
+  return call<SettingsSnapshot>("snooze_auto_switch", {
+    input: { durationSeconds },
+  });
+}
+
+export async function resumeAutoSwitch(): Promise<SettingsSnapshot> {
+  if (!hasBackend()) {
+    throw new IpcError("internal", "Not running in the desktop app, so settings cannot be saved.");
+  }
+  return call<SettingsSnapshot>("resume_auto_switch");
+}
+
+export async function getDaemonStatus(): Promise<Sourced<DaemonStatus>> {
+  if (!hasBackend()) {
+    return {
+      data: {
+        revision: 0,
+        policyRevision: 0,
+        phase: { kind: "disabled" },
+        updatedAt: new Date(0).toISOString(),
+      },
+      live: false,
+    };
+  }
+  return { data: await call<DaemonStatus>("get_daemon_status"), live: true };
 }
 
 // ─── about ───────────────────────────────────────────────────────────────
