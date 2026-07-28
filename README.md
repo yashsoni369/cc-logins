@@ -130,12 +130,16 @@ usage-tracking logic are ported from `claude-swap` (MIT-licensed, ported with at
 
 It keeps its own credential vault in its own app-data directory — never inside `cswap`'s directory
 — so a bug in this project can't corrupt `cswap`'s accounts, or vice versa. The two tools still
-interoperate where it counts: it locks the shared credentials file using the same cross-process
-file-locking protocol `cswap` does (`flock` on Linux/macOS, `LockFileEx` on Windows), so a `cswap`
-process running in a terminal and this app sitting in the tray can touch the same files without
-corrupting each other. That lock compatibility is checked by an automated test that runs the real,
-installed `claude_swap` Python package on one side and this app's Rust lock implementation on the
-other, contending for the same lock file — not two separate reimplementations that happen to agree.
+interoperate where it counts. A live switch takes cswap's optional account-store OS lock, Claude
+Code's primary and legacy credential directory locks, Claude's global-config directory lock, and
+this app's private vault lock, in that order. The directory paths and staleness timings track current
+cswap/Claude Code behavior; cross-process tests run a pinned Python protocol fixture against the Rust
+implementation in both directions.
+
+Switches are journaled across the active credential, global config, and account sequence. If the
+process terminates between those writes, startup restores a noncommitted switch or verifies a
+committed one before switching is enabled again. See
+[transaction recovery](docs/TRANSACTION_RECOVERY.md).
 
 ### How credentials are stored
 

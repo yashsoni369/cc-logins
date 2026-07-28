@@ -260,10 +260,15 @@ CLAUDE CODE'S OFFICIAL LOCATION (the only genuinely shared thing)
   (CLAUDE_CONFIG_DIR || $HOME)/.claude.json
 ```
 
-Locks are split to match: our own lock guards our vault; the CLI's lock path guards the official
-file, acquired first and only when that directory already exists. Taking a lock cannot corrupt
-anything, which is exactly why a lock is safe to share where a vault is not. Coexistence is
-preserved with zero shared mutable state.
+Locks are split to match the resources and acquired in one structural order: the optional
+`<cswap-store>/.lock` OS file lock, Claude Code's primary `.oauth_refresh.lock`, its legacy
+credential lock, its global-config lock, then this GUI's private vault lock. The primary/legacy pair
+and staleness values track Claude Code 2.1.218 through pinned cswap commit
+`65d208081a4985b9fd1786bc258d5172d196bee2`. No network call occurs while this set is held.
+
+Switching is a durable transaction, not merely three atomic writes. Protected before-images and a
+secret-free phased journal recover the active credential backend, global config, and sequence after
+ordinary failure or process death. See `docs/TRANSACTION_RECOVERY.md`.
 
 There is no storage-location setting. The `StorageMode` toggle that briefly existed was a control
 offering users a choice they should never have been asked to make, and for a period it also did
@@ -307,9 +312,10 @@ or not it took the lock. A test that forgets isolation now fails loudly instead 
 3. Verify data integrity, don't assume it: hash the real `sequence.json` before and after a run and
    compare. Stability was confirmed by 14 consecutive parallel runs with a byte-identical store.
 
-**Still unproven in production code.** The guard protects tests. `switcher::switch_to` writes to
-these same paths for real, and has never run under contention with a live `cswap` process. That is
-risk table row "lock interop" and it must be closed before the app is pointed at real accounts.
+**Current verification.** Cross-process Rust/Python fixtures exercise cswap-compatible file and
+Claude directory locks, including contention, stale takeover, and release ordering. Process-death
+tests cover every live-write boundary and a second crash during recovery. Packaged smoke tests on
+real macOS/APFS and Linux/ext4 hosts remain release-environment gates, not claims made by Windows CI.
 
 ## 7c. Incident: duplicate detection defeated by token rotation
 
