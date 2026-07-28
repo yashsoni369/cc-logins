@@ -8,6 +8,7 @@
 //! Portions of the credential, path and usage logic are ported from
 //! claude-swap (MIT) — https://github.com/realiti4/claude-swap
 
+pub mod claude_locks;
 pub mod commands;
 pub mod credentials;
 pub mod history;
