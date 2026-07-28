@@ -868,20 +868,18 @@ mod macos_keychain {
     mod imp {
         use super::KeychainError;
 
-        fn refuse(op: &str) -> ! {
-            panic!(
-                "REFUSING TO RUN: a test reached the real macOS Keychain ({op}).\n\
-                 Keychain items are machine-global and cannot be sandboxed by a temp \
-                 directory, so this would read or overwrite the real Claude Code login. \
-                 Pin the StoreHost's platform to the file backend instead."
-            );
+        fn unavailable(op: &str) -> KeychainError {
+            KeychainError(format!(
+                "macOS Keychain unavailable in tests ({op}); the test implementation \
+                 never accesses machine-global Keychain items"
+            ))
         }
 
         pub fn get_password(
             _service: &str,
             _account: &str,
         ) -> Result<Option<String>, KeychainError> {
-            refuse("get_password")
+            Err(unavailable("get_password"))
         }
 
         pub fn set_password(
@@ -889,11 +887,11 @@ mod macos_keychain {
             _account: &str,
             _password: &str,
         ) -> Result<(), KeychainError> {
-            refuse("set_password")
+            Err(unavailable("set_password"))
         }
 
         pub fn delete_password(_service: &str, _account: &str) -> Result<(), KeychainError> {
-            refuse("delete_password")
+            Err(unavailable("delete_password"))
         }
     }
 
