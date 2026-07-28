@@ -83,6 +83,11 @@ pub struct Settings {
     /// trustworthy. The user opts in.
     pub auto_switch_enabled: bool,
 
+    /// A persisted global pause for automatic switching. Polling, history,
+    /// and manual switching continue while this deadline is in the future.
+    #[serde(default)]
+    pub auto_switch_paused_until: Option<chrono::DateTime<chrono::Utc>>,
+
     /// Utilisation percentage that arms a switch. `cswap` default is 90.
     pub threshold: u8,
     /// Minimum gap between switches, to stop flip-flopping.
@@ -117,6 +122,7 @@ impl Default for Settings {
     fn default() -> Self {
         Self {
             auto_switch_enabled: false,
+            auto_switch_paused_until: None,
             threshold: 90,
             cooldown_seconds: 300,
             hysteresis_pct: 10,
@@ -209,6 +215,27 @@ mod tests {
     #[test]
     fn grace_period_defaults_to_a_real_pause() {
         assert_eq!(Settings::default().grace_seconds, 60);
+    }
+
+    #[test]
+    fn auto_switch_pause_is_absent_by_default() {
+        assert_eq!(Settings::default().auto_switch_paused_until, None);
+    }
+
+    #[test]
+    fn auto_switch_pause_round_trips_through_disk() {
+        let dir = tempfile::tempdir().unwrap();
+        let until = chrono::DateTime::parse_from_rfc3339("2026-07-28T13:00:00Z")
+            .unwrap()
+            .with_timezone(&chrono::Utc);
+        let settings = Settings {
+            auto_switch_paused_until: Some(until),
+            ..Settings::default()
+        };
+
+        save(dir.path(), &settings).unwrap();
+
+        assert_eq!(load(dir.path()).auto_switch_paused_until, Some(until));
     }
 
     #[test]

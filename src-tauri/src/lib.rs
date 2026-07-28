@@ -20,6 +20,7 @@ pub mod oauth;
 pub mod paths;
 pub mod poller;
 pub mod resilience;
+pub mod runtime;
 pub mod settings;
 pub mod switcher;
 pub mod tray;
