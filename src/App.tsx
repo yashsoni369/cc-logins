@@ -119,8 +119,7 @@ const BUSY_MESSAGE =
 function describeAddAccountError(err: unknown): string {
   if (err instanceof IpcError) {
     if (err.isBusy) return BUSY_MESSAGE;
-    const detail = err.detail?.toLowerCase() ?? "";
-    if (detail.includes("already")) {
+    if (err.isAlreadyRegistered) {
       return "This login is already registered as an account here — nothing to add.";
     }
     return err.detail ?? err.message;
@@ -137,20 +136,19 @@ function describeAddAccountError(err: unknown): string {
 function describeInteractiveLoginError(err: unknown): string | null {
   if (err instanceof IpcError) {
     if (err.isBusy) return BUSY_MESSAGE;
-    const detail = err.detail?.toLowerCase() ?? "";
-    if (detail.includes("cancel")) {
+    if (err.isCancelled) {
       return null;
     }
-    if (detail.includes("time")) {
+    if (err.isTimedOut) {
       return "Timed out waiting for sign-in. Nothing was added — try again when you're ready.";
     }
-    if (detail.includes("not installed") || detail.includes("not found") || detail.includes("path")) {
+    if (err.isPrerequisiteMissing) {
       return "Claude Code isn't installed, or the `claude` command isn't on PATH. Install it, then try again.";
     }
-    if (detail.includes("terminal")) {
+    if (err.isNoTerminalAvailable) {
       return 'Couldn\'t open a terminal on this system. Use "Add token" below instead.';
     }
-    if (detail.includes("already")) {
+    if (err.isAlreadyRegistered) {
       return "That account is already registered here — nothing to add.";
     }
     return err.detail ?? err.message;
@@ -171,8 +169,7 @@ function describeAddTokenError(err: unknown): string {
 function describeEnableError(err: unknown, enabled: boolean): string {
   if (err instanceof IpcError) {
     if (err.isBusy) return BUSY_MESSAGE;
-    const detail = err.detail?.toLowerCase() ?? "";
-    if (!enabled && (detail.includes("active") || detail.includes("current"))) {
+    if (!enabled && err.isCannotDisableActive) {
       return "This is the account currently in use — switch to another account before disabling it.";
     }
     return err.detail ?? err.message;

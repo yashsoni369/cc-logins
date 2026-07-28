@@ -22,12 +22,26 @@ import type { Account, DayStat, Environment, HistorySummary, Settings, Snapshot 
 import { stableKey } from "@/types";
 import { mockHistoryRanges, mockSnapshot, type HistoryRangeId } from "@/lib/mock";
 
-/** Tagged error from the Rust side. Mirrors `commands::IpcError`. */
+/**
+ * Tagged error from the Rust side. Mirrors `commands::IpcError` exactly — one
+ * TypeScript member per Rust variant, kept in the same order.
+ *
+ * `kind` is the whole contract: callers branch on it, never on `detail`.
+ * `detail` is free text for humans and logs (shown as a last-resort message
+ * when no `kind`-specific copy applies) — rewording it on the Rust side must
+ * never change what the UI does.
+ */
 export type IpcErrorKind =
   | "notConfigured"
   | "unreachable"
   | "credential"
   | "busy"
+  | "cancelled"
+  | "timedOut"
+  | "prerequisiteMissing"
+  | "noTerminalAvailable"
+  | "alreadyRegistered"
+  | "cannotDisableActive"
   | "internal";
 
 export class IpcError extends Error {
@@ -49,6 +63,40 @@ export class IpcError extends Error {
   /** A lock is held elsewhere — very likely the `cswap` CLI mid-operation. */
   get isBusy() {
     return this.kind === "busy";
+  }
+
+  /**
+   * The interactive login's terminal closed before any credential appeared.
+   * The ordinary "changed their mind" outcome, not a failure — callers must
+   * render nothing for this, not a banner.
+   */
+  get isCancelled() {
+    return this.kind === "cancelled";
+  }
+
+  /** The interactive login did not complete within its time budget. */
+  get isTimedOut() {
+    return this.kind === "timedOut";
+  }
+
+  /** Something the operation depends on is missing — e.g. `claude` not on PATH. */
+  get isPrerequisiteMissing() {
+    return this.kind === "prerequisiteMissing";
+  }
+
+  /** No terminal emulator could be launched (Linux only). */
+  get isNoTerminalAvailable() {
+    return this.kind === "noTerminalAvailable";
+  }
+
+  /** The login/credential being added is already registered under another slot. */
+  get isAlreadyRegistered() {
+    return this.kind === "alreadyRegistered";
+  }
+
+  /** Refused to disable the currently-active account. */
+  get isCannotDisableActive() {
+    return this.kind === "cannotDisableActive";
   }
 }
 

@@ -21,6 +21,14 @@ use crate::switcher::{self, Strategy, SwitchError};
 /// Errors cross the IPC boundary as a tagged object rather than a bare string,
 /// so the UI can distinguish "nothing is set up yet" (show onboarding) from
 /// "the network is down" (show stale data) from "something is genuinely wrong".
+///
+/// Every variant here is a structural signal the frontend is meant to branch
+/// on directly (`err.kind`, or the `is*` accessors in `src/lib/api.ts`) —
+/// never by inspecting `detail`. `detail` stays free text for humans and
+/// logs; wording it differently must never change how the UI behaves. That
+/// is the whole point of this enum being a closed, tagged set rather than a
+/// single `String`: a rewording in `login.rs`/`switcher.rs` cannot silently
+/// change what the UI does, because nothing in the UI reads those words.
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase", tag = "kind", content = "detail")]
 pub enum IpcError {
@@ -32,6 +40,24 @@ pub enum IpcError {
     Credential(String),
     /// A lock is held by another process (very likely the `cswap` CLI).
     Busy(String),
+    /// The interactive login's terminal window closed before any credential
+    /// appeared. The ordinary "the user changed their mind" outcome, not a
+    /// failure — the UI must render nothing for this, not a banner.
+    Cancelled,
+    /// The interactive login did not complete within its time budget.
+    TimedOut(String),
+    /// Something the requested operation depends on is missing from this
+    /// machine — today, specifically the `claude` binary not being on PATH.
+    PrerequisiteMissing(String),
+    /// No terminal emulator could be launched to run the interactive login
+    /// (Linux only). The UI should fall back to the paste-a-token flow.
+    NoTerminalAvailable(String),
+    /// The login/credential being added is already registered under a
+    /// different slot.
+    AlreadyRegistered(String),
+    /// Refused to disable the currently-active account — auto-switch would
+    /// have nowhere valid to land.
+    CannotDisableActive(String),
     /// Anything else.
     Internal(String),
 }
@@ -39,49 +65,57 @@ pub enum IpcError {
 impl From<SwitchError> for IpcError {
     fn from(e: SwitchError) -> Self {
         // Map by meaning, not by convenience: the UI branches on these.
+        // Listed exhaustively (no catch-all `_`) so a variant added to
+        // `SwitchError` later is a compile error here, not a silent
+        // `Internal`.
         match &e {
             SwitchError::NoAccountsManaged => IpcError::NotConfigured,
             SwitchError::Locking(_) => IpcError::Busy(e.to_string()),
-            SwitchError::CredentialRead
+            // Credential-store problems: the store itself is unreadable,
+            // missing, empty, or otherwise not trustworthy — as distinct
+            // from a business-rule refusal below, where the store is fine
+            // and the requested mutation just isn't valid right now.
+            SwitchError::Credential(_)
+            | SwitchError::CredentialRead
             | SwitchError::NoStoredCredentials(_)
             | SwitchError::NoStoredConfig(_)
+            | SwitchError::InvalidBackupConfig(_)
             | SwitchError::EmptyActiveCredential(_)
-            | SwitchError::NoLiveCredential => IpcError::Credential(e.to_string()),
-            // Business-rule refusals, not I/O/credential-store failures: the
-            // store itself is fine, the requested mutation just isn't valid
-            // right now. No dedicated `IpcError` kind exists for these yet,
-            // so they fall to `Internal` — the UI still gets the full,
-            // specific message via `e.to_string()`.
-            SwitchError::AlreadyRegistered(_)
+            | SwitchError::Stash(_)
+            | SwitchError::NoLiveCredential
+            | SwitchError::InvalidCredential(_) => IpcError::Credential(e.to_string()),
+            // Business-rule refusals: the requested mutation is invalid
+            // given the current state, not an I/O or credential-store
+            // failure. Each gets its own structural kind so the UI can
+            // branch without reading the message.
+            SwitchError::AlreadyRegistered(_) => IpcError::AlreadyRegistered(e.to_string()),
+            SwitchError::CannotDisableActive(_) => IpcError::CannotDisableActive(e.to_string()),
+            // Malformed user input (an obviously-bad pasted token) and
+            // everything else genuinely uncategorized fall to `Internal` —
+            // the UI still gets the full, specific message via `e.to_string()`.
+            SwitchError::UnknownAccount(_)
             | SwitchError::InvalidToken(_)
-            | SwitchError::InvalidCredential(_)
-            | SwitchError::CannotDisableActive(_) => IpcError::Internal(e.to_string()),
-            _ => IpcError::Internal(e.to_string()),
+            | SwitchError::Io(_)
+            | SwitchError::Json(_) => IpcError::Internal(e.to_string()),
         }
     }
 }
 
 /// Maps [`login::LoginError`] to [`IpcError`] by meaning, not convenience —
 /// the UI (`describeInteractiveLoginError` in `src/App.tsx`) branches on the
-/// resulting message text, not just the tagged `kind`:
+/// tagged `kind` alone, never on `detail` text:
 ///
-/// - [`LoginError::Cancelled`] — the ordinary "closed the terminal without
-///   logging in" outcome, not a failure. Its `Display` text ("login was
-///   cancelled") is what the UI matches via a `.includes("cancel")` check to
-///   return `null` and render nothing, rather than an alarming banner. No
-///   dedicated `IpcError` kind exists for "calm, non-error" today, so this
-///   rides `Internal` — the same place every other business-rule outcome
-///   without its own kind lands (see [`SwitchError::AlreadyRegistered`] etc.
-///   above) — and the message text alone carries the distinction.
-/// - [`LoginError::TimedOut`], [`LoginError::ClaudeNotInstalled`],
-///   [`LoginError::NoTerminalAvailable`] — each variant's own `Display` text
-///   is already a distinct, specific, content-free description (see
-///   `login.rs`), so these also ride `Internal` unchanged; the UI's substring
-///   matching (`"time"`, `"not installed"`/`"not found"`/`"path"`,
-///   `"terminal"`) keys directly off that wording.
-///   [`LoginError::NoTerminalAvailable`]'s message already names "terminal
-///   emulator", which is what lets the UI point the user at the "Add token"
-///   fallback for this one specifically.
+/// - [`LoginError::Cancelled`] → [`IpcError::Cancelled`] — the ordinary
+///   "closed the terminal without logging in" outcome, not a failure. The UI
+///   checks `err.isCancelled` and returns `null` (render nothing) for this
+///   one specifically. Rewording `LoginError::Cancelled`'s `Display` text can
+///   never affect this again, because the UI never reads it.
+/// - [`LoginError::TimedOut`] → [`IpcError::TimedOut`].
+/// - [`LoginError::ClaudeNotInstalled`] → [`IpcError::PrerequisiteMissing`] —
+///   the `claude` binary isn't on PATH.
+/// - [`LoginError::NoTerminalAvailable`] → [`IpcError::NoTerminalAvailable`]
+///   — lets the UI point the user at the "Add token" fallback for this one
+///   specifically.
 /// - [`LoginError::BadCredential`] — a credential landed but did not
 ///   validate, which is a credential-store problem rather than a generic
 ///   internal failure, so this maps to `IpcError::Credential` (matching how
@@ -92,17 +126,20 @@ impl From<SwitchError> for IpcError {
 /// - [`LoginError::Io`] — a filesystem/process-spawn failure unrelated to the
 ///   login flow itself; `Internal`, same as every uncategorized `SwitchError`.
 ///
+/// Listed exhaustively (no catch-all `_`) so a variant added to `LoginError`
+/// later is a compile error here, not a silent `Internal`.
+///
 /// The credential blob itself is never part of any [`LoginError`] variant (see
 /// `login.rs`'s "never logged" rule), so no arm here can ever surface it.
 impl From<LoginError> for IpcError {
     fn from(e: LoginError) -> Self {
         match &e {
+            LoginError::Cancelled => IpcError::Cancelled,
+            LoginError::TimedOut => IpcError::TimedOut(e.to_string()),
+            LoginError::ClaudeNotInstalled => IpcError::PrerequisiteMissing(e.to_string()),
+            LoginError::NoTerminalAvailable => IpcError::NoTerminalAvailable(e.to_string()),
             LoginError::BadCredential(_) => IpcError::Credential(e.to_string()),
-            LoginError::Cancelled
-            | LoginError::TimedOut
-            | LoginError::ClaudeNotInstalled
-            | LoginError::NoTerminalAvailable
-            | LoginError::Io(_) => IpcError::Internal(e.to_string()),
+            LoginError::Io(_) => IpcError::Internal(e.to_string()),
         }
     }
 }
@@ -291,7 +328,11 @@ pub async fn interactive_login(
     alias: Option<String>,
 ) -> IpcResult<Snapshot> {
     let outcome = login::interactive_login().await?;
-    switcher::add_oauth_credential(&outcome.credentials, outcome.email.as_deref(), alias.as_deref())?;
+    switcher::add_oauth_credential(
+        &outcome.credentials,
+        outcome.email.as_deref(),
+        alias.as_deref(),
+    )?;
     let snap = snapshot_uncached(&state).await?;
     crate::poller::publish_snapshot(&app, &snap);
     Ok(snap)
@@ -434,7 +475,9 @@ pub fn history_summary(
     state: tauri::State<'_, AppState>,
     days: Option<i64>,
 ) -> IpcResult<Option<crate::history::HistorySummary>> {
-    let Some(h) = state.history.as_ref() else { return Ok(None) };
+    let Some(h) = state.history.as_ref() else {
+        return Ok(None);
+    };
     h.summary(days.unwrap_or(30))
         .map(Some)
         .map_err(|e| IpcError::Internal(e.to_string()))
@@ -450,7 +493,9 @@ pub fn history_series(
     account_key: String,
     days: Option<i64>,
 ) -> IpcResult<Vec<crate::history::DayStat>> {
-    let Some(h) = state.history.as_ref() else { return Ok(Vec::new()) };
+    let Some(h) = state.history.as_ref() else {
+        return Ok(Vec::new());
+    };
     h.daily_rollup(&account_key, days.unwrap_or(30))
         .map_err(|e| IpcError::Internal(e.to_string()))
 }
@@ -505,72 +550,77 @@ mod tests {
         assert!(json.contains("notConfigured"), "got {json}");
 
         let json = serde_json::to_string(&IpcError::Busy("locked".into())).unwrap();
-        assert!(json.contains("busy") && json.contains("locked"), "got {json}");
+        assert!(
+            json.contains("busy") && json.contains("locked"),
+            "got {json}"
+        );
     }
 
     // -- LoginError -> IpcError mapping ---------------------------------------
     //
     // The UI (`describeInteractiveLoginError` in `src/App.tsx`) branches on
-    // substrings of the message text, not the tagged `kind` — these tests
-    // pin the exact wording contract it depends on.
+    // the tagged `kind` alone — these tests pin that structural contract,
+    // not any message wording.
 
     #[test]
-    fn login_cancelled_produces_a_message_the_ui_can_recognise_as_calm() {
+    fn login_cancelled_maps_to_cancelled_kind_specifically() {
+        // This is the one regression that is silent and user-visible: if a
+        // cancelled login stopped mapping to `Cancelled`, closing the
+        // terminal would start rendering as an alarming failure instead of
+        // quietly returning to rest.
         let mapped: IpcError = LoginError::Cancelled.into();
-        match mapped {
-            IpcError::Internal(msg) => {
-                assert!(msg.to_lowercase().contains("cancel"), "got {msg}")
-            }
-            other => panic!("expected Internal, got {other:?}"),
-        }
+        assert!(matches!(mapped, IpcError::Cancelled), "got {mapped:?}");
+
+        let json = serde_json::to_string(&mapped).unwrap();
+        assert!(json.contains("cancelled"), "got {json}");
     }
 
     #[test]
-    fn login_timed_out_message_is_distinct_from_cancellation() {
+    fn login_timed_out_maps_to_timed_out_kind_not_cancelled() {
         let mapped: IpcError = LoginError::TimedOut.into();
-        match mapped {
-            IpcError::Internal(msg) => {
-                let lower = msg.to_lowercase();
-                assert!(lower.contains("time"), "got {msg}");
-                assert!(!lower.contains("cancel"), "must not read as a cancellation: {msg}");
-            }
-            other => panic!("expected Internal, got {other:?}"),
-        }
+        assert!(matches!(mapped, IpcError::TimedOut(_)), "got {mapped:?}");
+        assert!(!matches!(mapped, IpcError::Cancelled));
+
+        let json = serde_json::to_string(&mapped).unwrap();
+        assert!(json.contains("timedOut"), "got {json}");
     }
 
     #[test]
-    fn login_claude_not_installed_message_points_at_installation() {
+    fn login_claude_not_installed_maps_to_prerequisite_missing() {
         let mapped: IpcError = LoginError::ClaudeNotInstalled.into();
-        match mapped {
-            IpcError::Internal(msg) => {
-                let lower = msg.to_lowercase();
-                assert!(lower.contains("not found") || lower.contains("path"), "got {msg}");
-            }
-            other => panic!("expected Internal, got {other:?}"),
-        }
+        assert!(
+            matches!(mapped, IpcError::PrerequisiteMissing(_)),
+            "got {mapped:?}"
+        );
+
+        let json = serde_json::to_string(&mapped).unwrap();
+        assert!(json.contains("prerequisiteMissing"), "got {json}");
     }
 
     #[test]
-    fn login_no_terminal_available_message_names_terminal_for_the_add_token_fallback() {
+    fn login_no_terminal_available_maps_to_its_own_kind_for_the_add_token_fallback() {
         let mapped: IpcError = LoginError::NoTerminalAvailable.into();
-        match mapped {
-            IpcError::Internal(msg) => {
-                assert!(msg.to_lowercase().contains("terminal"), "got {msg}")
-            }
-            other => panic!("expected Internal, got {other:?}"),
-        }
+        assert!(
+            matches!(mapped, IpcError::NoTerminalAvailable(_)),
+            "got {mapped:?}"
+        );
+
+        let json = serde_json::to_string(&mapped).unwrap();
+        assert!(json.contains("noTerminalAvailable"), "got {json}");
     }
 
     #[test]
     fn login_bad_credential_maps_to_credential_kind_and_stays_content_free() {
-        let mapped: IpcError = LoginError::BadCredential(
-            "credential file did not contain a usable access token",
-        )
-        .into();
+        let mapped: IpcError =
+            LoginError::BadCredential("credential file did not contain a usable access token")
+                .into();
         match mapped {
             IpcError::Credential(msg) => {
                 assert!(msg.contains("could not be validated"), "got {msg}");
-                assert!(!msg.contains("accessToken\":\""), "must never echo raw credential bytes");
+                assert!(
+                    !msg.contains("accessToken\":\""),
+                    "must never echo raw credential bytes"
+                );
             }
             other => panic!("expected Credential, got {other:?}"),
         }
@@ -580,5 +630,71 @@ mod tests {
     fn login_io_error_maps_to_internal() {
         let mapped: IpcError = LoginError::Io(std::io::Error::other("spawn failed")).into();
         assert!(matches!(mapped, IpcError::Internal(_)));
+    }
+
+    // -- SwitchError -> IpcError mapping (business-rule refusals) ------------
+
+    #[test]
+    fn switch_already_registered_maps_to_its_own_kind() {
+        let mapped: IpcError = SwitchError::AlreadyRegistered("1".to_string()).into();
+        assert!(
+            matches!(mapped, IpcError::AlreadyRegistered(_)),
+            "got {mapped:?}"
+        );
+
+        let json = serde_json::to_string(&mapped).unwrap();
+        assert!(json.contains("alreadyRegistered"), "got {json}");
+    }
+
+    #[test]
+    fn switch_cannot_disable_active_maps_to_its_own_kind() {
+        let mapped: IpcError = SwitchError::CannotDisableActive("1".to_string()).into();
+        assert!(
+            matches!(mapped, IpcError::CannotDisableActive(_)),
+            "got {mapped:?}"
+        );
+
+        let json = serde_json::to_string(&mapped).unwrap();
+        assert!(json.contains("cannotDisableActive"), "got {json}");
+    }
+
+    #[test]
+    fn switch_locking_maps_to_busy() {
+        let underlying = crate::locking::LockingError::Timeout {
+            path: std::path::PathBuf::from("/tmp/lock"),
+        };
+        let mapped: IpcError = SwitchError::Locking(underlying).into();
+        assert!(matches!(mapped, IpcError::Busy(_)), "got {mapped:?}");
+    }
+
+    #[test]
+    fn switch_credential_store_problems_map_to_credential_kind() {
+        for e in [
+            SwitchError::Credential(crate::credentials::CredentialError::Write(
+                "disk full".to_string(),
+            )),
+            SwitchError::CredentialRead,
+            SwitchError::NoStoredCredentials("1".to_string()),
+            SwitchError::NoStoredConfig("1".to_string()),
+            SwitchError::InvalidBackupConfig("1".to_string()),
+            SwitchError::EmptyActiveCredential("1".to_string()),
+            SwitchError::Stash("write failed".to_string()),
+            SwitchError::NoLiveCredential,
+            SwitchError::InvalidCredential("bad json".to_string()),
+        ] {
+            let mapped: IpcError = e.into();
+            assert!(matches!(mapped, IpcError::Credential(_)), "got {mapped:?}");
+        }
+    }
+
+    #[test]
+    fn switch_uncategorized_variants_map_to_internal() {
+        for e in [
+            SwitchError::UnknownAccount("99".to_string()),
+            SwitchError::InvalidToken("token is empty".to_string()),
+        ] {
+            let mapped: IpcError = e.into();
+            assert!(matches!(mapped, IpcError::Internal(_)), "got {mapped:?}");
+        }
     }
 }
