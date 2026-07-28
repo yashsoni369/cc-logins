@@ -307,7 +307,9 @@ pub fn run() {
             commands::history_series,
             commands::history_available,
             commands::get_settings,
-            commands::set_settings,
+            commands::update_settings,
+            commands::snooze_auto_switch,
+            commands::resume_auto_switch,
             commands::data_locations,
         ])
         .setup(move |app| {
@@ -336,9 +338,8 @@ pub fn run() {
                 let cfg = poller_config_from_settings(
                     &app.state::<commands::AppState>()
                         .settings
-                        .lock()
-                        .map(|s| s.clone())
-                        .unwrap_or_default(),
+                        .snapshot()
+                        .settings,
                 );
                 let poller_handle = handle.clone();
                 tauri::async_runtime::spawn(async move {
