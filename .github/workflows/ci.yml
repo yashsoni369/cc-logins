@@ -87,11 +87,12 @@ jobs:
             frontend=true
           fi
 
-          # Editing the checks themselves means running them.
-          if has '^\.github/workflows/ci\.yml$'; then
-            rust=true
-            frontend=true
-          fi
+          # Editing this file deliberately does NOT force the other jobs to
+          # run. Rewiring CI without watching it run is a real risk, but paying
+          # the three-OS matrix on every workflow tweak is a certain cost
+          # against an occasional one. Use the Actions tab's "Run workflow"
+          # button when a CI change needs full proof — workflow_dispatch is not
+          # a pull request, so it takes the branch above and checks everything.
 
           echo "rust=$rust frontend=$frontend workflows=$workflows"
           {
