@@ -348,6 +348,21 @@ export async function interactiveLogin(alias?: string): Promise<Snapshot> {
 }
 
 /**
+ * Re-authenticate one existing account in place. The backend proves the
+ * isolated login belongs to `accountNumber`; a different or unresolved
+ * identity is rejected before any stored credential is changed.
+ */
+export async function reloginAccount(accountNumber: number): Promise<Snapshot> {
+  if (!hasBackend()) {
+    throw new IpcError(
+      "internal",
+      "Not running in the desktop app, so an account cannot be re-authenticated.",
+    );
+  }
+  return call<Snapshot>("relogin_account", { accountNumber });
+}
+
+/**
  * Registers an account from a pasted setup-token or API key rather than a
  * live Claude Code session. The token only ever passes through here on its
  * way to the backend — callers must not log, echo, or hold onto it.

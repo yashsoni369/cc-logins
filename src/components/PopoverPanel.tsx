@@ -105,6 +105,7 @@ export default function PopoverPanel() {
   const [now, setNow] = useState(Date.now);
 
   const phase = daemon.status?.phase;
+  const recoveryBlocked = phase?.kind === "recoveryRequired";
   useEffect(() => {
     if (phase?.kind !== "warning") return;
     const timer = window.setInterval(() => setNow(Date.now()), 1000);
@@ -264,7 +265,7 @@ export default function PopoverPanel() {
           const disabled = account.usageStatus === "disabled";
           const needsRelogin = account.usageStatus === "reloginrequired";
           const hasForeignCredential = account.usageStatus === "foreigncredential";
-          const unavailable = disabled || needsRelogin;
+          const unavailable = disabled || needsRelogin || recoveryBlocked;
           const isNext = phase?.kind === "warning" && phase.to === account.number;
           const isPending = pendingAccount === account.number;
           const age = ageLabel(account.usageAgeSeconds);
@@ -302,7 +303,7 @@ export default function PopoverPanel() {
             <button
               type="button"
               className="btn"
-              disabled={pendingAccount !== null || warningTarget.usageStatus === "reloginrequired"}
+              disabled={recoveryBlocked || pendingAccount !== null || warningTarget.usageStatus === "reloginrequired"}
               onClick={() => handleSwitch(warningTarget.number)}
             >
               Switch now

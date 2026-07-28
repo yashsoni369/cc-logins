@@ -1706,6 +1706,14 @@ fn ensure_accounts_object(data: &mut Map<String, Value>) {
     }
 }
 
+fn refuse_pending_recovery() -> Result<(), SwitchError> {
+    if crate::switch_transaction::recovery_requirement().is_some() {
+        Err(crate::switch_transaction::TransactionError::RecoveryRequired.into())
+    } else {
+        Ok(())
+    }
+}
+
 /// The lowest slot number `>= 1` not already used as an `accounts` key.
 ///
 /// Deliberately *not* upstream's `max(existing) + 1` (`_get_next_account_number`):
@@ -2021,6 +2029,7 @@ fn add_current_account_with_timeout(
     // written) — no cswap-compat lock needed, see the module-level locking
     // locking section above.
     let _lock = crate::locking::acquire_or_err(vault_lock_path(), timeout)?;
+    refuse_pending_recovery()?;
 
     let mut data = read_sequence_data().unwrap_or_default();
     ensure_accounts_object(&mut data);
@@ -2243,6 +2252,7 @@ fn add_token_with_timeout(
     // Vault-only write (never touches the official files) — vault lock alone
     // suffices, same reasoning as `add_current_account_with_timeout`.
     let _lock = crate::locking::acquire_or_err(vault_lock_path(), timeout)?;
+    refuse_pending_recovery()?;
 
     let mut data = read_sequence_data().unwrap_or_default();
     ensure_accounts_object(&mut data);
@@ -2400,6 +2410,133 @@ pub fn add_oauth_credential(
     )
 }
 
+/// Replace one existing slot's OAuth credential after an isolated re-login.
+///
+/// This mirrors cswap's add-existing-account behavior: keep the slot and all
+/// registry metadata, replace only its credential generation, and clear the
+/// obsolete dead-token verdict after the writes commit. Replacement is stricter
+/// than a new add: an unresolved or mismatched identity fails closed because a
+/// credential must never be written into a user-selected slot on guesswork.
+pub fn replace_oauth_credential(
+    account_number: u32,
+    credentials_json: &str,
+    uuid: Option<&str>,
+    email: Option<&str>,
+    organization_uuid: Option<&str>,
+) -> Result<(), SwitchError> {
+    replace_oauth_credential_with_timeout(
+        account_number,
+        credentials_json,
+        uuid,
+        email,
+        organization_uuid,
+        crate::locking::DEFAULT_TIMEOUT,
+    )
+}
+
+fn replace_oauth_credential_with_timeout(
+    account_number: u32,
+    credentials_json: &str,
+    uuid: Option<&str>,
+    email: Option<&str>,
+    organization_uuid: Option<&str>,
+    timeout: Duration,
+) -> Result<(), SwitchError> {
+    let trimmed = credentials_json.trim();
+    let oauth = oauth::extract_oauth_data(trimmed).ok_or_else(|| {
+        SwitchError::InvalidCredential("credential is not valid OAuth JSON".to_string())
+    })?;
+    let has_token_pair = ["accessToken", "refreshToken"].into_iter().all(|field| {
+        oauth
+            .get(field)
+            .and_then(Value::as_str)
+            .is_some_and(|value| !value.is_empty())
+    });
+    if !has_token_pair {
+        return Err(SwitchError::InvalidCredential(
+            "credential lacks a complete OAuth token pair".to_string(),
+        ));
+    }
+
+    let replacement_identity = ResolvedIdentity {
+        uuid: uuid.filter(|value| !value.is_empty()).map(str::to_string),
+        organization_uuid: organization_uuid
+            .filter(|value| !value.is_empty())
+            .map(str::to_string),
+        email: email.filter(|value| !value.is_empty()).map(str::to_string),
+    };
+    if replacement_identity.uuid.is_none()
+        && (replacement_identity.organization_uuid.is_none()
+            || replacement_identity.email.is_none())
+    {
+        return Err(SwitchError::InvalidCredential(
+            "the signed-in account identity could not be verified; try again while online"
+                .to_string(),
+        ));
+    }
+
+    // This may update both the vault and Claude Code's active credential, so
+    // use the complete canonical lock set even for an inactive target.
+    let _locks = crate::switch_transaction::acquire_live_state_locks(timeout)?;
+    if crate::switch_transaction::recovery_requirement().is_some() {
+        return Err(crate::switch_transaction::TransactionError::RecoveryRequired.into());
+    }
+
+    let data = read_sequence_data().ok_or(SwitchError::NoAccountsManaged)?;
+    let number = account_number.to_string();
+    let record = data
+        .get("accounts")
+        .and_then(Value::as_object)
+        .and_then(|accounts| accounts.get(&number))
+        .and_then(Value::as_object)
+        .ok_or_else(|| SwitchError::UnknownAccount(number.clone()))?;
+    let existing_identity = identity_from_record(record);
+    if !identity_matches(&replacement_identity, &existing_identity) {
+        return Err(SwitchError::InvalidCredential(format!(
+            "the signed-in account does not match account {number}"
+        )));
+    }
+    let stored_email = record
+        .get("email")
+        .and_then(Value::as_str)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| SwitchError::InvalidCredential("stored account has no email".into()))?
+        .to_string();
+    let stable_key = accounts_from_sequence(&data)
+        .into_iter()
+        .find(|account| account.number == account_number)
+        .ok_or_else(|| SwitchError::UnknownAccount(number.clone()))?
+        .stable_key();
+
+    let mut store = CredentialStore::new(GuiStoreHost);
+    let previous = store.read_account_credentials(&number, &stored_email);
+    store.write_account_credentials(&number, &stored_email, trimmed)?;
+
+    if current_account_number(&data).as_deref() == Some(number.as_str()) {
+        if let Err(error) = store.write_refreshed_oauth_credentials(trimmed) {
+            if !previous.is_empty() {
+                if let Err(restore_error) =
+                    store.write_account_credentials(&number, &stored_email, &previous)
+                {
+                    return Err(SwitchError::Credential(CredentialError::Write(format!(
+                        "active re-login failed and the previous slot backup could not be restored: {restore_error}"
+                    ))));
+                }
+            }
+            return Err(error.into());
+        }
+    }
+
+    let fingerprint = oauth::credential_fingerprint(trimmed)
+        .unwrap_or_else(|| oauth_refresh::credential_generation(trimmed));
+    if let Err(error) =
+        OAuthQuarantine::new(paths::backup_root()).clear_obsolete(&stable_key, &fingerprint)
+    {
+        log::warn!("could not clear obsolete OAuth quarantine after re-login: {error}");
+    }
+    Ok(())
+}
+
 fn add_oauth_credential_with_timeout(
     credentials_json: &str,
     email: Option<&str>,
@@ -2444,6 +2581,7 @@ fn add_oauth_credential_with_timeout(
     // vault lock alone suffices, same reasoning as
     // `add_current_account_with_timeout`.
     let _lock = crate::locking::acquire_or_err(vault_lock_path(), timeout)?;
+    refuse_pending_recovery()?;
 
     let mut data = read_sequence_data().unwrap_or_default();
     ensure_accounts_object(&mut data);
@@ -2569,6 +2707,7 @@ fn set_account_enabled_with_timeout(
     // `disabled` lives only in our own sequence.json — vault-only, same
     // reasoning as `add_current_account_with_timeout`.
     let _lock = crate::locking::acquire_or_err(vault_lock_path(), timeout)?;
+    refuse_pending_recovery()?;
 
     let mut data = read_sequence_data().ok_or(SwitchError::NoAccountsManaged)?;
     let num = number.to_string();
@@ -2693,6 +2832,7 @@ fn import_from_cswap_with_timeout(timeout: Duration) -> Result<ImportOutcome, Sw
     }
 
     let (_cswap_lock, _lock) = acquire_import_locks(timeout)?;
+    refuse_pending_recovery()?;
 
     let Some(source_data) = read_sequence_data_at(&cswap_root) else {
         return Ok(ImportOutcome::default());
@@ -5102,6 +5242,175 @@ mod tests {
             !quarantine.is_rejected(&stable_key, &old_fingerprint),
             "a committed replacement must release the prior dead-token lineage"
         );
+    }
+
+    #[test]
+    fn relogin_replaces_the_selected_active_slot_and_preserves_its_registry_record() {
+        let _env = setup_env();
+        let email = "recovered@example.com";
+        let old = oauth_creds_json("dead-refresh", "dead-access");
+        let replacement = oauth_creds_json("fresh-refresh", "fresh-access");
+        write_json_file(
+            &accounts_file(),
+            &serde_json::json!({
+                "sequence": [1],
+                "activeAccountNumber": 1,
+                "accounts": {
+                    "1": {
+                        "email": email,
+                        "organizationUuid": "org-1",
+                        "uuid": "uuid-1",
+                        "alias": "Work",
+                        "added": "2026-01-01T00:00:00Z"
+                    }
+                }
+            }),
+        );
+        write_json_file(
+            &paths::global_config_path(),
+            &serde_json::json!({
+                "oauthAccount": {"emailAddress": email, "organizationUuid": "org-1"}
+            }),
+        );
+        let mut store = CredentialStore::new(GuiStoreHost);
+        store.write_account_credentials("1", email, &old).unwrap();
+        store.write_refreshed_oauth_credentials(&old).unwrap();
+        let account = read_accounts().unwrap().remove(0);
+        let quarantine = OAuthQuarantine::new(paths::backup_root());
+        let old_fingerprint = oauth::credential_fingerprint(&old).unwrap();
+        quarantine
+            .reject(&account.stable_key(), &old_fingerprint, chrono::Utc::now())
+            .unwrap();
+
+        replace_oauth_credential_with_timeout(
+            1,
+            &replacement,
+            Some("uuid-1"),
+            Some(email),
+            Some("org-1"),
+            Duration::from_secs(1),
+        )
+        .unwrap();
+
+        let registry: Value =
+            serde_json::from_str(&std::fs::read_to_string(accounts_file()).unwrap()).unwrap();
+        assert_eq!(registry["accounts"]["1"]["alias"], "Work");
+        assert_eq!(registry["accounts"]["1"]["added"], "2026-01-01T00:00:00Z");
+        assert_eq!(registry["activeAccountNumber"], 1);
+        assert_eq!(store.read_account_credentials("1", email), replacement);
+        assert_eq!(
+            store.read_active_credentials().value.as_deref(),
+            Some(replacement.as_str())
+        );
+        assert!(!quarantine.is_rejected(&account.stable_key(), &old_fingerprint));
+    }
+
+    #[test]
+    fn relogin_replaces_an_inactive_slot_without_touching_the_live_credential() {
+        let _env = setup_env();
+        let active_email = "active@example.com";
+        let inactive_email = "inactive@example.com";
+        let live = oauth_creds_json("live-refresh", "live-access");
+        let old = oauth_creds_json("old-refresh", "old-access");
+        let replacement = oauth_creds_json("fresh-refresh", "fresh-access");
+        write_json_file(
+            &accounts_file(),
+            &serde_json::json!({
+                "sequence": [1, 2],
+                "activeAccountNumber": 1,
+                "accounts": {
+                    "1": {"email": active_email, "organizationUuid": "org-1", "uuid": "uuid-1"},
+                    "2": {"email": inactive_email, "organizationUuid": "org-2", "uuid": "uuid-2", "alias": "Spare"}
+                }
+            }),
+        );
+        write_json_file(
+            &paths::global_config_path(),
+            &serde_json::json!({
+                "oauthAccount": {"emailAddress": active_email, "organizationUuid": "org-1"}
+            }),
+        );
+        let mut store = CredentialStore::new(GuiStoreHost);
+        store
+            .write_account_credentials("2", inactive_email, &old)
+            .unwrap();
+        store.write_refreshed_oauth_credentials(&live).unwrap();
+
+        replace_oauth_credential_with_timeout(
+            2,
+            &replacement,
+            Some("uuid-2"),
+            Some(inactive_email),
+            Some("org-2"),
+            Duration::from_secs(1),
+        )
+        .unwrap();
+
+        assert_eq!(
+            store.read_account_credentials("2", inactive_email),
+            replacement
+        );
+        assert_eq!(
+            store.read_active_credentials().value.as_deref(),
+            Some(live.as_str())
+        );
+        let registry: Value =
+            serde_json::from_str(&std::fs::read_to_string(accounts_file()).unwrap()).unwrap();
+        assert_eq!(registry["accounts"]["2"]["alias"], "Spare");
+        assert_eq!(registry["activeAccountNumber"], 1);
+    }
+
+    #[test]
+    fn relogin_refuses_a_different_identity_without_changing_credentials() {
+        let _env = setup_env();
+        let email = "owner@example.com";
+        let old = oauth_creds_json("old-refresh", "old-access");
+        let replacement = oauth_creds_json("other-refresh", "other-access");
+        write_json_file(
+            &accounts_file(),
+            &serde_json::json!({
+                "sequence": [1],
+                "accounts": {
+                    "1": {"email": email, "organizationUuid": "org-1", "uuid": "uuid-1"}
+                }
+            }),
+        );
+        let mut store = CredentialStore::new(GuiStoreHost);
+        store.write_account_credentials("1", email, &old).unwrap();
+
+        let error = replace_oauth_credential_with_timeout(
+            1,
+            &replacement,
+            Some("uuid-2"),
+            Some("other@example.com"),
+            Some("org-2"),
+            Duration::from_secs(1),
+        )
+        .unwrap_err();
+
+        assert!(matches!(error, SwitchError::InvalidCredential(_)));
+        assert_eq!(store.read_account_credentials("1", email), old);
+    }
+
+    #[test]
+    fn registry_mutations_refuse_pending_switch_recovery() {
+        let _env = setup_env();
+        write_json_file(
+            &accounts_file(),
+            &serde_json::json!({
+                "sequence": [1],
+                "accounts": {"1": {"email": "owner@example.com"}}
+            }),
+        );
+        crate::switch_transaction::set_recovery_requirement(Some("repair required".into()));
+
+        let error = set_account_enabled_with_timeout(1, false, Duration::from_secs(1)).unwrap_err();
+
+        crate::switch_transaction::set_recovery_requirement(None);
+        assert!(matches!(
+            error,
+            SwitchError::Transaction(crate::switch_transaction::TransactionError::RecoveryRequired)
+        ));
     }
 
     #[test]

@@ -8,6 +8,7 @@ import {
   IpcError,
   onDaemonStatusUpdated,
   onSettingsUpdated,
+  reloginAccount,
   resumeAutoSwitch,
   snoozeAutoSwitch,
   updateSettings,
@@ -75,6 +76,18 @@ describe("runtime IPC contracts", () => {
       ["snooze_auto_switch", { input: { durationSeconds: 3600 } }],
       ["resume_auto_switch", {}],
     ]);
+  });
+
+  it("re-authenticates the selected existing account", async () => {
+    const calls: Array<[string, unknown]> = [];
+    mockIPC((command, args) => {
+      calls.push([command, args]);
+      return { schemaVersion: 1, environments: [] };
+    });
+
+    await reloginAccount(7);
+
+    expect(calls).toEqual([["relogin_account", { accountNumber: 7 }]]);
   });
 
   it("preserves structural settings conflict detail", async () => {

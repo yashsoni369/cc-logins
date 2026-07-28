@@ -157,14 +157,14 @@ thread_local! {
 }
 
 #[cfg(not(test))]
-fn set_recovery_requirement(detail: Option<String>) {
+pub(crate) fn set_recovery_requirement(detail: Option<String>) {
     *recovery_state()
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner()) = detail;
 }
 
 #[cfg(test)]
-fn set_recovery_requirement(detail: Option<String>) {
+pub(crate) fn set_recovery_requirement(detail: Option<String>) {
     TEST_RECOVERY_STATE.with(|state| *state.borrow_mut() = detail);
 }
 

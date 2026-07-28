@@ -376,6 +376,13 @@ fn merge_environments(snap: &mut Snapshot) {
 // ─── mutating commands ───────────────────────────────────────────────────────
 // These change which login Claude Code will use. Never call from a poller.
 
+fn refuse_if_recovery_required() -> IpcResult<()> {
+    match crate::switch_transaction::recovery_requirement() {
+        Some(detail) => Err(IpcError::RecoveryRequired(detail)),
+        None => Ok(()),
+    }
+}
+
 /// Switch the live login to `account_number`.
 ///
 /// Explicitly user-initiated. Takes the credential lock for the whole mutation
@@ -393,6 +400,7 @@ pub async fn switch_account(
     app: tauri::AppHandle,
     account_number: u32,
 ) -> IpcResult<Snapshot> {
+    refuse_if_recovery_required()?;
     let accounts = switcher::read_accounts()?;
     let target = accounts
         .iter()
@@ -430,6 +438,7 @@ pub async fn add_current_account(
     app: tauri::AppHandle,
     alias: Option<String>,
 ) -> IpcResult<Snapshot> {
+    refuse_if_recovery_required()?;
     switcher::add_current_account(alias.as_deref())?;
     let snap = snapshot_uncached(&state).await?;
     crate::poller::publish_snapshot(&app, &snap);
@@ -466,11 +475,38 @@ pub async fn interactive_login(
     app: tauri::AppHandle,
     alias: Option<String>,
 ) -> IpcResult<Snapshot> {
+    refuse_if_recovery_required()?;
     let outcome = login::interactive_login().await?;
+    refuse_if_recovery_required()?;
     switcher::add_oauth_credential(
         &outcome.credentials,
         outcome.email.as_deref(),
         alias.as_deref(),
+    )?;
+    let snap = snapshot_uncached(&state).await?;
+    crate::poller::publish_snapshot(&app, &snap);
+    Ok(snap)
+}
+
+/// Re-authenticate one existing slot without creating a duplicate account.
+/// The login runs in the same isolated temporary config used by
+/// [`interactive_login`]; the captured identity must match `account_number`
+/// before the backend writes any credential bytes.
+#[tauri::command]
+pub async fn relogin_account(
+    state: tauri::State<'_, AppState>,
+    app: tauri::AppHandle,
+    account_number: u32,
+) -> IpcResult<Snapshot> {
+    refuse_if_recovery_required()?;
+    let outcome = login::interactive_login().await?;
+    refuse_if_recovery_required()?;
+    switcher::replace_oauth_credential(
+        account_number,
+        &outcome.credentials,
+        outcome.uuid.as_deref(),
+        outcome.email.as_deref(),
+        outcome.organization_uuid.as_deref(),
     )?;
     let snap = snapshot_uncached(&state).await?;
     crate::poller::publish_snapshot(&app, &snap);
@@ -493,6 +529,7 @@ pub async fn add_token(
     email: Option<String>,
     alias: Option<String>,
 ) -> IpcResult<Snapshot> {
+    refuse_if_recovery_required()?;
     switcher::add_token(&token, email.as_deref(), alias.as_deref())?;
     let snap = snapshot_uncached(&state).await?;
     crate::poller::publish_snapshot(&app, &snap);
@@ -512,6 +549,7 @@ pub async fn set_account_enabled(
     account_number: u32,
     enabled: bool,
 ) -> IpcResult<Snapshot> {
+    refuse_if_recovery_required()?;
     switcher::set_account_enabled(account_number, enabled)?;
     let snap = snapshot_uncached(&state).await?;
     crate::poller::publish_snapshot(&app, &snap);

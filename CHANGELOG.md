@@ -25,6 +25,9 @@ when it happens.
 - Local usage history in SQLite, with burn-rate charts over days and weeks.
 - Interactive sign-in that runs `claude auth login` in an isolated
   `CLAUDE_CONFIG_DIR`, so the live login is never disturbed.
+- In-place re-login for rejected OAuth accounts. The selected slot, alias, and
+  account metadata are preserved, and the replacement is accepted only when
+  the isolated login resolves to the same account identity.
 - WSL awareness on Windows: native and per-distro logins are detected as separate
   environments, and a stopped distro is never woken by a background poll.
 - Refresh control on the Accounts screen and in the tray popover, rate-limited in the
@@ -34,7 +37,8 @@ when it happens.
   pinned Python-protocol/Rust, and optional installed-`claude_swap` interoperability tests.
 - Recoverable account switching with Claude Code-compatible credential/config locks,
   protected before-images, a secret-free durable journal, exact rollback, startup
-  recovery, and an explicit `recoveryRequired` UI state.
+  recovery, an explicit `recoveryRequired` UI state, and backend-enforced blocking
+  of every credential or account-registry mutation until recovery succeeds.
 - Switch-time credential provenance checks matching current cswap: live bytes proven
   to belong to a different or recycled account are preserved in the unclaimed safety
   store and never written over the configured outgoing slot; an unavailable identity

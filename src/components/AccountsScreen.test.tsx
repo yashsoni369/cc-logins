@@ -1,4 +1,4 @@
-import { render, screen } from "@testing-library/react";
+import { fireEvent, render, screen } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 
 import AccountsScreen from "./AccountsScreen";
@@ -28,6 +28,7 @@ const snapshot: Snapshot = {
 
 describe("AccountsScreen dead credential rendering", () => {
   it("shows recovery guidance and prevents switching without calling it expired", () => {
+    const onRelogin = vi.fn();
     render(
       <AccountsScreen
         snapshot={snapshot}
@@ -43,6 +44,9 @@ describe("AccountsScreen dead credential rendering", () => {
         onInteractiveLogin={vi.fn()}
         pendingInteractiveLogin={false}
         interactiveLoginError={null}
+        onRelogin={onRelogin}
+        pendingReloginAccount={null}
+        reloginError={null}
         onSetEnabled={vi.fn()}
         pendingEnableAccount={null}
         enableError={null}
@@ -52,8 +56,10 @@ describe("AccountsScreen dead credential rendering", () => {
     );
 
     expect(screen.getByText("Re-login required")).toBeInTheDocument();
-    expect(screen.getByText(/sign in again and re-add this account/i)).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Switch" })).toBeDisabled();
+    expect(screen.getByText(/sign in again to replace this account/i)).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Switch" })).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Re-login" }));
+    expect(onRelogin).toHaveBeenCalledWith(2);
     expect(screen.queryByText(/expired/i)).not.toBeInTheDocument();
   });
 });

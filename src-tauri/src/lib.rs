@@ -291,6 +291,7 @@ pub fn run() {
             commands::switch_account,
             commands::add_current_account,
             commands::interactive_login,
+            commands::relogin_account,
             commands::add_token,
             commands::set_account_enabled,
             commands::history_summary,

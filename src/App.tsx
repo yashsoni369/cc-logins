@@ -7,15 +7,17 @@ import FirstRunScreen from "./components/FirstRunScreen";
 import { useSnapshot } from "./lib/useSnapshot";
 import { useTheme, type Theme } from "./lib/useTheme";
 import { useSettings } from "./lib/useSettings";
+import { useDaemonStatus } from "./lib/useDaemonStatus";
 import {
   addCurrentAccount,
   addToken,
   interactiveLogin,
   IpcError,
+  reloginAccount,
   setAccountEnabled,
   switchAccount,
 } from "./lib/api";
-import type { Snapshot } from "./types";
+import type { DaemonPhase, Snapshot } from "./types";
 
 type Screen = "accounts" | "history" | "environments" | "settings";
 
@@ -116,6 +118,49 @@ interface EnableError {
 const BUSY_MESSAGE =
   "Another process (very likely the cswap CLI) is using your accounts right now. Try again in a moment.";
 
+export function daemonPhaseLabel(phase: DaemonPhase | undefined, strategy: string | undefined): string {
+  const strategyLabel =
+    strategy === "next-available"
+      ? "next"
+      : strategy === "consume-first"
+        ? "consume first"
+        : "best";
+  switch (phase?.kind) {
+    case "disabled":
+      return "Off";
+    case "paused":
+      return "Paused";
+    case "cooldown":
+      return "Cooldown";
+    case "warning":
+      return "Switch pending";
+    case "switching":
+      return "Switching";
+    case "exhausted":
+      return "No account available";
+    case "degraded":
+      return "Degraded";
+    case "recoveryRequired":
+      return "Recovery required";
+    case "monitoring":
+      return `Running · ${strategyLabel}`;
+    default:
+      return "Loading…";
+  }
+}
+
+export function MainRecoveryBanner({ phase }: { phase: Extract<DaemonPhase, { kind: "recoveryRequired" }> }) {
+  return (
+    <div className="banner danger main-daemon-banner" role="alert">
+      <div>
+        <b>Recovery required</b>
+        <div>{phase.detail}</div>
+        <div>Account changes are disabled until recovery succeeds. Restart the app to retry recovery.</div>
+      </div>
+    </div>
+  );
+}
+
 /** Message for a failed "Add account" — worded specifically for the one failure users will actually hit. */
 function describeAddAccountError(err: unknown): string {
   if (err instanceof IpcError) {
@@ -196,6 +241,7 @@ export default function App() {
   const [screen, setScreen] = useState<Screen>("accounts");
   const { snapshot, live, loading, error, refresh } = useSnapshot();
   const settings = useSettings();
+  const daemon = useDaemonStatus();
   // Applies the persisted theme to this window's <html> and keeps it live
   // against OS changes. SettingsScreen gets the same instance as props
   // rather than mounting its own, so the segmented control there and the
@@ -210,6 +256,9 @@ export default function App() {
 
   const [pendingInteractiveLogin, setPendingInteractiveLogin] = useState(false);
   const [interactiveLoginError, setInteractiveLoginError] = useState<string | null>(null);
+
+  const [pendingReloginAccount, setPendingReloginAccount] = useState<number | null>(null);
+  const [reloginError, setReloginError] = useState<SwitchError | null>(null);
 
   const [pendingAddToken, setPendingAddToken] = useState(false);
   const [addTokenError, setAddTokenError] = useState<string | null>(null);
@@ -231,11 +280,15 @@ export default function App() {
   // the Accounts screen disable together while this is true: they all touch
   // the same single-writer credential store the backend guards with its
   // "busy" lock, so nothing is gained by letting two race to hit it at once.
+  const daemonPhase = daemon.status?.phase;
+  const recoveryBlocked = daemonPhase?.kind === "recoveryRequired";
   const mutationInFlight =
+    recoveryBlocked ||
     pendingAccount !== null ||
     pendingAddAccount ||
     pendingAddToken ||
     pendingInteractiveLogin ||
+    pendingReloginAccount !== null ||
     pendingEnableAccount !== null;
 
   // The ONLY call site for the mutating `switchAccount`. It is wired
@@ -289,6 +342,18 @@ export default function App() {
         if (message !== null) setInteractiveLoginError(message);
       })
       .finally(() => setPendingInteractiveLogin(false));
+  }, []);
+
+  const handleRelogin = useCallback((accountNumber: number) => {
+    setPendingReloginAccount(accountNumber);
+    setReloginError(null);
+    reloginAccount(accountNumber)
+      .then((result) => setSnapshotOverride(result))
+      .catch((err: unknown) => {
+        const message = describeInteractiveLoginError(err);
+        if (message !== null) setReloginError({ accountNumber, message });
+      })
+      .finally(() => setPendingReloginAccount(null));
   }, []);
 
   // The ONLY call site for `addToken`. Wired exclusively to AddTokenDialog's
@@ -405,45 +470,51 @@ export default function App() {
             </button>
           ))}
           <div className="grp">Auto-switch</div>
-          <span>Running · best</span>
+          <span>{daemonPhaseLabel(daemonPhase, settings.settings?.strategy)}</span>
 
           <NavThemeControl theme={theme.theme} onChange={theme.setTheme} />
         </div>
 
-        {screen === "accounts" && (
-          <AccountsScreen
-            snapshot={displaySnapshot}
-            onSwitch={handleSwitch}
-            pendingAccount={pendingAccount}
-            switchError={switchError}
-            onAddAccount={handleAddAccount}
-            pendingAddAccount={pendingAddAccount}
-            addAccountError={addAccountError}
-            onAddToken={handleAddToken}
-            pendingAddToken={pendingAddToken}
-            addTokenError={addTokenError}
-            onInteractiveLogin={handleInteractiveLogin}
-            pendingInteractiveLogin={pendingInteractiveLogin}
-            interactiveLoginError={interactiveLoginError}
-            onSetEnabled={handleSetEnabled}
-            pendingEnableAccount={pendingEnableAccount}
-            enableError={enableError}
-            mutationInFlight={mutationInFlight}
-            degraded={error !== null}
-          />
-        )}
-        {screen === "history" && (
-          <HistoryScreen settingsThreshold={settings.settings?.threshold ?? 90} />
-        )}
-        {screen === "environments" && <EnvironmentsScreen environments={displaySnapshot.environments} />}
-        {screen === "settings" && (
-          <SettingsScreen
-            runtime={settings}
-            theme={theme.theme}
-            onThemeChange={theme.setTheme}
-            themeError={theme.error}
-          />
-        )}
+        <main className="main-content">
+          {recoveryBlocked && <MainRecoveryBanner phase={daemonPhase} />}
+          {screen === "accounts" && (
+            <AccountsScreen
+              snapshot={displaySnapshot}
+              onSwitch={handleSwitch}
+              pendingAccount={pendingAccount}
+              switchError={switchError}
+              onAddAccount={handleAddAccount}
+              pendingAddAccount={pendingAddAccount}
+              addAccountError={addAccountError}
+              onAddToken={handleAddToken}
+              pendingAddToken={pendingAddToken}
+              addTokenError={addTokenError}
+              onInteractiveLogin={handleInteractiveLogin}
+              pendingInteractiveLogin={pendingInteractiveLogin}
+              interactiveLoginError={interactiveLoginError}
+              onRelogin={handleRelogin}
+              pendingReloginAccount={pendingReloginAccount}
+              reloginError={reloginError}
+              onSetEnabled={handleSetEnabled}
+              pendingEnableAccount={pendingEnableAccount}
+              enableError={enableError}
+              mutationInFlight={mutationInFlight}
+              degraded={error !== null}
+            />
+          )}
+          {screen === "history" && (
+            <HistoryScreen settingsThreshold={settings.settings?.threshold ?? 90} />
+          )}
+          {screen === "environments" && <EnvironmentsScreen environments={displaySnapshot.environments} />}
+          {screen === "settings" && (
+            <SettingsScreen
+              runtime={settings}
+              theme={theme.theme}
+              onThemeChange={theme.setTheme}
+              themeError={theme.error}
+            />
+          )}
+        </main>
       </div>
     </div>
   );

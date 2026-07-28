@@ -145,6 +145,7 @@ describe("PopoverPanel authoritative daemon phases", () => {
     rerender(<PopoverPanel />);
     expect(screen.getByText(/recovery required/i)).toBeInTheDocument();
     expect(screen.getByText(/journal requires repair/i)).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /Next/i })).toBeDisabled();
   });
 
   it("keeps direct account switching manual-only and never calls preview_target", () => {
