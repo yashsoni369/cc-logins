@@ -113,8 +113,9 @@ export default function BurnRateChart({ series, threshold = 90, startLabel, endL
   const cx = PAD + knownIndex * step;
   const cy = last == null ? 0 : yFor(last);
   const ty = yFor(threshold);
+  const lastLabel = last == null ? null : `${Math.round(last)}%`;
 
-  const title = `${label}: ${startLabel} to ${endLabel}, currently ${last == null ? "no data" : `${last}%`}${
+  const title = `${label}: ${startLabel} to ${endLabel}, currently ${lastLabel ?? "no data"}${
     crossed ? ", reached the auto-switch threshold this period" : ""
   }`;
 
@@ -123,7 +124,7 @@ export default function BurnRateChart({ series, threshold = 90, startLabel, endL
       <div className="chart-head">
         <span className="t">{label}</span>
         <span className="v num">
-          {last == null ? "no data" : `now ${last}%`}
+          {lastLabel == null ? "no data" : `now ${lastLabel}`}
           {crossed ? " · hit limit" : ""}
         </span>
       </div>
