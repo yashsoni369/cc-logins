@@ -134,6 +134,15 @@ pub enum CredentialError {
     #[error("failed to write credentials: {0}")]
     Write(String),
 
+    #[error("could not snapshot exact active credential state: {0}")]
+    Snapshot(String),
+
+    #[error("could not restore exact active credential state: {0}")]
+    Restore(String),
+
+    #[error("active credential state does not match the recovery snapshot")]
+    VerificationFailed,
+
     /// A destination that must end up empty could not be verified empty
     /// (Python's `delete_account_credentials_strict`, which fails closed
     /// rather than risk resurfacing another account's material).
@@ -212,6 +221,29 @@ impl Backend {
 pub struct ActiveCredentials {
     pub value: Option<String>,
     pub keychain_unavailable: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase", tag = "presence", content = "value")]
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "consumed by the pending switch transaction slice")
+)]
+pub(crate) enum EntryState<T> {
+    Absent,
+    Present(T),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "consumed by the pending switch transaction slice")
+)]
+pub(crate) struct ActiveCredentialState {
+    pub credentials_file: EntryState<Vec<u8>>,
+    pub oauth_keychain: EntryState<String>,
+    pub managed_keychain: EntryState<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -888,6 +920,22 @@ mod macos_keychain {
 
 use macos_keychain::KeychainError;
 
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "consumed by the pending switch transaction slice")
+)]
+fn restore_keychain_entry(
+    service: &str,
+    account: &str,
+    state: &EntryState<String>,
+) -> Result<(), CredentialError> {
+    match state {
+        EntryState::Absent => macos_keychain::delete_password(service, account),
+        EntryState::Present(value) => macos_keychain::set_password(service, account, value),
+    }
+    .map_err(|error| CredentialError::Restore(error.to_string()))
+}
+
 #[cfg(target_os = "macos")]
 pub(crate) fn recovery_keychain_get(account: &str) -> Result<Option<String>, String> {
     macos_keychain::get_password("cc-logins-switch-recovery", account)
@@ -1124,6 +1172,103 @@ impl<H: StoreHost> CredentialStore<H> {
         ActiveCredentials {
             value: Some(String::new()),
             keychain_unavailable: keychain_failed,
+        }
+    }
+
+    /// Snapshot exact presence and bytes for every active credential backend.
+    /// Unlike [`Self::read_active_credentials`], this never normalizes absent
+    /// and empty values or falls through between backends.
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "consumed by the pending switch transaction slice")
+    )]
+    pub(crate) fn snapshot_active_state(
+        &mut self,
+    ) -> Result<ActiveCredentialState, CredentialError> {
+        let file = crate::durable_fs::snapshot(&crate::paths::credentials_path())?;
+        let credentials_file = if file.existed {
+            EntryState::Present(file.bytes)
+        } else {
+            EntryState::Absent
+        };
+        let (oauth_keychain, managed_keychain) = if self.host.platform() == Platform::Macos {
+            let account = macos_keychain::keychain_account_name();
+            let oauth = macos_keychain::get_password(CLAUDE_CODE_KEYCHAIN_SERVICE, &account)
+                .map_err(|error| CredentialError::Snapshot(error.to_string()))?;
+            let managed =
+                macos_keychain::get_password(CLAUDE_CODE_MANAGED_KEYCHAIN_SERVICE, &account)
+                    .map_err(|error| CredentialError::Snapshot(error.to_string()))?;
+            (
+                oauth.map_or(EntryState::Absent, EntryState::Present),
+                managed.map_or(EntryState::Absent, EntryState::Present),
+            )
+        } else {
+            (EntryState::Absent, EntryState::Absent)
+        };
+        Ok(ActiveCredentialState {
+            credentials_file,
+            oauth_keychain,
+            managed_keychain,
+        })
+    }
+
+    /// Restore every backend exactly, including absence. A failure is
+    /// propagated so journal recovery can retain its artifacts and retry.
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "consumed by the pending switch transaction slice")
+    )]
+    pub(crate) fn restore_active_state(
+        &mut self,
+        state: &ActiveCredentialState,
+    ) -> Result<(), CredentialError> {
+        let file_state = match &state.credentials_file {
+            EntryState::Absent => crate::durable_fs::FileState {
+                existed: false,
+                bytes: Vec::new(),
+            },
+            EntryState::Present(bytes) => crate::durable_fs::FileState {
+                existed: true,
+                bytes: bytes.clone(),
+            },
+        };
+        crate::durable_fs::restore(&crate::paths::credentials_path(), &file_state, Some(0o600))
+            .map_err(std::io::Error::from)?;
+
+        if self.host.platform() == Platform::Macos {
+            let account = macos_keychain::keychain_account_name();
+            restore_keychain_entry(
+                CLAUDE_CODE_KEYCHAIN_SERVICE,
+                &account,
+                &state.oauth_keychain,
+            )?;
+            restore_keychain_entry(
+                CLAUDE_CODE_MANAGED_KEYCHAIN_SERVICE,
+                &account,
+                &state.managed_keychain,
+            )?;
+        } else if state.oauth_keychain != EntryState::Absent
+            || state.managed_keychain != EntryState::Absent
+        {
+            return Err(CredentialError::Restore(
+                "snapshot contains Keychain state on a non-macOS backend".to_string(),
+            ));
+        }
+        Ok(())
+    }
+
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "consumed by the pending switch transaction slice")
+    )]
+    pub(crate) fn verify_active_state(
+        &mut self,
+        expected: &ActiveCredentialState,
+    ) -> Result<(), CredentialError> {
+        if self.snapshot_active_state()? == *expected {
+            Ok(())
+        } else {
+            Err(CredentialError::VerificationFailed)
         }
     }
 
@@ -2520,6 +2665,88 @@ mod tests {
         assert_eq!(
             data["primaryApiKey"],
             "sk-ant-api03-abcdefghijklmnopqrstuvwxyz"
+        );
+    }
+
+    #[test]
+    fn snapshot_distinguishes_absent_from_present_empty_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let _env = EnvVarScope::set(dir.path());
+        let mut store = file_backed_store(dir.path());
+
+        let absent = store.snapshot_active_state().unwrap();
+        assert_eq!(absent.credentials_file, EntryState::Absent);
+        std::fs::write(dir.path().join(".credentials.json"), b"").unwrap();
+        let empty = store.snapshot_active_state().unwrap();
+        assert_eq!(empty.credentials_file, EntryState::Present(Vec::new()));
+    }
+
+    #[test]
+    fn restore_reinstates_exact_bytes_and_removes_a_previously_absent_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let _env = EnvVarScope::set(dir.path());
+        let mut store = file_backed_store(dir.path());
+        let absent = store.snapshot_active_state().unwrap();
+        std::fs::write(dir.path().join(".credentials.json"), b"temporary").unwrap();
+        store.restore_active_state(&absent).unwrap();
+        assert!(!dir.path().join(".credentials.json").exists());
+
+        let original = b"{\"claudeAiOauth\":{\"accessToken\":\"original\"}}";
+        std::fs::write(dir.path().join(".credentials.json"), original).unwrap();
+        let snapshot = store.snapshot_active_state().unwrap();
+        std::fs::write(dir.path().join(".credentials.json"), b"changed").unwrap();
+        store.restore_active_state(&snapshot).unwrap();
+        assert_eq!(
+            std::fs::read(dir.path().join(".credentials.json")).unwrap(),
+            original
+        );
+        store.verify_active_state(&snapshot).unwrap();
+    }
+
+    #[test]
+    fn verification_detects_a_stale_shadow_generation() {
+        let dir = tempfile::tempdir().unwrap();
+        let _env = EnvVarScope::set(dir.path());
+        let mut store = file_backed_store(dir.path());
+        std::fs::write(dir.path().join(".credentials.json"), b"first").unwrap();
+        let expected = store.snapshot_active_state().unwrap();
+        std::fs::write(dir.path().join(".credentials.json"), b"second").unwrap();
+        assert!(matches!(
+            store.verify_active_state(&expected),
+            Err(CredentialError::VerificationFailed)
+        ));
+    }
+
+    #[test]
+    fn unknown_keychain_presence_fails_closed() {
+        let dir = tempfile::tempdir().unwrap();
+        let _env = EnvVarScope::set(dir.path());
+        let mut store = CredentialStore::new(TestHost {
+            platform: Platform::Macos,
+            credentials_dir: dir.path().to_path_buf(),
+        });
+        assert!(matches!(
+            store.snapshot_active_state(),
+            Err(CredentialError::Snapshot(_))
+        ));
+    }
+
+    #[test]
+    fn oauth_to_api_key_transition_can_restore_the_exact_oauth_backend() {
+        let dir = tempfile::tempdir().unwrap();
+        let _env = EnvVarScope::set(dir.path());
+        let mut store = file_backed_store(dir.path());
+        let oauth = r#"{"claudeAiOauth":{"accessToken":"oauth"}}"#;
+        store.write_credentials(oauth).unwrap();
+        let before = store.snapshot_active_state().unwrap();
+        store
+            .write_credentials("sk-ant-api03-abcdefghijklmnopqrstuvwxyz")
+            .unwrap();
+        assert!(!dir.path().join(".credentials.json").exists());
+        store.restore_active_state(&before).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join(".credentials.json")).unwrap(),
+            oauth
         );
     }
 }
