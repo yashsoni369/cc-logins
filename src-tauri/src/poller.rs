@@ -1050,28 +1050,160 @@ pub(crate) fn paint_icon(app: &AppHandle, spec: IconSpec) {
 /// decided switch. Runs forever; intended to be spawned once via
 /// `tauri::async_runtime::spawn` by the caller. See the module doc comment
 /// for the panic-safety and WSL-safety guarantees this loop upholds.
-pub async fn run(app: AppHandle, config: PollerConfig) {
+#[derive(Debug, Clone, PartialEq)]
+enum LoopWake {
+    Policy(crate::runtime::RuntimePolicy),
+    Deadline,
+    PolicyChannelClosed,
+}
+
+async fn wait_for_policy_or_deadline(
+    policy_rx: &mut tokio::sync::watch::Receiver<crate::runtime::RuntimePolicy>,
+    deadline: tokio::time::Instant,
+) -> LoopWake {
+    tokio::select! {
+        changed = policy_rx.changed() => {
+            if changed.is_err() {
+                LoopWake::PolicyChannelClosed
+            } else {
+                // Clone and drop the watch borrow before the caller awaits
+                // anything else. `borrow_and_update` also closes the race
+                // between `changed` becoming ready and reading the value.
+                let policy = policy_rx.borrow_and_update().clone();
+                LoopWake::Policy(policy)
+            }
+        }
+        _ = tokio::time::sleep_until(deadline) => LoopWake::Deadline,
+    }
+}
+
+fn tokio_deadline_for(
+    deadline: DateTime<Utc>,
+    wall_now: DateTime<Utc>,
+    instant_now: tokio::time::Instant,
+) -> tokio::time::Instant {
+    if deadline <= wall_now {
+        return instant_now;
+    }
+    deadline
+        .signed_duration_since(wall_now)
+        .to_std()
+        .ok()
+        .and_then(|duration| instant_now.checked_add(duration))
+        .unwrap_or(instant_now)
+}
+
+fn next_loop_deadline(
+    state: &PollerLoopState,
+    next_poll_at: tokio::time::Instant,
+    wall_now: DateTime<Utc>,
+    instant_now: tokio::time::Instant,
+) -> tokio::time::Instant {
+    let grace_at = state
+        .daemon
+        .pending
+        .filter(|pending| {
+            pending.policy_revision == state.policy.revision && !state.requires_fresh_snapshot
+        })
+        .map(|pending| tokio_deadline_for(pending.deadline, wall_now, instant_now));
+    grace_at.map_or(next_poll_at, |deadline| deadline.min(next_poll_at))
+}
+
+pub async fn run(
+    app: AppHandle,
+    mut policy_rx: tokio::sync::watch::Receiver<crate::runtime::RuntimePolicy>,
+) {
+    let initial_policy = policy_rx.borrow_and_update().clone();
     log::info!(
         "poller: starting (threshold={}, auto_switch_enabled={})",
-        config.threshold,
-        config.auto_switch_enabled
+        initial_policy.threshold,
+        initial_policy.auto_switch_enabled
     );
 
     let history = open_history(&app);
-    let mut state = LegacyDaemonState::default();
+    let mut state = PollerLoopState::new(initial_policy);
     let mut prev_binding_pct: Option<f64> = None;
-    let mut interval_s = config.interval_seconds.max(poll_policy::MIN_INTERVAL_S);
+    let mut interval_s = poll_policy::DEFAULT_INTERVAL_S.max(poll_policy::MIN_INTERVAL_S);
+    let mut next_poll_at = tokio::time::Instant::now();
 
     loop {
+        let wall_now = Utc::now();
+        let instant_now = tokio::time::Instant::now();
+        let wake_at = next_loop_deadline(&state, next_poll_at, wall_now, instant_now);
+
+        match wait_for_policy_or_deadline(&mut policy_rx, wake_at).await {
+            LoopWake::Policy(policy) => {
+                let now = Utc::now();
+                if state.apply_policy(policy, now) {
+                    let decision = state.decision_at(now);
+                    publish_daemon_status(&app, state.policy.revision, decision.phase(), now);
+                    // Enabling, resuming, or changing decision inputs must
+                    // release the barrier only with a fresh observation.
+                    if state.policy.auto_switch_enabled
+                        && match state.policy.paused_until {
+                            Some(until) => until <= now,
+                            None => true,
+                        }
+                    {
+                        next_poll_at = tokio::time::Instant::now();
+                    }
+                }
+                continue;
+            }
+            LoopWake::PolicyChannelClosed => {
+                log::info!("poller: policy channel closed; stopping");
+                return;
+            }
+            LoopWake::Deadline => {}
+        }
+
+        let now = Utc::now();
+        let due = state.decision_at(now);
+        if let Decision::Switch {
+            from,
+            to,
+            policy_revision,
+        } = due
+        {
+            // The state machine checks this too; keep the guard adjacent to
+            // the side effect so an old-policy decision cannot cross it.
+            if policy_revision == state.policy.revision
+                && state.policy.auto_switch_enabled
+                && !state.requires_fresh_snapshot
+            {
+                publish_daemon_status(&app, policy_revision, due.phase(), now);
+                let trusted = state.last_trusted_snapshot.clone();
+                if let Some(snapshot) = trusted {
+                    if perform_switch(&app, &snapshot, from, to) {
+                        state.complete_switch(from, now);
+                    } else {
+                        state.daemon.pending = None;
+                        state.requires_fresh_snapshot = true;
+                    }
+                } else {
+                    state.daemon.pending = None;
+                    state.requires_fresh_snapshot = true;
+                }
+                next_poll_at = tokio::time::Instant::now();
+                continue;
+            }
+        }
+
+        if tokio::time::Instant::now() < next_poll_at {
+            publish_daemon_status(&app, state.policy.revision, due.phase(), now);
+            continue;
+        }
+
         let visible = window_visible(&app);
-        let now = now_epoch_s();
 
         let snapshot = match fetch_snapshot_guarded().await {
             Some(s) => s,
             None => {
-                // Already logged inside `fetch_snapshot_guarded`. Back off
-                // at the safe floor rather than retrying immediately.
-                sleep_for(interval_s.max(poll_policy::MIN_INTERVAL_S)).await;
+                let now = Utc::now();
+                let decision = state.on_fetch_failed(now);
+                publish_daemon_status(&app, state.policy.revision, decision.phase(), now);
+                next_poll_at = tokio::time::Instant::now()
+                    + Duration::from_secs_f64(interval_s.max(poll_policy::MIN_INTERVAL_S));
                 continue;
             }
         };
@@ -1091,67 +1223,55 @@ pub async fn run(app: AppHandle, config: PollerConfig) {
         // fetched here spends no extra budget against `poll_policy`'s floor.
         publish_snapshot(&app, &snapshot);
 
-        let active_known = snapshot
-            .active_account()
-            .and_then(|a| a.headroom())
-            .is_some();
-        state.unhealthy_ticks = next_unhealthy_ticks(state.unhealthy_ticks, active_known);
-
+        let now = Utc::now();
         let decision = match std::panic::catch_unwind(AssertUnwindSafe(|| {
-            decide(&snapshot, &config, &state, now)
+            state.on_snapshot(snapshot.clone(), now)
         })) {
             Ok(d) => d,
             Err(_) => {
-                log::warn!("poller: decide() panicked; holding this tick");
-                LegacyDecision::Hold
+                log::warn!("poller: state decision panicked; degrading this tick");
+                Decision::Degraded {
+                    reason: crate::runtime::DegradedReason::FetchFailed,
+                }
             }
         };
 
         if let Err(e) = app.emit("poller://decision", &decision) {
             log::debug!("poller: emit decision failed: {e}");
         }
+        publish_daemon_status(&app, state.policy.revision, decision.phase(), now);
 
         let mut sleep_override: Option<f64> = None;
 
         match &decision {
-            LegacyDecision::Hold => {
-                state.pending = None;
-            }
-            LegacyDecision::Warn { account, .. } => {
-                if state.pending.as_ref().map(|p| p.to) != Some(*account) {
-                    if let Some(active) = snapshot.active_account() {
-                        state.pending = Some(LegacyPendingSwitch {
-                            from: active.number,
-                            to: *account,
-                            decided_at: now,
-                        });
-                    }
-                }
-            }
-            LegacyDecision::Switch { from, to } => {
+            Decision::Switch { from, to, .. } => {
                 let (from, to) = (*from, *to);
-                if config.auto_switch_enabled {
-                    perform_switch(&app, &snapshot, from, to, &mut state, now);
-                } else {
-                    log::info!(
-                        "poller: would switch account {from} -> {to} (auto_switch_enabled=false)"
-                    );
+                if perform_switch(&app, &snapshot, from, to) {
+                    state.complete_switch(from, now);
+                    next_poll_at = tokio::time::Instant::now();
+                    continue;
                 }
-                state.pending = None;
             }
-            LegacyDecision::Exhausted { earliest_reset } => {
-                state.pending = None;
+            Decision::Exhausted { earliest_reset } => {
                 let wait = earliest_reset
-                    .as_deref()
-                    .and_then(parse_rfc3339_epoch)
-                    .map(|ts| (ts as f64 - now).max(config.interval_seconds))
-                    .unwrap_or_else(|| {
-                        config
-                            .interval_seconds
-                            .max(poll_policy::ACTIVE_MAX_INTERVAL_S)
-                    });
+                    .map(|reset| {
+                        reset
+                            .signed_duration_since(now)
+                            .to_std()
+                            .map_or(poll_policy::ACTIVE_MAX_INTERVAL_S, |wait| {
+                                wait.as_secs_f64()
+                            })
+                            .max(poll_policy::DEFAULT_INTERVAL_S)
+                    })
+                    .unwrap_or(poll_policy::ACTIVE_MAX_INTERVAL_S);
                 sleep_override = Some(wait.min(6.0 * 3600.0));
             }
+            Decision::Disabled
+            | Decision::Paused { .. }
+            | Decision::Monitoring
+            | Decision::Cooldown { .. }
+            | Decision::Warning { .. }
+            | Decision::Degraded { .. } => {}
         }
 
         let active = snapshot.active_account();
@@ -1162,30 +1282,34 @@ pub async fn run(app: AppHandle, config: PollerConfig) {
             .flat_map(|e| e.accounts.iter())
             .any(|a| a.usage_status == UsageStatus::Stale);
         let limiting_reset = active.and_then(active_limiting_reset_ts);
-        let earliest_future_reset = active.and_then(|a| active_earliest_future_reset_ts(a, now));
+        let now_epoch = datetime_epoch_seconds(now);
+        let earliest_future_reset =
+            active.and_then(|a| active_earliest_future_reset_ts(a, now_epoch));
 
         let outcome = poll_policy::FetchOutcome {
             prev_interval_s: Some(interval_s),
             prev_binding_pct,
             new_binding_pct,
             is_active: true,
-            threshold: config.threshold,
+            threshold: state.policy.threshold,
             recent_429: recent_failure,
         };
-        let (next_poll_at, next_interval) = std::panic::catch_unwind(AssertUnwindSafe(|| {
-            poll_policy::plan_after_fetch(
-                &outcome,
-                now,
-                pseudo_random_unit(),
-                earliest_future_reset,
-                limiting_reset,
-            )
-        }))
-        .unwrap_or((now + interval_s, interval_s));
+        let (planned_poll_epoch, next_interval) =
+            std::panic::catch_unwind(AssertUnwindSafe(|| {
+                poll_policy::plan_after_fetch(
+                    &outcome,
+                    now_epoch,
+                    pseudo_random_unit(),
+                    earliest_future_reset,
+                    limiting_reset,
+                )
+            }))
+            .unwrap_or((now_epoch + interval_s, interval_s));
         interval_s = next_interval;
         prev_binding_pct = new_binding_pct;
 
-        let mut sleep_s = sleep_override.unwrap_or_else(|| (next_poll_at - now_epoch_s()).max(0.5));
+        let mut sleep_s =
+            sleep_override.unwrap_or_else(|| (planned_poll_epoch - now_epoch_s()).max(0.5));
         if !visible {
             // Pause the *urgent* cadence while nobody has the dashboard
             // open — but never fall fully silent, since the tray icon and
@@ -1193,7 +1317,7 @@ pub async fn run(app: AppHandle, config: PollerConfig) {
             // the window hidden, which is this app's normal resting state.
             sleep_s = sleep_s.max(poll_policy::ACTIVE_MAX_INTERVAL_S);
         }
-        sleep_for(sleep_s).await;
+        next_poll_at = tokio::time::Instant::now() + Duration::from_secs_f64(sleep_s);
     }
 }
 
@@ -1202,28 +1326,20 @@ pub async fn run(app: AppHandle, config: PollerConfig) {
 /// never called with any lock held — [`crate::switcher::switch_to`] takes
 /// its own internal file lock for the whole mutation, and nothing here holds
 /// anything else across it.
-fn perform_switch(
-    app: &AppHandle,
-    snapshot: &Snapshot,
-    from: u32,
-    to: u32,
-    state: &mut LegacyDaemonState,
-    now: f64,
-) {
+fn perform_switch(app: &AppHandle, snapshot: &Snapshot, from: u32, to: u32) -> bool {
     let Some(target) = find_account(snapshot, to).cloned() else {
         log::warn!("poller: decided to switch to account {to} but it is missing from the snapshot");
-        return;
+        return false;
     };
 
     let result = std::panic::catch_unwind(AssertUnwindSafe(|| switcher::switch_to(&target)));
     match result {
         Ok(Ok(())) => {
-            state.last_switch_at = Some(now);
-            state.last_switch_from = Some(from);
             let _ = app.emit(
                 "poller://switch-performed",
                 &serde_json::json!({ "from": from, "to": to, "ok": true }),
             );
+            true
         }
         Ok(Err(e)) => {
             log::warn!("poller: switch_to({to}) failed: {e}");
@@ -1231,9 +1347,11 @@ fn perform_switch(
                 "poller://switch-performed",
                 &serde_json::json!({ "from": from, "to": to, "ok": false, "error": e.to_string() }),
             );
+            false
         }
         Err(_) => {
             log::warn!("poller: switch_to({to}) panicked");
+            false
         }
     }
 }
@@ -1255,15 +1373,6 @@ async fn fetch_snapshot_guarded() -> Option<Snapshot> {
             None
         }
     }
-}
-
-async fn sleep_for(seconds: f64) {
-    let seconds = if seconds.is_finite() {
-        seconds.max(0.5)
-    } else {
-        poll_policy::MIN_INTERVAL_S
-    };
-    tokio::time::sleep(Duration::from_secs_f64(seconds)).await;
 }
 
 fn window_visible(app: &AppHandle) -> bool {
@@ -1746,6 +1855,127 @@ mod tests {
                 )
             }
         );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn policy_update_wakes_a_long_sleep_immediately() {
+        let (tx, mut rx) = tokio::sync::watch::channel(runtime_policy(1));
+        let sleeper = tokio::spawn(async move {
+            wait_for_policy_or_deadline(
+                &mut rx,
+                tokio::time::Instant::now() + Duration::from_secs(3600),
+            )
+            .await
+        });
+        tokio::task::yield_now().await;
+
+        tx.send_replace(runtime_policy(2));
+
+        assert!(matches!(sleeper.await.unwrap(), LoopWake::Policy(policy) if policy.revision == 2));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn policy_update_coalesces_rapid_changes_to_the_latest_complete_value() {
+        let (tx, mut rx) = tokio::sync::watch::channel(runtime_policy(1));
+        tx.send_replace(runtime_policy(2));
+        tx.send_replace(runtime_policy(3));
+
+        let wake = wait_for_policy_or_deadline(
+            &mut rx,
+            tokio::time::Instant::now() + Duration::from_secs(3600),
+        )
+        .await;
+
+        assert!(matches!(wake, LoopWake::Policy(policy) if policy.revision == 3));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn policy_update_disable_and_pause_cancel_pending_before_the_old_deadline() {
+        let now = fixed_now();
+        let mut state = PollerLoopState::new(runtime_policy(1));
+        state.on_snapshot(
+            snapshot(vec![
+                account(1, true, Some(95.0), None),
+                account(2, false, Some(10.0), None),
+            ]),
+            now,
+        );
+        assert!(state.daemon.pending.is_some());
+
+        let disabled = crate::runtime::RuntimePolicy::from_settings(2, &Settings::default(), now);
+        state.apply_policy(disabled, now);
+        assert!(state.daemon.pending.is_none());
+        assert_eq!(
+            state.decision_at(now + chrono::Duration::hours(1)),
+            Decision::Disabled
+        );
+
+        let until = now + chrono::Duration::hours(2);
+        let paused = crate::runtime::RuntimePolicy::from_settings(
+            3,
+            &Settings {
+                auto_switch_enabled: true,
+                auto_switch_paused_until: Some(until),
+                ..Settings::default()
+            },
+            now,
+        );
+        state.apply_policy(paused, now);
+        assert_eq!(state.decision_at(now), Decision::Paused { until });
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn policy_update_enable_and_resume_keep_the_fresh_snapshot_barrier() {
+        let now = fixed_now();
+        let disabled = crate::runtime::RuntimePolicy::from_settings(1, &Settings::default(), now);
+        let mut state = PollerLoopState::new(disabled);
+
+        state.apply_policy(runtime_policy(2), now);
+
+        assert!(state.requires_fresh_snapshot);
+        assert_eq!(
+            state.decision_at(now + chrono::Duration::hours(1)),
+            Decision::Monitoring
+        );
+        assert_eq!(
+            state.on_fetch_failed(now),
+            Decision::Degraded {
+                reason: crate::runtime::DegradedReason::FetchFailed
+            }
+        );
+        assert!(state.requires_fresh_snapshot);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn grace_deadline_wakes_without_waiting_for_or_triggering_a_fetch() {
+        let now = fixed_now();
+        let mut state = PollerLoopState::new(runtime_policy(9));
+        state.on_snapshot(
+            snapshot(vec![
+                account(1, true, Some(95.0), None),
+                account(2, false, Some(10.0), None),
+            ]),
+            now,
+        );
+        let deadline = state.daemon.pending.unwrap().deadline;
+        let (_tx, mut rx) = tokio::sync::watch::channel(runtime_policy(9));
+        let wake_at = tokio_deadline_for(deadline, now, tokio::time::Instant::now());
+        let sleeper =
+            tokio::spawn(async move { wait_for_policy_or_deadline(&mut rx, wake_at).await });
+        tokio::task::yield_now().await;
+
+        tokio::time::advance(Duration::from_secs(59)).await;
+        assert!(!sleeper.is_finished());
+        tokio::time::advance(Duration::from_secs(1)).await;
+
+        assert_eq!(sleeper.await.unwrap(), LoopWake::Deadline);
+        assert!(matches!(
+            state.decision_at(deadline),
+            Decision::Switch {
+                policy_revision: 9,
+                ..
+            }
+        ));
     }
 
     // -- basic hold / no-active-account ----------------------------------------

@@ -183,30 +183,6 @@ fn init_logging() {
     let _ = builder.try_init();
 }
 
-/// Translate persisted settings into the poller's runtime config.
-///
-/// Two types rather than one on purpose: `Settings` is the user-facing,
-/// serialised shape (and must stay stable on disk), while `PollerConfig` is
-/// what the decision logic actually reasons over. Keeping them separate means a
-/// change to the daemon's internals cannot silently alter a saved settings file.
-fn poller_config_from_settings(s: &settings::Settings) -> poller::PollerConfig {
-    poller::PollerConfig {
-        threshold: s.threshold as f64,
-        // Fixed, not user-configurable — see `poll_policy::DEFAULT_INTERVAL_S`.
-        interval_seconds: poller::poll_policy::DEFAULT_INTERVAL_S,
-        cooldown_seconds: s.cooldown_seconds as f64,
-        hysteresis_pct: s.hysteresis_pct as f64,
-        strategy: match s.strategy {
-            settings::Strategy::MostHeadroom => switcher::Strategy::MostHeadroom,
-            settings::Strategy::NextAvailable => switcher::Strategy::NextAvailable,
-            settings::Strategy::ConsumeFirst => switcher::Strategy::ConsumeFirst,
-        },
-        unhealthy_ticks: s.unhealthy_ticks as u32,
-        grace_seconds: s.grace_seconds as f64,
-        auto_switch_enabled: s.auto_switch_enabled,
-    }
-}
-
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     // Without this, every `log::warn!` in oauth.rs, poller.rs and
@@ -336,15 +312,13 @@ pub fn run() {
             // enabled auto-switch, which defaults to false — software that
             // starts moving credentials before being asked is not trustworthy.
             {
-                let cfg = poller_config_from_settings(
-                    &app.state::<commands::AppState>()
-                        .settings
-                        .snapshot()
-                        .settings,
-                );
+                let policy_rx = app
+                    .state::<commands::AppState>()
+                    .settings
+                    .subscribe_policy();
                 let poller_handle = handle.clone();
                 tauri::async_runtime::spawn(async move {
-                    poller::run(poller_handle, cfg).await;
+                    poller::run(poller_handle, policy_rx).await;
                 });
             }
 
