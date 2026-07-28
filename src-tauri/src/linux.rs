@@ -347,9 +347,13 @@ mod tests {
 
     #[test]
     fn apply_webkit_env_workarounds_is_callable_on_any_platform() {
-        // The whole point of the internal `#[cfg(target_os = "linux")]` gate
-        // is that callers never need to know the platform. This just proves
-        // it links and returns on whatever OS is running the test suite.
+        // A no-op off Linux, but on Linux it really does set two env vars, so
+        // it needs the crate-wide env lock and guards that restore them —
+        // otherwise it races every other env-touching test in the suite.
+        let _lock = crate::test_support::env_lock();
+        let _dmabuf = crate::test_support::EnvGuard::unset("WEBKIT_DISABLE_DMABUF_RENDERER");
+        let _compositing = crate::test_support::EnvGuard::unset("WEBKIT_DISABLE_COMPOSITING_MODE");
+
         apply_webkit_env_workarounds();
     }
 }

@@ -1317,6 +1317,8 @@ mod tests {
 
     #[test]
     fn normalize_legacy_five_hour_seven_day_shape() {
+        // Reaches format_reset -> chrono::Local -> getenv("TZ") on unix.
+        let _lock = crate::test_support::env_lock();
         let data = json!({
             "five_hour": {"utilization": 42.5, "resets_at": "2026-07-28T23:00:00Z"},
             "seven_day": {"utilization": 10.0}
@@ -1359,6 +1361,7 @@ mod tests {
 
     #[test]
     fn normalize_limits_array_shape() {
+        let _lock = crate::test_support::env_lock();
         let data = json!({
             "limits": [
                 {
@@ -1631,6 +1634,9 @@ mod tests {
 
     #[test]
     fn reset_clock_string_same_local_day_is_time_only() {
+        // chrono::Local reads TZ from the environment on unix, so this counts
+        // as touching it — without the lock it races the suite's set_var calls.
+        let _lock = crate::test_support::env_lock();
         let now = Utc::now();
         let clock = reset_clock_string(now, now);
         assert_eq!(clock.len(), 5);
@@ -1639,6 +1645,7 @@ mod tests {
 
     #[test]
     fn format_reset_far_future_yields_day_granularity_countdown() {
+        let _lock = crate::test_support::env_lock();
         let far_future = Utc::now() + chrono::Duration::days(4) + chrono::Duration::hours(2);
         let (countdown, clock) = format_reset(&far_future.to_rfc3339()).unwrap();
         assert!(countdown.contains('d'));

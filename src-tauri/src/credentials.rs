@@ -342,10 +342,17 @@ fn atomic_write(target: &Path, contents: &[u8]) -> io::Result<()> {
 
     let write_result = (|| -> io::Result<()> {
         use std::io::Write;
-        let mut f = std::fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&tmp_path)?;
+        let mut opts = std::fs::OpenOptions::new();
+        opts.write(true).create_new(true);
+        // Created 0600 rather than chmod'ed after the rename. With umask 022
+        // the old order left a plaintext credential world-readable for the
+        // whole write — open, write, fsync and rename all completed first.
+        #[cfg(not(windows))]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            opts.mode(0o600);
+        }
+        let mut f = opts.open(&tmp_path)?;
         f.write_all(contents)?;
         f.sync_all()
     })();
@@ -363,7 +370,14 @@ fn atomic_write(target: &Path, contents: &[u8]) -> io::Result<()> {
     #[cfg(not(windows))]
     {
         use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(target, std::fs::Permissions::from_mode(0o600))?;
+        // Belt to the `mode(0o600)` brace above, for a pre-existing target
+        // whose mode the rename preserved. Deliberately not `?`: the rename
+        // has already committed, so failing here would report a successful
+        // switch as failed — the worst possible split state — over a file that
+        // is already correct in the common case.
+        if let Err(e) = std::fs::set_permissions(target, std::fs::Permissions::from_mode(0o600)) {
+            log::warn!("could not tighten permissions on {}: {e}", target.display());
+        }
     }
 
     Ok(())
@@ -803,6 +817,23 @@ mod macos_keychain {
             delete_generic_password, get_generic_password, set_generic_password,
         };
 
+        /// The Keychain equivalent of `test_support::guard_real_store`.
+        ///
+        /// Keychain items are machine-global and keyed by service name, so no
+        /// `TempDir` can sandbox them — a test reaching here would read or
+        /// overwrite the developer's real Claude Code login. Every test host
+        /// pins its platform to the file backend, so this is unreachable; if
+        /// it ever is reached, stop rather than touch real credentials.
+        #[cfg(test)]
+        fn refuse_in_tests(op: &str) -> ! {
+            panic!(
+                "REFUSING TO RUN: a test reached the real macOS Keychain ({op}).\n\
+                 Keychain items are machine-global and cannot be sandboxed by a temp \
+                 directory, so this would read or overwrite the real Claude Code login. \
+                 Pin the StoreHost's platform to the file backend instead."
+            );
+        }
+
         /// `errSecItemNotFound`.
         const ERR_SEC_ITEM_NOT_FOUND: i32 = -25300;
 
@@ -812,6 +843,8 @@ mod macos_keychain {
         }
 
         pub fn get_password(service: &str, account: &str) -> Result<Option<String>, KeychainError> {
+            #[cfg(test)]
+            refuse_in_tests("get_password");
             match get_generic_password(service, account) {
                 Ok(bytes) => String::from_utf8(bytes).map(Some).map_err(|e| {
                     KeychainError(format!(
@@ -830,6 +863,8 @@ mod macos_keychain {
             account: &str,
             password: &str,
         ) -> Result<(), KeychainError> {
+            #[cfg(test)]
+            refuse_in_tests("set_password");
             set_generic_password(service, account, password.as_bytes()).map_err(|e| {
                 KeychainError(format!(
                     "keychain add-generic-password failed for {service}/{account}: {e}"
@@ -838,6 +873,8 @@ mod macos_keychain {
         }
 
         pub fn delete_password(service: &str, account: &str) -> Result<(), KeychainError> {
+            #[cfg(test)]
+            refuse_in_tests("delete_password");
             match delete_generic_password(service, account) {
                 Ok(()) => Ok(()),
                 Err(e) if is_not_found(&e) => Ok(()), // already absent counts as success

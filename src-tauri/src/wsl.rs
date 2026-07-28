@@ -228,7 +228,14 @@ const WSL_CREDENTIALS_PATTERN: &str = "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/.cred
 fn native_environment() -> Environment {
     Environment {
         id: "native".to_string(),
-        label: "Windows".to_string(),
+        // Labelled by host OS. This said "Windows" on every platform.
+        label: match crate::paths::Platform::detect() {
+            crate::paths::Platform::Windows => "Windows",
+            crate::paths::Platform::Macos => "macOS",
+            crate::paths::Platform::Linux | crate::paths::Platform::Wsl => "Linux",
+            _ => "Native",
+        }
+        .to_string(),
         path: crate::paths::credentials_path().display().to_string(),
         kind: EnvKind::Native,
         status: EnvStatus::Live,
@@ -733,6 +740,7 @@ mod tests {
         let _lock = env_lock();
         let home = TempDir::new().unwrap();
         let _home_guard = set_home(home.path());
+        let _cfg_guard = EnvGuard::unset("CLAUDE_CONFIG_DIR");
 
         assert!(!is_wsl_available());
         assert_eq!(list_distros().unwrap(), Vec::new());

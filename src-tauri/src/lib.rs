@@ -85,6 +85,25 @@ fn toggle_popover(app: &tauri::AppHandle, anchor: tauri::Rect) {
     linux::nudge_window(w);
 }
 
+/// Show the popover without a tray-icon anchor, centred on screen.
+///
+/// Linux's AppIndicator backend emits no `TrayIconEvent` at all, so the
+/// left-click route below is dead there and this menu route is the only way to
+/// reach the popover.
+fn toggle_popover_centered(app: &tauri::AppHandle) {
+    let Some(w) = app.get_webview_window("popover") else {
+        return;
+    };
+    if w.is_visible().unwrap_or(false) {
+        let _ = w.hide();
+        return;
+    }
+    let _ = w.center();
+    let _ = w.show();
+    let _ = w.set_focus();
+    linux::nudge_window(w);
+}
+
 /// Work out where to put the popover given the tray icon's rectangle.
 ///
 /// Returns `None` if any of the geometry is unavailable, in which case the
@@ -205,6 +224,55 @@ pub fn run() {
     init_logging();
     log::info!("cc-logins starting");
 
+    // Everything below happens BEFORE the builder, because windows declared in
+    // tauri.conf.json start loading their webview before `setup()` runs. The
+    // popover is one of them: it is hidden, but its JS still executes and calls
+    // `snapshot` on mount, which produced "state not managed for field `state`"
+    // when `AppState` was only managed inside `setup`.
+    let context = tauri::generate_context!();
+
+    // Same derivation Tauri's `app_data_dir()` uses — `dirs::data_dir()` joined
+    // with the identifier — taken from the generated context rather than
+    // hardcoded, so it cannot drift from tauri.conf.json. Verified against
+    // Tauri's own resolver in `setup` below.
+    let data_dir = dirs::data_dir()
+        .unwrap_or_else(std::env::temp_dir)
+        .join(&context.config().identifier);
+
+    // One-time migration across the bundle identifier rename
+    // (dev.apex36.claude-account-switcher -> dev.apex36.cc-logins). Tauri
+    // derives app_data_dir() from the identifier, so the rename alone would
+    // move this app's data tree to a new, empty directory and silently orphan
+    // a real user's accounts one directory over. Must run before
+    // `set_store_root`/`AppState::new`, since both read from `data_dir`. See
+    // migrate.rs for the safety model (copy-verify-retire, never delete).
+    if let Some(parent) = data_dir.parent() {
+        let old_data_dir = parent.join("dev.apex36.claude-account-switcher");
+        migrate::migrate_app_data(&old_data_dir, &data_dir);
+    }
+
+    // Point the vault at our own directory before anything reads it. Not a
+    // setting, deliberately: this app once wrote its registry and credential
+    // backups into the `cswap` CLI's directory, which coupled the two tools'
+    // blast radius and destroyed a user's CLI accounts. The vault is ours
+    // unconditionally; the CLI's store is read-only territory.
+    paths::set_store_root(data_dir.join("accounts"));
+    log::info!("account vault: {}", paths::backup_root().display());
+
+    // Backstop for isolated-login temp dirs. They clean up on Drop, but an
+    // abort runs no destructors, and one of those briefly holds a real
+    // credential. Only sweeps dirs older than an hour so a login running in
+    // another instance is never removed mid-flight.
+    let swept = login::sweep_stale_login_dirs(std::time::Duration::from_secs(3600));
+    if swept > 0 {
+        log::info!(
+            "swept {swept} stale login director{}",
+            if swept == 1 { "y" } else { "ies" }
+        );
+    }
+
+    let app_state = commands::AppState::new(data_dir.clone());
+
     tauri::Builder::default()
         // Must be registered first so a second launch is rejected before it
         // touches any credential state.
@@ -218,6 +286,9 @@ pub fn run() {
             None,
         ))
         .manage(poller::TrayCache::default())
+        // Managed here, not in `setup`: a config-declared window's webview can
+        // invoke a command before `setup` has run.
+        .manage(app_state)
         // Read-only commands are safe on a timer; `switch_account` mutates
         // credentials and must only ever be user-initiated. See commands.rs.
         .invoke_handler(tauri::generate_handler![
@@ -238,59 +309,21 @@ pub fn run() {
             commands::set_settings,
             commands::data_locations,
         ])
-        .setup(|app| {
+        .setup(move |app| {
             let handle = app.handle().clone();
 
-            // Settings and history live in the OS app-data dir, not next to
-            // the credential store — they are ours, not shared with the CLI.
-            let data_dir = app
-                .path()
-                .app_data_dir()
-                .unwrap_or_else(|_| std::path::PathBuf::from("."));
-
-            // One-time migration across the bundle identifier rename
-            // (dev.apex36.claude-account-switcher -> dev.apex36.cc-logins).
-            // Tauri derives app_data_dir() from the identifier, so the rename
-            // alone would move this app's own data tree (accounts/,
-            // history.sqlite3, settings.json) to a new, empty directory and
-            // silently orphan a real user's accounts sitting one directory
-            // over. Must run before `set_store_root`/`AppState::new` below,
-            // since both read from `data_dir`. The old directory is derived
-            // from the same parent as the new one (not hardcoded to
-            // %APPDATA%) so this also works on macOS/Linux, where the
-            // identifier is likewise the directory name. See migrate.rs for
-            // the full safety model (copy-verify-retire, never delete).
-            if let Some(parent) = data_dir.parent() {
-                let old_data_dir = parent.join("dev.apex36.claude-account-switcher");
-                migrate::migrate_app_data(&old_data_dir, &data_dir);
+            // The data dir was computed before the builder so state could be
+            // managed early. Confirm that derivation still matches Tauri's own
+            // resolver, so a change on their side surfaces as a log line rather
+            // than a silently split data directory.
+            match app.path().app_data_dir() {
+                Ok(resolved) if resolved != data_dir => log::warn!(
+                    "app_data_dir mismatch: using {} but Tauri resolves {}",
+                    data_dir.display(),
+                    resolved.display()
+                ),
+                _ => {}
             }
-
-            // Point the vault at our own directory before anything reads it.
-            //
-            // Not a setting, and deliberately so. This app used to write its
-            // registry and credential backups straight into the `cswap` CLI's
-            // directory, which coupled the two tools' blast radius — a fault
-            // here destroyed a user's CLI accounts, because they were the same
-            // bytes. The vault is ours unconditionally now; the CLI's store is
-            // read-only territory, reachable only by an explicit import.
-            paths::set_store_root(data_dir.join("accounts"));
-            log::info!("account vault: {}", paths::backup_root().display());
-
-            // Backstop for the isolated-login temp dirs. They normally clean
-            // themselves up on Drop, but this crate aborts on panic in release
-            // and an abort runs no destructors — a directory that briefly held
-            // a real credential would then linger. Only sweeps dirs older than
-            // an hour, so a login running in another instance is never removed
-            // mid-flight.
-            let swept = login::sweep_stale_login_dirs(std::time::Duration::from_secs(3600));
-            if swept > 0 {
-                log::info!(
-                    "swept {swept} stale login director{}",
-                    if swept == 1 { "y" } else { "ies" }
-                );
-            }
-
-            app.manage(commands::AppState::new(data_dir));
 
             // Start the background poller.
             //
@@ -312,11 +345,12 @@ pub fn run() {
                 });
             }
 
+            let quota_i = MenuItem::with_id(app, "quota", "Show quota panel", true, None::<&str>)?;
             let open_i = MenuItem::with_id(app, "open", "Open dashboard", true, None::<&str>)?;
             let switch_i = MenuItem::with_id(app, "switch", "Switch account…", true, None::<&str>)?;
             let quit_i = MenuItem::with_id(app, "quit", "Quit", true, None::<&str>)?;
             let sep = PredefinedMenuItem::separator(app)?;
-            let menu = Menu::with_items(app, &[&open_i, &switch_i, &sep, &quit_i])?;
+            let menu = Menu::with_items(app, &[&quota_i, &open_i, &switch_i, &sep, &quit_i])?;
 
             // The tray is built in Rust rather than declared in tauri.conf.json;
             // declaring it in both produces two tray icons.
@@ -326,6 +360,7 @@ pub fn run() {
                 .show_menu_on_left_click(false)
                 .icon_as_template(cfg!(target_os = "macos"))
                 .on_menu_event(|app, event| match event.id.as_ref() {
+                    "quota" => toggle_popover_centered(app),
                     "open" => reveal(app),
                     "switch" => reveal(app),
                     "quit" => app.exit(0),
@@ -352,6 +387,14 @@ pub fn run() {
             // command's tray paint relies on.
             poller::paint_icon(&handle, IconSpec::resting(61.0, AmbientTheme::detect()));
 
+            // The main window is created by Tauri from tauri.conf.json with
+            // `visible: true`, so it never passed through `reveal()` and never
+            // got nudged — exactly the "first click after launch does nothing"
+            // case linux.rs exists to fix. No-op off Linux.
+            if let Some(w) = app.get_webview_window("main") {
+                linux::nudge_window(w);
+            }
+
             Ok(())
         })
         .on_window_event(|window, event| {
@@ -362,6 +405,6 @@ pub fn run() {
                 let _ = window.hide();
             }
         })
-        .run(tauri::generate_context!())
+        .run(context)
         .expect("error while running tauri application");
 }

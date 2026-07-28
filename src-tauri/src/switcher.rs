@@ -157,8 +157,25 @@ fn account_config_path_at(root: &Path, account_num: &str, email: &str) -> PathBu
 struct GuiStoreHost;
 
 impl StoreHost for GuiStoreHost {
+    /// Under `cfg(test)` this is pinned to `Linux` — the file-only backend —
+    /// no matter what OS is running the suite.
+    ///
+    /// `TempDir` isolates `credentials_dir()`, but the macOS Keychain branch
+    /// ignores that directory entirely and writes to machine-global items
+    /// keyed by service name. On a developer Mac the suite would overwrite
+    /// `Claude Code-credentials`/$USER — the live login — and `guard_real_store`
+    /// cannot stop it, because that guard checks paths and the Keychain is not
+    /// a path. `credentials.rs`'s own `TestHost` already pins the platform for
+    /// this reason; this host had been left detecting.
     fn platform(&self) -> CredPlatform {
-        CredPlatform::detect()
+        #[cfg(test)]
+        {
+            CredPlatform::Linux
+        }
+        #[cfg(not(test))]
+        {
+            CredPlatform::detect()
+        }
     }
     fn credentials_dir(&self) -> PathBuf {
         credentials_dir()
@@ -253,10 +270,16 @@ fn atomic_write(target: &Path, contents: &[u8]) -> std::io::Result<()> {
 
     let write_result = (|| -> std::io::Result<()> {
         use std::io::Write;
-        let mut f = std::fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&tmp_path)?;
+        let mut opts = std::fs::OpenOptions::new();
+        opts.write(true).create_new(true);
+        // 0600 at creation, not after the rename — see the twin of this
+        // function in `credentials.rs::atomic_write`.
+        #[cfg(not(windows))]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            opts.mode(0o600);
+        }
+        let mut f = opts.open(&tmp_path)?;
         f.write_all(contents)?;
         f.sync_all()
     })();
@@ -274,7 +297,11 @@ fn atomic_write(target: &Path, contents: &[u8]) -> std::io::Result<()> {
     #[cfg(not(windows))]
     {
         use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(target, std::fs::Permissions::from_mode(0o600))?;
+        // Not `?`: the rename has committed, so a chmod failure must not
+        // report a completed switch as failed.
+        if let Err(e) = std::fs::set_permissions(target, std::fs::Permissions::from_mode(0o600)) {
+            log::warn!("could not tighten permissions on {}: {e}", target.display());
+        }
     }
 
     Ok(())
@@ -1740,8 +1767,16 @@ fn set_account_enabled_with_timeout(
 struct CswapStoreHost;
 
 impl StoreHost for CswapStoreHost {
+    /// Pinned to the file backend under test, same as [`GuiStoreHost`].
     fn platform(&self) -> CredPlatform {
-        CredPlatform::detect()
+        #[cfg(test)]
+        {
+            CredPlatform::Linux
+        }
+        #[cfg(not(test))]
+        {
+            CredPlatform::detect()
+        }
     }
     fn credentials_dir(&self) -> PathBuf {
         paths::cswap_store_root().join("credentials")
@@ -2258,6 +2293,8 @@ mod tests {
         _home: EnvGuard,
         _userprofile: EnvGuard,
         _config: EnvGuard,
+        _xdg: EnvGuard,
+        _wsl_distro: EnvGuard,
         _store_root: StoreRootGuard,
         _home_dir: TempDir,
         _config_dir: TempDir,
@@ -2270,13 +2307,14 @@ mod tests {
     /// `claude_config_home`) into fresh temp directories, isolated from the
     /// real machine.
     ///
-    /// `paths::cswap_store_root()` is deliberately *not* separately
-    /// redirected here: it is derived from `HOME`/`USERPROFILE` the same way
-    /// upstream's own path resolution is (see `paths.rs`), so pointing those
-    /// env vars at a temp dir already isolates it too — it resolves to
-    /// `<home_dir>/.claude-swap-backup`, nonexistent (and therefore inert:
-    /// see `acquire_cswap_and_vault_locks`) until a test explicitly creates
-    /// it to exercise the cswap-interop paths.
+    /// `paths::cswap_store_root()` is not separately redirected: it derives
+    /// from `HOME`/`USERPROFILE`, so pointing those at a temp dir isolates it
+    /// too — *provided* `XDG_DATA_HOME` is unset. On Linux that variable is
+    /// consulted first, and CI runners set it, so leaving it alone let a real
+    /// `$XDG_DATA_HOME/claude-swap` escape the sandbox: `guard_real_store`
+    /// would panic, and `acquire_cswap_and_vault_locks` could create a `.lock`
+    /// in the user's actual directory. `WSL_DISTRO_NAME` is pinned for the
+    /// same reason — it flips `Platform::detect()`.
     ///
     /// Serialized on `crate::test_support::ENV_LOCK`, the single crate-wide
     /// lock shared with `paths.rs` and `credentials.rs`, so this module's
@@ -2292,6 +2330,8 @@ mod tests {
         let home_guard = EnvGuard::set("HOME", home_dir.path().to_str().unwrap());
         let userprofile_guard = EnvGuard::set("USERPROFILE", home_dir.path().to_str().unwrap());
         let config_guard = EnvGuard::set("CLAUDE_CONFIG_DIR", config_dir.path().to_str().unwrap());
+        let xdg_guard = EnvGuard::unset("XDG_DATA_HOME");
+        let wsl_guard = EnvGuard::unset("WSL_DISTRO_NAME");
         // `paths::backup_root()` (OUR vault) is redirected via the test-only
         // override rather than an env var — see `StoreRootGuard`'s doc for
         // why it can't reuse the production `set_store_root` OnceLock.
@@ -2300,6 +2340,8 @@ mod tests {
             _home: home_guard,
             _userprofile: userprofile_guard,
             _config: config_guard,
+            _xdg: xdg_guard,
+            _wsl_distro: wsl_guard,
             _store_root: store_root_guard,
             _home_dir: home_dir,
             _config_dir: config_dir,
