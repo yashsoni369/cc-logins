@@ -618,6 +618,32 @@ impl GenerationStore for GuiGenerationStore {
     }
 }
 
+/// Release a dead-token verdict only when a successful credential-ingress
+/// operation proved that the account now carries a different generation.
+///
+/// Current cswap performs the same recovery after add/re-login and also drops
+/// autoswitch quarantines when the stored credential fingerprint changes. A
+/// cleanup failure is deliberately non-fatal here: the credential and registry
+/// write have already committed, and the generation mismatch means the stale
+/// verdict no longer matches even if its file entry remains on disk.
+fn clear_replaced_quarantine(email: &str, organization_uuid: Option<&str>, credentials: &str) {
+    let identity = Account {
+        email: email.to_string(),
+        organization_uuid: organization_uuid.map(str::to_string),
+        ..Account::default()
+    }
+    .stable_key();
+    let fingerprint = oauth::credential_fingerprint(credentials)
+        .unwrap_or_else(|| oauth_refresh::credential_generation(credentials));
+    if let Err(error) =
+        OAuthQuarantine::new(paths::backup_root()).clear_obsolete(&identity, &fingerprint)
+    {
+        log::warn!(
+            "could not clear obsolete OAuth quarantine after credential replacement: {error}"
+        );
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Snapshot (accounts + freshly-fetched usage).
 // ---------------------------------------------------------------------------
@@ -1385,10 +1411,10 @@ fn add_current_account_with_timeout(
     write_account_config(&num, &email, &config_text)?;
 
     let mut record = Map::new();
-    record.insert("email".to_string(), Value::String(email));
+    record.insert("email".to_string(), Value::String(email.clone()));
     record.insert(
         "organizationUuid".to_string(),
-        Value::String(organization_uuid),
+        Value::String(organization_uuid.clone()),
     );
     record.insert(
         "organizationName".to_string(),
@@ -1423,6 +1449,7 @@ fn add_current_account_with_timeout(
         Value::String(chrono::Utc::now().to_rfc3339()),
     );
     write_sequence_data(&data)?;
+    clear_replaced_quarantine(&email, Some(&organization_uuid), &live_creds);
 
     Ok(slot)
 }
@@ -1596,7 +1623,7 @@ fn add_token_with_timeout(
     write_account_config(&num, &resolved_email, &config_payload)?;
 
     let mut record = Map::new();
-    record.insert("email".to_string(), Value::String(resolved_email));
+    record.insert("email".to_string(), Value::String(resolved_email.clone()));
     record.insert(
         "organizationUuid".to_string(),
         Value::String(new_identity.organization_uuid.clone().unwrap_or_default()),
@@ -1630,6 +1657,11 @@ fn add_token_with_timeout(
         Value::String(chrono::Utc::now().to_rfc3339()),
     );
     write_sequence_data(&data)?;
+    clear_replaced_quarantine(
+        &resolved_email,
+        new_identity.organization_uuid.as_deref(),
+        &credentials_payload,
+    );
 
     Ok(slot)
 }
@@ -1799,7 +1831,7 @@ fn add_oauth_credential_with_timeout(
     write_account_config(&num, &resolved_email, &config_payload)?;
 
     let mut record = Map::new();
-    record.insert("email".to_string(), Value::String(resolved_email));
+    record.insert("email".to_string(), Value::String(resolved_email.clone()));
     record.insert(
         "organizationUuid".to_string(),
         Value::String(new_identity.organization_uuid.clone().unwrap_or_default()),
@@ -1831,6 +1863,11 @@ fn add_oauth_credential_with_timeout(
         Value::String(chrono::Utc::now().to_rfc3339()),
     );
     write_sequence_data(&data)?;
+    clear_replaced_quarantine(
+        &resolved_email,
+        new_identity.organization_uuid.as_deref(),
+        trimmed,
+    );
 
     Ok(slot)
 }
@@ -2010,6 +2047,7 @@ fn import_from_cswap_with_timeout(timeout: Duration) -> Result<ImportOutcome, Sw
 
     let mut imported = 0u32;
     let mut skipped = 0u32;
+    let mut replaced_generations = Vec::new();
 
     for source_num in nums {
         let Some(record) = source_accounts.get(&source_num).and_then(Value::as_object) else {
@@ -2064,6 +2102,11 @@ fn import_from_cswap_with_timeout(timeout: Duration) -> Result<ImportOutcome, Sw
             .expect("ensure_accounts_object guarantees this")
             .insert(dest_num, Value::Object(new_record));
         add_to_sequence(&mut dest_data, slot);
+        let organization_uuid = record
+            .get("organizationUuid")
+            .and_then(Value::as_str)
+            .map(str::to_string);
+        replaced_generations.push((email, organization_uuid, credential));
 
         imported += 1;
     }
@@ -2074,6 +2117,9 @@ fn import_from_cswap_with_timeout(timeout: Duration) -> Result<ImportOutcome, Sw
             Value::String(chrono::Utc::now().to_rfc3339()),
         );
         write_sequence_data(&dest_data)?;
+        for (email, organization_uuid, credential) in replaced_generations {
+            clear_replaced_quarantine(&email, organization_uuid.as_deref(), &credential);
+        }
     }
 
     Ok(ImportOutcome { imported, skipped })
@@ -3393,6 +3439,38 @@ mod tests {
         // never installed as the live login anywhere on this machine.
         assert!(!paths::credentials_path().exists());
         assert!(!paths::global_config_path().exists());
+    }
+
+    #[test]
+    fn successful_relogin_clears_only_the_replaced_generation_quarantine() {
+        let _env = setup_env();
+        let email = "recovered@example.com";
+        let old = oauth_creds_json("dead-refresh", "dead-access");
+        let replacement = oauth_creds_json("fresh-refresh", "fresh-access");
+        let stable_key = Account {
+            email: email.to_string(),
+            ..Account::default()
+        }
+        .stable_key();
+        let old_fingerprint = oauth::credential_fingerprint(&old).unwrap();
+        let quarantine = OAuthQuarantine::new(paths::backup_root());
+        quarantine
+            .reject(&stable_key, &old_fingerprint, chrono::Utc::now())
+            .unwrap();
+
+        add_oauth_credential_with_timeout(
+            &replacement,
+            Some(email),
+            None,
+            crate::locking::DEFAULT_TIMEOUT,
+            &no_identity,
+        )
+        .unwrap();
+
+        assert!(
+            !quarantine.is_rejected(&stable_key, &old_fingerprint),
+            "a committed replacement must release the prior dead-token lineage"
+        );
     }
 
     #[test]
