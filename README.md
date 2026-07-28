@@ -119,23 +119,6 @@ background poller.
 | Settings and usage history | the same `dev.apex36.cc-logins` directory |
 | Log file | `%APPDATA%\cc-logins\app.log` · `~/Library/Application Support/cc-logins/app.log` · `~/.local/share/cc-logins/app.log` |
 
-## Relationship to the `cswap` CLI
-
-[claude-swap](https://github.com/realiti4/claude-swap) (`cswap`) is an existing, more mature
-Python CLI and macOS menu bar tool that solves the same problem. This app is **not** a wrapper
-around it — it never shells out to `cswap`, and it doesn't require it to be installed. It's an
-independent Rust implementation: the credential handling, path resolution, OAuth refresh, and
-usage-tracking logic are ported from `claude-swap` (MIT-licensed, ported with attribution — see
-[LICENSE](LICENSE)), rewritten in Rust rather than wrapped.
-
-It keeps its own credential vault in its own app-data directory — never inside `cswap`'s directory
-— so a bug in this project can't corrupt `cswap`'s accounts, or vice versa. The two tools still
-interoperate where it counts. A live switch takes cswap's optional account-store OS lock, Claude
-Code's primary and legacy credential directory locks, Claude's global-config directory lock, and
-this app's private vault lock, in that order. The directory paths and staleness timings track current
-cswap/Claude Code behavior; cross-process tests run a pinned Python protocol fixture against the Rust
-implementation in both directions.
-
 Switches are journaled across the active credential, global config, and account sequence. If the
 process terminates between those writes, startup restores a noncommitted switch or verifies a
 committed one before switching is enabled again. See
@@ -143,7 +126,7 @@ committed one before switching is enabled again. See
 
 ### How credentials are stored
 
-Accounts live in this app's own directory, not in the CLI's. Each stored credential carries a
+Accounts live in this app's own data directory. Each stored credential carries a
 self-describing envelope recording what protection was actually applied:
 
 ```json
@@ -191,7 +174,6 @@ public issue; see [SECURITY.md](SECURITY.md).
 
 ## License
 
-MIT — see [LICENSE](LICENSE). Portions of the credential, path-resolution, locking, and
-usage-tracking logic are ported from [claude-swap](https://github.com/realiti4/claude-swap) by
-Onur Cetinkol (`realiti4`), also MIT-licensed; that attribution is reproduced in full in
-[LICENSE](LICENSE) as the license requires.
+MIT — see [LICENSE](LICENSE). Portions are adapted from
+[claude-swap](https://github.com/realiti4/claude-swap) by Onur Cetinkol (`realiti4`) under the
+MIT License; full attribution is included in [LICENSE](LICENSE).

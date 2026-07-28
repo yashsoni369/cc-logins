@@ -37,5 +37,5 @@ it.
 - [ ] No test points at a real credential store, and `guard_real_store()` in
       `src-tauri/src/test_support.rs` is unchanged or strengthened — never
       relaxed.
-- [ ] Any new case in `src-tauri/tests/differential.rs` uses only the
-      read-only `cswap list` / `cswap status` subcommands.
+- [ ] Any new case in `src-tauri/tests/differential.rs` uses only explicitly
+      allowlisted read-only commands.

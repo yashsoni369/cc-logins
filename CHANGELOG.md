@@ -33,21 +33,21 @@ when it happens.
 - Refresh control on the Accounts screen and in the tray popover, rate-limited in the
   backend so it cannot outpace the poller.
 - Day / night / system theme.
-- Cross-process file locking compatible with the `cswap` CLI, verified by Rust/Rust,
-  pinned Python-protocol/Rust, and optional installed-`claude_swap` interoperability tests.
+- Cross-process file locking for account, credential, and configuration stores, verified by
+  Rust/Rust and protocol-level interoperability tests.
 - Recoverable account switching with Claude Code-compatible credential/config locks,
   protected before-images, a secret-free durable journal, exact rollback, startup
   recovery, an explicit `recoveryRequired` UI state, and backend-enforced blocking
   of every credential or account-registry mutation until recovery succeeds.
-- Switch-time credential provenance checks matching current cswap: live bytes proven
+- Switch-time credential provenance checks: live bytes proven
   to belong to a different or recycled account are preserved in the unclaimed safety
   store and never written over the configured outgoing slot; an unavailable identity
-  oracle retains cswap's fail-open rotation behavior.
-- Active usage attribution matching current cswap: a credential accepted by the usage
+  oracle retains fail-open rotation behavior.
+- Active usage attribution: a credential accepted by the usage
   endpoint is not assigned to the configured slot when the profile oracle proves it
   belongs to another account; definitive lineage verdicts are memoized, while partial
   or unavailable oracle results remain retryable.
-- Active OAuth recovery matching current cswap: expired or server-rejected active
+- Active OAuth recovery: expired or server-rejected active
   generations refresh under Claude-compatible credential locks, recheck account and
   lineage ownership before consuming a grant, and persist the successor to both the live
   credential and its slot backup. Exact `invalid_grant` results remain generation-bound.

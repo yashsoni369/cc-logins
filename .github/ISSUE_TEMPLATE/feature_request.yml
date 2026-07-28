@@ -30,7 +30,7 @@ body:
     id: alternatives
     attributes:
       label: What you already tried
-      description: Existing settings, the `cswap` CLI, or a workaround — and why it isn't enough.
+      description: Existing settings or a workaround — and why it isn't enough.
     validations:
       required: false
 
