@@ -517,6 +517,10 @@ pub fn protection_scheme() -> ProtectionScheme {
 /// `cfg(windows)` in [`wrap_platform_bytes`]/[`unwrap_dpapi`], but keeping
 /// the module unconditional avoids sprinkling `cfg(windows)` through the
 /// envelope logic itself.
+///
+/// Off Windows the stub `imp` is unreachable by construction, so dead-code
+/// lints are allowed there only — Windows still fails on genuinely unused items.
+#[cfg_attr(not(windows), allow(dead_code, unused_imports))]
 mod dpapi {
     #[derive(Debug)]
     pub struct DpapiError(pub String);
@@ -803,7 +807,8 @@ mod macos_keychain {
         const ERR_SEC_ITEM_NOT_FOUND: i32 = -25300;
 
         fn is_not_found(e: &SfError) -> bool {
-            e.code() as i32 == ERR_SEC_ITEM_NOT_FOUND
+            // `code()` is already i32; the cast was a no-op.
+            e.code() == ERR_SEC_ITEM_NOT_FOUND
         }
 
         pub fn get_password(service: &str, account: &str) -> Result<Option<String>, KeychainError> {

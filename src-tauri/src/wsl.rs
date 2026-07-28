@@ -152,10 +152,14 @@ pub struct Distro {
 // ---------------------------------------------------------------------------
 // Pure helpers (platform-independent, always compiled and tested)
 // ---------------------------------------------------------------------------
+//
+// Compiled everywhere so they stay unit-tested everywhere, but only *called* on
+// Windows — hence the per-item `allow(dead_code)` for non-Windows targets.
 
 /// Known infrastructure distros that back other tooling rather than hosting
 /// a user's shell/login. Matched case-insensitively since WSL distro names
 /// are case-preserving but not case-sensitive for most user-facing purposes.
+#[cfg_attr(not(windows), allow(dead_code))]
 const SYSTEM_DISTRO_NAMES: &[&str] = &[
     "docker-desktop",
     "docker-desktop-data",
@@ -164,6 +168,7 @@ const SYSTEM_DISTRO_NAMES: &[&str] = &[
 
 /// `true` if `name` is a known infrastructure distro (see
 /// [`Distro::is_system`]) rather than a real user login surface.
+#[cfg_attr(not(windows), allow(dead_code))]
 fn is_system_distro(name: &str) -> bool {
     SYSTEM_DISTRO_NAMES
         .iter()
@@ -180,6 +185,7 @@ fn is_system_distro(name: &str) -> bool {
 /// Unpaired/invalid surrogates decode to U+FFFD, matching
 /// `String::from_utf8_lossy`'s "never fail, substitute" behavior for the
 /// UTF-8 case.
+#[cfg_attr(not(windows), allow(dead_code))]
 fn decode_utf16le(bytes: &[u8]) -> String {
     let bytes = match bytes {
         // U+FEFF BOM, little-endian byte order: FF FE.
@@ -197,6 +203,7 @@ fn decode_utf16le(bytes: &[u8]) -> String {
 /// Split decoded `wsl.exe -l -q` output into distro names: one per line,
 /// trimmed, blank lines (including the trailing blank line `wsl.exe` emits
 /// after the last entry) dropped.
+#[cfg_attr(not(windows), allow(dead_code))]
 fn parse_distro_list(text: &str) -> Vec<String> {
     text.lines()
         .map(str::trim)

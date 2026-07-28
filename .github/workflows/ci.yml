@@ -63,11 +63,16 @@ jobs:
         if: matrix.os == 'ubuntu-latest'
         run: |
           sudo apt-get update
+          # Ayatana only. `libappindicator3-dev` used to be listed alongside
+          # it, which worked on 22.04 and breaks here: `ubuntu-latest` is now
+          # 24.04, where that package was dropped in favour of the Ayatana
+          # fork, so apt failed before a single Rust step ran. The two are
+          # alternative implementations of the same tray API — installing both
+          # was never right.
           sudo apt-get install -y \
             libwebkit2gtk-4.1-dev \
-            libappindicator3-dev \
-            librsvg2-dev \
             libayatana-appindicator3-dev \
+            librsvg2-dev \
             libssl-dev \
             libxdo-dev \
             build-essential \
