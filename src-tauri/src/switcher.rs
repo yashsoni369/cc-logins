@@ -98,6 +98,7 @@
 //!    resolved via [`crate::paths::global_config_path`], never hand-rolled.
 
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::Duration;
 
 use serde_json::{Map, Value};
@@ -110,6 +111,10 @@ use crate::model::{
     Account, EnvKind, EnvStatus, Environment, Snapshot, Usage, UsageStatus, UsageWindow,
 };
 use crate::oauth;
+use crate::oauth_quarantine::OAuthQuarantine;
+use crate::oauth_refresh::{
+    self, AccountIdentity, CompareAndStore, GenerationStore, RefreshCoordinator, StoredGeneration,
+};
 use crate::paths;
 
 // ---------------------------------------------------------------------------
@@ -500,6 +505,119 @@ fn accounts_from_sequence(data: &Map<String, Value>) -> Vec<Account> {
     out
 }
 
+struct GuiGenerationStore {
+    timeout: Duration,
+}
+
+impl GuiGenerationStore {
+    fn new(timeout: Duration) -> Self {
+        Self { timeout }
+    }
+
+    fn with_current<T>(
+        &self,
+        identity: &AccountIdentity,
+        operation: impl FnOnce(&mut CredentialStore<GuiStoreHost>, &Account) -> Result<T, String>,
+    ) -> Result<Option<T>, String> {
+        let _lock = crate::locking::acquire_or_err(vault_lock_path(), self.timeout)
+            .map_err(|error| error.to_string())?;
+        let account = read_accounts()
+            .map_err(|error| error.to_string())?
+            .into_iter()
+            .find(|account| {
+                account.number.to_string() == identity.number
+                    && account.email == identity.email
+                    && account.stable_key() == identity.stable_key
+            });
+        let Some(account) = account else {
+            return Ok(None);
+        };
+        let mut store = CredentialStore::new(GuiStoreHost);
+        operation(&mut store, &account).map(Some)
+    }
+}
+
+impl GenerationStore for GuiGenerationStore {
+    fn read(&self, identity: &AccountIdentity) -> Result<Option<StoredGeneration>, String> {
+        self.with_current(identity, |store, account| {
+            let credentials =
+                store.read_account_credentials(&account.number.to_string(), &account.email);
+            Ok((!credentials.is_empty()).then(|| StoredGeneration::new(credentials)))
+        })
+        .map(Option::flatten)
+    }
+
+    fn compare_and_store(
+        &self,
+        identity: &AccountIdentity,
+        expected_generation: &str,
+        successor: &str,
+    ) -> Result<CompareAndStore, String> {
+        self.with_current(identity, |store, account| {
+            let number = account.number.to_string();
+            let current = store.read_account_credentials(&number, &account.email);
+            if current.is_empty() {
+                return Ok(CompareAndStore::Missing);
+            }
+            let current = StoredGeneration::new(current);
+            let successor = StoredGeneration::new(successor.to_string());
+            if current.generation == successor.generation {
+                return Ok(CompareAndStore::AlreadyCurrent(current));
+            }
+            if current.generation != expected_generation {
+                return Ok(CompareAndStore::Superseded(current));
+            }
+            store
+                .write_account_credentials(&number, &account.email, &successor.credentials)
+                .map_err(|error| error.to_string())?;
+            OAuthQuarantine::new(paths::backup_root())
+                .clear_obsolete(
+                    &identity.stable_key,
+                    oauth::credential_fingerprint(&successor.credentials)
+                        .as_deref()
+                        .unwrap_or(&successor.generation),
+                )
+                .map_err(|error| error.to_string())?;
+            Ok(CompareAndStore::Persisted(successor))
+        })
+        .map(|result| result.unwrap_or(CompareAndStore::Missing))
+    }
+
+    fn is_rejected(&self, identity: &AccountIdentity, credentials: &str) -> Result<bool, String> {
+        let fingerprint = oauth::credential_fingerprint(credentials)
+            .unwrap_or_else(|| oauth_refresh::credential_generation(credentials));
+        self.with_current(identity, |_, _| {
+            Ok(OAuthQuarantine::new(paths::backup_root())
+                .is_rejected(&identity.stable_key, &fingerprint))
+        })
+        .map(|value| value.unwrap_or(false))
+    }
+
+    fn reject_if_current(
+        &self,
+        identity: &AccountIdentity,
+        expected_generation: &str,
+        credentials: &str,
+    ) -> Result<bool, String> {
+        self.with_current(identity, |store, account| {
+            let current =
+                store.read_account_credentials(&account.number.to_string(), &account.email);
+            if current.is_empty()
+                || oauth_refresh::credential_generation(&current) != expected_generation
+            {
+                return Ok(false);
+            }
+            let fingerprint = oauth::credential_fingerprint(credentials)
+                .unwrap_or_else(|| expected_generation.to_string());
+            OAuthQuarantine::new(paths::backup_root())
+                .reject(&identity.stable_key, &fingerprint, chrono::Utc::now())
+                .map_err(|error| error.to_string())?;
+            Ok(true)
+        })
+        .map(|value| value.unwrap_or(false))
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Snapshot (accounts + freshly-fetched usage).
 // ---------------------------------------------------------------------------
@@ -518,6 +636,15 @@ fn accounts_from_sequence(data: &Map<String, Value>) -> Vec<Account> {
 /// cached prior measurement; see the port report.)
 pub async fn read_snapshot() -> Result<Snapshot, SwitchError> {
     let accounts = read_accounts()?;
+    let coordinator = RefreshCoordinator::new(
+        Arc::new(oauth::ReqwestOAuthNetwork),
+        Arc::new(GuiGenerationStore::new(Duration::from_secs(10))),
+        Arc::new(oauth_refresh::FileRefreshLeases::new(
+            paths::backup_root(),
+            Duration::from_secs(10),
+        )),
+        Arc::new(oauth_refresh::SystemClock),
+    );
 
     // Phase 1 — read every credential up front, then DROP the store before any
     // network call happens.
@@ -530,15 +657,10 @@ pub async fn read_snapshot() -> Result<Snapshot, SwitchError> {
     {
         let mut store = CredentialStore::new(GuiStoreHost);
         for account in accounts {
-            let num = account.number.to_string();
-            // Never refresh the active account's token (rule 5): the
-            // credential for the active slot comes from the *active* store,
-            // and `try_fetch_usage_for_account`'s `is_active` flag (passed
-            // below) is what keeps refresh/retry off it.
             let creds = if account.active {
                 store.read_active_credentials().value.unwrap_or_default()
             } else {
-                store.read_account_credentials(&num, &account.email)
+                String::new()
             };
             pending.push((account, creds));
         }
@@ -549,28 +671,42 @@ pub async fn read_snapshot() -> Result<Snapshot, SwitchError> {
     for (mut account, creds) in pending {
         let num = account.number.to_string();
 
-        if !creds.is_empty() {
-            let outcome = oauth::try_fetch_usage_for_account(
-                &num,
-                &account.email,
-                &creds,
-                account.active,
-                None,
-            )
-            .await;
-            match outcome.usage {
-                Some(result) => {
-                    account.usage = Some(to_model_usage(&result));
-                    account.usage_fetched_at = Some(chrono::Utc::now().to_rfc3339());
-                    account.usage_age_seconds = Some(0.0);
-                    if account.usage_status != UsageStatus::Disabled {
-                        account.usage_status = UsageStatus::Ok;
-                    }
+        let result = if account.active {
+            if creds.is_empty() {
+                None
+            } else {
+                oauth::try_fetch_usage_for_account(&num, &account.email, &creds, true, None)
+                    .await
+                    .usage
+                    .map(Ok)
+            }
+        } else {
+            let identity = AccountIdentity {
+                number: num,
+                email: account.email.clone(),
+                stable_key: account.stable_key(),
+            };
+            Some(coordinator.fetch_inactive_usage(&identity).await)
+        };
+
+        match result {
+            Some(Ok(result)) => {
+                account.usage = Some(to_model_usage(&result));
+                account.usage_fetched_at = Some(chrono::Utc::now().to_rfc3339());
+                account.usage_age_seconds = Some(0.0);
+                if account.usage_status != UsageStatus::Disabled {
+                    account.usage_status = UsageStatus::Ok;
                 }
-                None => {
-                    if account.usage_status != UsageStatus::Disabled {
-                        account.usage_status = UsageStatus::Stale;
-                    }
+            }
+            Some(Err(oauth_refresh::RefreshCoordinatorError::ReloginRequired)) => {
+                if account.usage_status != UsageStatus::Disabled {
+                    account.usage_status = UsageStatus::ReloginRequired;
+                }
+            }
+            Some(Err(oauth_refresh::RefreshCoordinatorError::Missing)) | None => {}
+            Some(Err(_)) => {
+                if account.usage_status != UsageStatus::Disabled {
+                    account.usage_status = UsageStatus::Unavailable;
                 }
             }
         }
@@ -2427,6 +2563,62 @@ mod tests {
             email: "bravo@example.com".to_string(),
             ..Default::default()
         }
+    }
+
+    fn bravo_identity() -> AccountIdentity {
+        let account = read_accounts()
+            .unwrap()
+            .into_iter()
+            .find(|account| account.number == 2)
+            .unwrap();
+        AccountIdentity {
+            number: "2".to_string(),
+            email: account.email.clone(),
+            stable_key: account.stable_key(),
+        }
+    }
+
+    #[test]
+    fn generation_store_compare_and_store_never_overwrites_a_newer_winner() {
+        let _env = setup_env();
+        seed_two_accounts();
+        let store = GuiGenerationStore::new(Duration::from_secs(5));
+        let identity = bravo_identity();
+        let first = store.read(&identity).unwrap().unwrap();
+
+        let persisted = store
+            .compare_and_store(&identity, &first.generation, "successor-creds")
+            .unwrap();
+        assert!(matches!(persisted, CompareAndStore::Persisted(_)));
+
+        let stale = store
+            .compare_and_store(&identity, &first.generation, "stale-callback-creds")
+            .unwrap();
+        let CompareAndStore::Superseded(winner) = stale else {
+            panic!("stale callback must observe the winner");
+        };
+        assert_eq!(winner.credentials, "successor-creds");
+        assert_eq!(
+            store.read(&identity).unwrap().unwrap().credentials,
+            "successor-creds"
+        );
+    }
+
+    #[test]
+    fn generation_store_quarantines_only_the_exact_current_generation() {
+        let _env = setup_env();
+        seed_two_accounts();
+        let store = GuiGenerationStore::new(Duration::from_secs(5));
+        let identity = bravo_identity();
+        let first = store.read(&identity).unwrap().unwrap();
+
+        assert!(store
+            .reject_if_current(&identity, &first.generation, &first.credentials)
+            .unwrap());
+        assert!(store.is_rejected(&identity, &first.credentials).unwrap());
+        assert!(!store
+            .reject_if_current(&identity, "sha256-full:stale", &first.credentials)
+            .unwrap());
     }
 
     #[test]
