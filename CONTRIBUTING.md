@@ -64,3 +64,7 @@ data loss.
 - Suspected vulnerabilities go to [SECURITY.md](SECURITY.md), not a public
   issue.
 - Contributions are MIT licensed, same as the project.
+- Cutting a release is maintainer-only and documented in
+  [RELEASING.md](RELEASING.md). If your change is user-visible, add a
+  `CHANGELOG.md` entry under `## [Unreleased]` — releases are built from those
+  entries.
