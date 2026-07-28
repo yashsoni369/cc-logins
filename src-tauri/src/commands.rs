@@ -525,6 +525,8 @@ pub struct AppState {
     /// app must still run without history rather than refusing to start.
     pub history: Option<crate::history::HistoryStore>,
     pub settings: crate::settings::SettingsStore,
+    /// Canonical daemon phase used by hydration and global status events.
+    pub daemon_status: crate::runtime::DaemonStatusStore,
     /// When the user last forced a fetch with the Refresh control.
     ///
     /// The Refresh button spends a real request against the same per-token
@@ -537,7 +539,14 @@ pub struct AppState {
 
 impl AppState {
     pub fn new(data_dir: std::path::PathBuf) -> Self {
-        let settings = crate::settings::SettingsStore::new(data_dir.clone(), chrono::Utc::now());
+        let now = chrono::Utc::now();
+        let settings = crate::settings::SettingsStore::new(data_dir.clone(), now);
+        let policy = {
+            let receiver = settings.subscribe_policy();
+            let current = receiver.borrow().clone();
+            current
+        };
+        let daemon_status = crate::runtime::DaemonStatusStore::new(&policy, now);
         let history = match crate::history::HistoryStore::open(&data_dir) {
             Ok(h) => Some(h),
             Err(e) => {
@@ -549,6 +558,7 @@ impl AppState {
             data_dir,
             history,
             settings,
+            daemon_status,
             snapshot_cache: std::sync::Mutex::new(None),
             last_manual_refresh: std::sync::Mutex::new(None),
         }
@@ -693,6 +703,11 @@ pub struct SnoozeAutoSwitchInput {
 #[tauri::command]
 pub fn get_settings(state: tauri::State<'_, AppState>) -> crate::settings::SettingsSnapshot {
     get_settings_from(&state)
+}
+
+#[tauri::command]
+pub fn get_daemon_status(state: tauri::State<'_, AppState>) -> crate::runtime::DaemonStatus {
+    state.daemon_status.snapshot()
 }
 
 #[tauri::command]
@@ -906,6 +921,14 @@ mod tests {
             data_dir: blocked.clone(),
             history: None,
             settings: crate::settings::SettingsStore::new(blocked, fixed_now()),
+            daemon_status: crate::runtime::DaemonStatusStore::new(
+                &crate::runtime::RuntimePolicy::from_settings(
+                    0,
+                    &crate::settings::Settings::default(),
+                    fixed_now(),
+                ),
+                fixed_now(),
+            ),
             last_manual_refresh: std::sync::Mutex::new(None),
         };
         let emitted = Cell::new(false);

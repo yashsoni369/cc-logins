@@ -307,6 +307,7 @@ pub fn run() {
             commands::history_series,
             commands::history_available,
             commands::get_settings,
+            commands::get_daemon_status,
             commands::update_settings,
             commands::snooze_auto_switch,
             commands::resume_auto_switch,

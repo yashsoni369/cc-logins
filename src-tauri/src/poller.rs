@@ -698,6 +698,24 @@ pub fn publish_switching(app: &AppHandle) {
     paint_icon(app, spec);
 }
 
+/// Store and publish a daemon phase if either it or the policy revision
+/// changed. Hydration always reads the stored value, so an event can never be
+/// emitted ahead of the authoritative snapshot it represents.
+pub fn publish_daemon_status(
+    app: &AppHandle,
+    policy_revision: u64,
+    phase: crate::runtime::DaemonPhase,
+    now: DateTime<Utc>,
+) {
+    let state = app.state::<crate::commands::AppState>();
+    let Some(status) = state.daemon_status.transition(policy_revision, phase, now) else {
+        return;
+    };
+    if let Err(error) = app.emit("daemon://status", status) {
+        log::debug!("publish_daemon_status: emit failed: {error}");
+    }
+}
+
 /// Panic-safe wrapper around [`update_tray_icon`], shared by
 /// [`publish_snapshot`], [`publish_switching`], and `lib.rs`'s one-time
 /// startup placeholder paint (before the poller's first tick has produced a
