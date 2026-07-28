@@ -18,7 +18,7 @@ jobs:
     name: Version matches tag
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Compare tag against all three version fields
         run: |
           TAG="${GITHUB_REF_NAME#v}"
@@ -51,7 +51,7 @@ jobs:
           - platform: ubuntu-22.04
     runs-on: ${{ matrix.platform }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       # Same package list as ci.yml's Linux job — see that file's comment
       # for why cargo/tauri need these even before bundling.
@@ -76,7 +76,7 @@ jobs:
         with:
           workspaces: src-tauri
 
-      - uses: pnpm/action-setup@v4
+      - uses: pnpm/action-setup@v6
         with:
           version: 10.14.0
 
