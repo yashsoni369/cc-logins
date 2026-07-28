@@ -272,62 +272,9 @@ pub enum SwitchError {
 // ---------------------------------------------------------------------------
 
 fn atomic_write(target: &Path, contents: &[u8]) -> std::io::Result<()> {
-    let dir = target.parent().unwrap_or_else(|| Path::new("."));
-    std::fs::create_dir_all(dir)?;
-
-    let file_name = target
-        .file_name()
-        .and_then(|n| n.to_str())
-        .unwrap_or("switcher");
-    let tmp_path = dir.join(format!(
-        ".{file_name}.{}.{}.tmp",
-        std::process::id(),
-        next_tmp_suffix()
-    ));
-
-    let write_result = (|| -> std::io::Result<()> {
-        use std::io::Write;
-        let mut opts = std::fs::OpenOptions::new();
-        opts.write(true).create_new(true);
-        // 0600 at creation, not after the rename — see the twin of this
-        // function in `credentials.rs::atomic_write`.
-        #[cfg(not(windows))]
-        {
-            use std::os::unix::fs::OpenOptionsExt;
-            opts.mode(0o600);
-        }
-        let mut f = opts.open(&tmp_path)?;
-        f.write_all(contents)?;
-        f.sync_all()
-    })();
-
-    if let Err(e) = write_result {
-        let _ = std::fs::remove_file(&tmp_path);
-        return Err(e);
-    }
-
-    if let Err(e) = std::fs::rename(&tmp_path, target) {
-        let _ = std::fs::remove_file(&tmp_path);
-        return Err(e);
-    }
-
-    #[cfg(not(windows))]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        // Not `?`: the rename has committed, so a chmod failure must not
-        // report a completed switch as failed.
-        if let Err(e) = std::fs::set_permissions(target, std::fs::Permissions::from_mode(0o600)) {
-            log::warn!("could not tighten permissions on {}: {e}", target.display());
-        }
-    }
-
-    Ok(())
-}
-
-fn next_tmp_suffix() -> u64 {
-    use std::sync::atomic::{AtomicU64, Ordering};
-    static COUNTER: AtomicU64 = AtomicU64::new(0);
-    COUNTER.fetch_add(1, Ordering::Relaxed)
+    crate::durable_fs::stage_sibling(target, contents, Some(0o600))?
+        .commit()
+        .map_err(Into::into)
 }
 
 // ---------------------------------------------------------------------------
