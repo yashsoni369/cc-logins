@@ -37,6 +37,15 @@ pub struct LiveStateLocks {
     _vault: crate::locking::FileLock,
 }
 
+/// The narrower lock set used only while reconciling an active OAuth
+/// generation. The bounded refresh POST is allowed while this guard exists;
+/// callers must never acquire the omitted config lock before dropping it.
+pub struct ActiveRefreshLocks {
+    _cswap: Option<crate::locking::FileLock>,
+    _claude_credentials: crate::claude_locks::ClaudeCredentialLocks,
+    _vault: crate::locking::FileLock,
+}
+
 #[derive(Debug, Clone)]
 pub(crate) enum OutgoingDestination {
     Managed {
@@ -794,6 +803,30 @@ pub fn acquire_live_state_locks(timeout: Duration) -> Result<LiveStateLocks, Liv
     })
 }
 
+/// Acquire active-refresh locks in the canonical order, omitting the config
+/// lock because the refresh path writes only OAuth credential storage.
+pub fn acquire_active_refresh_locks(
+    timeout: Duration,
+) -> Result<ActiveRefreshLocks, LiveStateLockError> {
+    let cswap_root = crate::paths::cswap_store_root();
+    let cswap = if cswap_root.exists() {
+        Some(crate::locking::acquire_or_err(
+            cswap_root.join(".lock"),
+            timeout,
+        )?)
+    } else {
+        None
+    };
+    let claude_credentials = crate::claude_locks::acquire_credential_locks(timeout)?;
+    let vault = crate::locking::acquire_or_err(crate::paths::backup_root().join(".lock"), timeout)?;
+
+    Ok(ActiveRefreshLocks {
+        _cswap: cswap,
+        _claude_credentials: claude_credentials,
+        _vault: vault,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1434,6 +1467,19 @@ mod tests {
         assert!(crate::paths::oauth_refresh_lock_dir().is_dir());
         assert!(crate::paths::credentials_lock_dir().is_dir());
         assert!(crate::paths::global_config_lock_dir().is_dir());
+        assert!(env.vault.path().join(".lock").exists());
+        drop(locks);
+    }
+
+    #[test]
+    fn active_refresh_locks_omit_config_but_hold_credentials_and_vault() {
+        let env = setup();
+        fs::create_dir(crate::paths::global_config_lock_dir()).unwrap();
+
+        let locks = acquire_active_refresh_locks(Duration::from_millis(100)).unwrap();
+
+        assert!(crate::paths::oauth_refresh_lock_dir().is_dir());
+        assert!(crate::paths::credentials_lock_dir().is_dir());
         assert!(env.vault.path().join(".lock").exists());
         drop(locks);
     }

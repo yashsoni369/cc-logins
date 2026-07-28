@@ -588,12 +588,29 @@ pub trait OAuthNetwork: Send + Sync {
     ) -> OAuthFuture<'a, Result<Value, UsageFetchError>>;
 }
 
-#[derive(Debug, Clone, Copy, Default)]
-pub struct ReqwestOAuthNetwork;
+#[derive(Debug, Clone, Copy)]
+pub struct ReqwestOAuthNetwork {
+    refresh_timeout: Duration,
+}
+
+impl ReqwestOAuthNetwork {
+    pub fn with_refresh_timeout(refresh_timeout: Duration) -> Self {
+        Self { refresh_timeout }
+    }
+}
+
+impl Default for ReqwestOAuthNetwork {
+    fn default() -> Self {
+        Self::with_refresh_timeout(Duration::from_secs(10))
+    }
+}
 
 impl OAuthNetwork for ReqwestOAuthNetwork {
     fn refresh<'a>(&'a self, credentials: &'a str) -> OAuthFuture<'a, RefreshOutcome> {
-        Box::pin(try_refresh_oauth_credentials_direct(credentials))
+        Box::pin(try_refresh_oauth_credentials_direct(
+            credentials,
+            self.refresh_timeout,
+        ))
     }
 
     fn fetch_usage<'a>(
@@ -694,10 +711,13 @@ fn parse_token_account(resp_data: &Value) -> Option<TokenAccount> {
 /// that is a caller-side rule (Claude Code owns those bytes), not something
 /// this function can enforce, since it has no notion of "active".
 pub async fn try_refresh_oauth_credentials(credentials: &str) -> RefreshOutcome {
-    ReqwestOAuthNetwork.refresh(credentials).await
+    ReqwestOAuthNetwork::default().refresh(credentials).await
 }
 
-async fn try_refresh_oauth_credentials_direct(credentials: &str) -> RefreshOutcome {
+async fn try_refresh_oauth_credentials_direct(
+    credentials: &str,
+    refresh_timeout: Duration,
+) -> RefreshOutcome {
     let data: Value = match serde_json::from_str(credentials) {
         Ok(v) => v,
         Err(_) => {
@@ -737,10 +757,7 @@ async fn try_refresh_oauth_credentials_direct(credentials: &str) -> RefreshOutco
         "client_id": OAUTH_CLIENT_ID,
     });
 
-    let client = match reqwest::Client::builder()
-        .timeout(Duration::from_secs(10))
-        .build()
-    {
+    let client = match reqwest::Client::builder().timeout(refresh_timeout).build() {
         Ok(c) => c,
         Err(_) => {
             return RefreshOutcome {
@@ -962,7 +979,9 @@ fn parse_retry_after(headers: &reqwest::header::HeaderMap) -> Option<f64> {
 /// responses carry the parsed `Retry-After` header (seconds form only — the
 /// HTTP-date form is rare enough to ignore, matching the Python source).
 async fn request_usage_data(access_token: &str) -> Result<Value, UsageFetchError> {
-    ReqwestOAuthNetwork.fetch_usage(access_token).await
+    ReqwestOAuthNetwork::default()
+        .fetch_usage(access_token)
+        .await
 }
 
 async fn request_usage_data_direct(access_token: &str) -> Result<Value, UsageFetchError> {
@@ -1151,7 +1170,7 @@ pub async fn try_fetch_usage_for_account(
     persist_credentials: Option<&PersistCallback>,
 ) -> UsageOutcome {
     try_fetch_usage_for_account_with_network(
-        &ReqwestOAuthNetwork,
+        &ReqwestOAuthNetwork::default(),
         account_num,
         email,
         credentials,

@@ -1360,6 +1360,35 @@ impl<H: StoreHost> CredentialStore<H> {
         }
     }
 
+    /// Replace only Claude Code's active OAuth generation.
+    ///
+    /// Active refresh already holds the credential locks and must not touch
+    /// global config while the GUI vault lock is held. Unlike
+    /// [`Self::write_credentials`], this deliberately leaves the managed-key
+    /// axis unchanged.
+    pub(crate) fn write_refreshed_oauth_credentials(
+        &mut self,
+        credentials: &str,
+    ) -> Result<(), CredentialError> {
+        let oauth = serde_json::from_str::<Value>(credentials)
+            .ok()
+            .and_then(|value| value.get("claudeAiOauth").cloned())
+            .and_then(|value| value.as_object().cloned())
+            .ok_or_else(|| CredentialError::Write("refreshed OAuth payload is malformed".into()))?;
+        let has_pair = ["accessToken", "refreshToken"].into_iter().all(|field| {
+            oauth
+                .get(field)
+                .and_then(Value::as_str)
+                .is_some_and(|value| !value.is_empty())
+        });
+        if !has_pair {
+            return Err(CredentialError::Write(
+                "refreshed OAuth payload lacks a complete token pair".into(),
+            ));
+        }
+        self.write_oauth_credentials(credentials)
+    }
+
     /// Activate a managed API key, then clear OAuth (mutual exclusion).
     ///
     /// Always records `key[-20:]` in `customApiKeyResponses.approved`
@@ -2638,6 +2667,30 @@ mod tests {
         let text = std::fs::read_to_string(&cred_file).unwrap();
         assert!(text.contains("claudeAiOauth"));
         assert_eq!(store.last_active_credentials_backend(), Some(Backend::File));
+    }
+
+    #[test]
+    fn write_refreshed_oauth_credentials_does_not_mutate_managed_key_config() {
+        let dir = tempfile::tempdir().unwrap();
+        let _env = EnvVarScope::set(dir.path());
+        let global_config = dir.path().join(".claude.json");
+        std::fs::write(
+            &global_config,
+            r#"{"primaryApiKey":"keep-me","customApiKeyResponses":{"approved":["keep"]}}"#,
+        )
+        .unwrap();
+        let before = std::fs::read_to_string(&global_config).unwrap();
+        let refreshed =
+            r#"{"claudeAiOauth":{"accessToken":"new-access","refreshToken":"new-refresh"}}"#;
+
+        let mut store = file_backed_store(dir.path());
+        store.write_refreshed_oauth_credentials(refreshed).unwrap();
+
+        assert_eq!(std::fs::read_to_string(global_config).unwrap(), before);
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join(".credentials.json")).unwrap(),
+            refreshed
+        );
     }
 
     #[test]
