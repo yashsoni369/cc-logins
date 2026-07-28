@@ -199,6 +199,80 @@ async fn snapshot_uncached(state: &AppState) -> IpcResult<Snapshot> {
     }
 }
 
+/// Outcome of a user-pressed Refresh.
+///
+/// `refreshed` is deliberately explicit rather than inferred from whether the
+/// numbers changed: a genuine fetch that returns identical usage is not the
+/// same event as a request that was never sent, and the UI must be able to
+/// tell the user which happened instead of implying freshness it did not get.
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RefreshResult {
+    pub snapshot: Snapshot,
+    /// `false` when the cooldown was still running and `snapshot` is the
+    /// previously-held value.
+    pub refreshed: bool,
+    /// Seconds until pressing Refresh will actually fetch again.
+    pub retry_after_seconds: u64,
+}
+
+/// How long after a manual refresh the next one is refused.
+///
+/// Matched to [`crate::poller::poll_policy::URGENT_INTERVAL_S`], the fastest
+/// cadence the daemon will ever choose for itself: the user gets a control as
+/// responsive as the poller's own most aggressive mode, and no faster.
+///
+/// Be clear about what this does and does not buy. It stops burst clicking,
+/// which is the realistic failure. It does **not** by itself guarantee the
+/// endpoint's rolling budget of ~28-30 requests per hour per token: someone
+/// pressing this every 60 seconds for a solid hour, on top of the poller's own
+/// spend, would exceed it. That case is handled where it was always handled —
+/// [`crate::poller::poll_policy`]'s 429 backoff, which widens the cadence
+/// after a rate limit rather than pretending it cannot happen.
+pub const MANUAL_REFRESH_COOLDOWN: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// Fetch usage now, at the user's request, subject to a cooldown.
+///
+/// This is the escape hatch for the fixed poll cadence: the daemon's interval
+/// is no longer configurable, so this is how someone who wants a number *right
+/// now* gets one. It is throttled because it is the only fetch path a user can
+/// trigger arbitrarily fast, and it spends from the same per-token budget that
+/// [`snapshot`]'s cache exists to protect.
+#[tauri::command]
+pub async fn refresh_snapshot(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, AppState>,
+) -> IpcResult<RefreshResult> {
+    if let Some(remaining) = state.manual_refresh_cooldown(MANUAL_REFRESH_COOLDOWN) {
+        // Hand back what we already hold rather than spending a request. Any
+        // age is acceptable here — the point is precisely not to fetch — and
+        // the UI labels staleness from the snapshot's own timestamps.
+        if let Some(cached) = state.cached_snapshot(std::time::Duration::MAX) {
+            return Ok(RefreshResult {
+                snapshot: cached,
+                refreshed: false,
+                // Round up: reporting 0 while still refusing would invite an
+                // immediate retry that is also refused.
+                retry_after_seconds: remaining.as_secs().saturating_add(1),
+            });
+        }
+    }
+
+    // Marked before the await, not after: two clicks landing together must not
+    // both observe an expired cooldown and both fetch.
+    state.mark_manual_refresh();
+    let snapshot = snapshot_uncached(&state).await?;
+    // Repaint the tray and tell the other window, so a refresh pressed in the
+    // popover is visible on the dashboard too.
+    crate::poller::publish_snapshot(&app, &snapshot);
+
+    Ok(RefreshResult {
+        snapshot,
+        refreshed: true,
+        retry_after_seconds: MANUAL_REFRESH_COOLDOWN.as_secs(),
+    })
+}
+
 /// Detected credential realms: native, plus any WSL distro.
 ///
 /// Never starts a stopped WSL distro — see [`crate::wsl`]. A stopped distro
@@ -425,6 +499,14 @@ pub struct AppState {
     /// app must still run without history rather than refusing to start.
     pub history: Option<crate::history::HistoryStore>,
     pub settings: std::sync::Mutex<crate::settings::Settings>,
+    /// When the user last forced a fetch with the Refresh control.
+    ///
+    /// The Refresh button spends a real request against the same per-token
+    /// budget the poller is carefully rationing, and it is the one path a user
+    /// can trigger as fast as they can click. Held here rather than in the
+    /// frontend because both windows can press it: two per-window cooldowns
+    /// would let the popover and the dashboard alternate and defeat each other.
+    pub last_manual_refresh: std::sync::Mutex<Option<std::time::Instant>>,
 }
 
 impl AppState {
@@ -442,6 +524,31 @@ impl AppState {
             history,
             settings: std::sync::Mutex::new(settings),
             snapshot_cache: std::sync::Mutex::new(None),
+            last_manual_refresh: std::sync::Mutex::new(None),
+        }
+    }
+
+    /// `Some(remaining)` while a manual refresh is still on cooldown.
+    ///
+    /// A poisoned lock reports "cooling down" rather than "go ahead": the
+    /// conservative answer protects the request budget, and the alternative
+    /// would turn a panic elsewhere into an unthrottled refresh path.
+    pub fn manual_refresh_cooldown(
+        &self,
+        window: std::time::Duration,
+    ) -> Option<std::time::Duration> {
+        let guard = match self.last_manual_refresh.lock() {
+            Ok(g) => g,
+            Err(_) => return Some(window),
+        };
+        let last = (*guard)?;
+        window.checked_sub(last.elapsed())
+    }
+
+    /// Start the manual-refresh cooldown from now.
+    pub fn mark_manual_refresh(&self) {
+        if let Ok(mut guard) = self.last_manual_refresh.lock() {
+            *guard = Some(std::time::Instant::now());
         }
     }
 
@@ -535,6 +642,75 @@ pub fn set_settings(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// An `AppState` rooted in a temp dir.
+    ///
+    /// `AppState::new` opens the history database and reads settings, so it
+    /// must never be pointed at a real data directory from a test — see
+    /// `test_support::guard_real_store` for what that cost us once already.
+    fn temp_state() -> (tempfile::TempDir, AppState) {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let state = AppState::new(dir.path().to_path_buf());
+        (dir, state)
+    }
+
+    #[test]
+    fn a_fresh_state_allows_a_manual_refresh_immediately() {
+        let (_dir, state) = temp_state();
+        assert_eq!(
+            state.manual_refresh_cooldown(MANUAL_REFRESH_COOLDOWN),
+            None,
+            "the first press must not be refused; nothing has been spent yet"
+        );
+    }
+
+    #[test]
+    fn a_manual_refresh_starts_a_cooldown_that_refuses_the_next_one() {
+        let (_dir, state) = temp_state();
+        state.mark_manual_refresh();
+
+        let remaining = state
+            .manual_refresh_cooldown(MANUAL_REFRESH_COOLDOWN)
+            .expect("a refresh immediately after another must be refused");
+
+        // Bounded on both sides: a zero remainder would let the UI report
+        // "retry in 0s" while still refusing, and anything above the window
+        // would mean the clock ran backwards.
+        assert!(
+            remaining > std::time::Duration::ZERO && remaining <= MANUAL_REFRESH_COOLDOWN,
+            "remaining {remaining:?} outside (0, {MANUAL_REFRESH_COOLDOWN:?}]"
+        );
+    }
+
+    #[test]
+    fn the_cooldown_expires_rather_than_latching() {
+        let (_dir, state) = temp_state();
+        state.mark_manual_refresh();
+
+        // A zero-length window is the same code path an elapsed one takes:
+        // `checked_sub` returns None once elapsed >= window.
+        assert_eq!(
+            state.manual_refresh_cooldown(std::time::Duration::ZERO),
+            None,
+            "an elapsed cooldown must release, or Refresh would never work again"
+        );
+    }
+
+    /// The user must never be able to out-poll the daemon's own most
+    /// aggressive mode. `URGENT_INTERVAL_S` is the tightest cadence
+    /// `poll_policy` will ever choose for itself, having been derived against
+    /// the real endpoint; a manual control allowed to fire faster than that
+    /// would be spending the budget on a schedule nothing reasoned about.
+    #[test]
+    fn a_held_down_refresh_cannot_beat_the_pollers_own_fastest_cadence() {
+        let cooldown = MANUAL_REFRESH_COOLDOWN.as_secs_f64();
+        let urgent = crate::poller::poll_policy::URGENT_INTERVAL_S;
+        assert!(
+            cooldown >= urgent,
+            "manual refresh every {cooldown}s is faster than the poller's own \
+             urgent cadence of {urgent}s"
+        );
+    }
 
     #[test]
     fn no_accounts_maps_to_not_configured_not_an_error() {

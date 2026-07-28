@@ -5,6 +5,7 @@ import UsageMeter from "./UsageMeter";
 import AccountDetails from "./AccountDetails";
 import AddTokenDialog from "./AddTokenDialog";
 import SignInFlow from "./SignInFlow";
+import { RefreshButton } from "./RefreshButton";
 
 /** Per-account outcome of the most recent switch attempt. */
 interface SwitchError {
@@ -119,6 +120,7 @@ export default function AccountsScreen({
       <div className="pane-head">
         <h3>Accounts</h3>
         <span className="sub num">{measuredLabel(accounts)}</span>
+        <RefreshButton />
       </div>
 
       <table className="accts">

@@ -85,12 +85,6 @@ pub struct Settings {
 
     /// Utilisation percentage that arms a switch. `cswap` default is 90.
     pub threshold: u8,
-    /// Minimum gap between usage checks, not a fixed period — the adaptive
-    /// poller in `poller.rs` may check less often than this (it backs off
-    /// after a 429 and decays toward its own ceiling when nothing is
-    /// moving), but never more often. Clamped in [`Settings::sanitised`] to
-    /// `180..3600`; see that comment for where 180 comes from.
-    pub interval_seconds: u64,
     /// Minimum gap between switches, to stop flip-flopping.
     pub cooldown_seconds: u64,
     /// An account must drop this far below the threshold before it is eligible
@@ -124,15 +118,6 @@ impl Default for Settings {
         Self {
             auto_switch_enabled: false,
             threshold: 90,
-            // 5 minutes. Comfortably above the 180s measured floor (see
-            // `sanitised` below) rather than sitting right on it, and matches
-            // the default refresh cadence of the Claude Code status-line
-            // tools that poll this same endpoint, so the number means the
-            // same thing here as it does elsewhere in the ecosystem. The old
-            // default of 60 sat below that floor and was silently overridden
-            // to 180 by the poller — exactly the dishonest-control shape
-            // `sanitised` now closes off.
-            interval_seconds: 300,
             cooldown_seconds: 300,
             hysteresis_pct: 10,
             unhealthy_ticks: 3,
@@ -155,22 +140,6 @@ impl Settings {
     /// silly number should not stop the app from starting.
     pub fn sanitised(mut self) -> Self {
         self.threshold = self.threshold.clamp(50, 99);
-        // Floor of 180s matches `poller::poll_policy::MIN_INTERVAL_S` exactly
-        // — not an arbitrary round number. It comes from the real usage
-        // endpoint's behaviour (ported from `claude_swap/poll_policy.py`,
-        // which derived it empirically): the endpoint enforces a rolling
-        // ~60-minute budget of roughly 28-30 requests per access token — a
-        // fixed window, not a refilling bucket — and the endpoint owner's own
-        // stated target is an average of at most ~1 request per 3 minutes per
-        // token. That is 180s. The poller already enforces this floor by
-        // silently overriding anything lower (`interval_s.max(MIN_INTERVAL_S)`
-        // in `poller.rs`), so accepting a smaller value here would let this
-        // control accept and "save" a number that can never actually take
-        // effect — precisely the lie this clamp exists to close off. Do not
-        // lower this without first re-deriving the budget against the real
-        // endpoint; a live run has already produced a 429 storm from
-        // over-eager polling once.
-        self.interval_seconds = self.interval_seconds.clamp(180, 3600);
         self.cooldown_seconds = self.cooldown_seconds.min(86_400);
         self.hysteresis_pct = self.hysteresis_pct.min(50);
         self.unhealthy_ticks = self.unhealthy_ticks.clamp(1, 20);
@@ -246,7 +215,6 @@ mod tests {
     fn absurd_values_are_clamped_not_rejected() {
         let wild = Settings {
             threshold: 250,
-            interval_seconds: 1,
             hysteresis_pct: 200,
             unhealthy_ticks: 0,
             grace_seconds: 999_999,
@@ -256,53 +224,33 @@ mod tests {
         .sanitised();
 
         assert_eq!(wild.threshold, 99);
-        // 180, not 15: a value the poller would silently override must not
-        // be accepted as "saved" — see the clamp's own comment.
-        assert_eq!(wild.interval_seconds, 180);
         assert_eq!(wild.hysteresis_pct, 50);
         assert_eq!(wild.unhealthy_ticks, 1);
         assert_eq!(wild.grace_seconds, 3600);
         assert_eq!(wild.history_retention_days, 1);
     }
 
+    /// The poll cadence used to be a user-facing setting. It is now fixed in
+    /// `poller::poll_policy`, so a settings file written by an older build
+    /// still carries an `intervalSeconds` key. Dropping the field must not
+    /// cost the user every other setting in the same file — this is the same
+    /// failure mode that renaming `StorageMode` once caused.
     #[test]
-    fn default_interval_matches_the_ecosystem_s_5_minute_convention() {
-        // The old default (60s) sat below the poller's real floor and was
-        // silently raised to 180 — a fresh install shipped one of the
-        // dishonest values this whole task exists to remove. 300s is
-        // comfortably above the 180s floor and matches what Claude Code
-        // status-line tools default to against this same endpoint.
-        assert_eq!(Settings::default().interval_seconds, 300);
-    }
+    fn a_settings_file_from_before_the_interval_was_fixed_still_loads() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings.json");
+        std::fs::write(
+            &path,
+            r#"{"intervalSeconds":600,"threshold":77,"autoSwitchEnabled":true,"graceSeconds":300}"#,
+        )
+        .unwrap();
 
-    #[test]
-    fn a_sub_floor_interval_is_clamped_up_to_the_measured_floor() {
-        let s = Settings {
-            interval_seconds: 30,
-            ..Default::default()
-        }
-        .sanitised();
-        assert_eq!(s.interval_seconds, 180);
-    }
+        let loaded = load(dir.path());
 
-    #[test]
-    fn the_floor_itself_is_accepted_unchanged() {
-        let s = Settings {
-            interval_seconds: 180,
-            ..Default::default()
-        }
-        .sanitised();
-        assert_eq!(s.interval_seconds, 180);
-    }
-
-    #[test]
-    fn an_interval_above_the_ceiling_is_clamped_down_to_it() {
-        let s = Settings {
-            interval_seconds: 999_999,
-            ..Default::default()
-        }
-        .sanitised();
-        assert_eq!(s.interval_seconds, 3600);
+        // The retired key is ignored, and everything beside it survives.
+        assert_eq!(loaded.threshold, 77);
+        assert!(loaded.auto_switch_enabled);
+        assert_eq!(loaded.grace_seconds, 300);
     }
 
     #[test]

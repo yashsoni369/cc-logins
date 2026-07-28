@@ -129,6 +129,26 @@ pub mod poll_policy {
     /// hour saturation point.
     pub const MIN_INTERVAL_S: f64 = 180.0;
 
+    /// The baseline cadence the daemon starts from.
+    ///
+    /// This used to be a user-facing setting ("Check usage at most every…").
+    /// It is fixed here instead, because the range a user could safely pick
+    /// from was never actually theirs to choose: anything below
+    /// [`MIN_INTERVAL_S`] was silently overridden by this module, and anything
+    /// above it was immediately overruled in the other direction by the
+    /// adaptive logic below, which tightens on movement and backs off when
+    /// nothing is happening. A control whose value is discarded at both ends
+    /// is a lie about who is in charge.
+    ///
+    /// 300s: comfortably above the measured 180s floor rather than sitting on
+    /// it, and the same cadence the Claude Code status-line tools use against
+    /// this identical endpoint, so the number means the same thing here as it
+    /// does elsewhere in the ecosystem.
+    ///
+    /// Users who want a fresher reading press Refresh, which is bounded
+    /// separately by `commands::MANUAL_REFRESH_COOLDOWN`.
+    pub const DEFAULT_INTERVAL_S: f64 = 300.0;
+
     /// Urgent mode: the active account, within [`ESCALATION_MARGIN_PCT`] of
     /// the switch threshold, with movement observed this tick (i.e.
     /// actually burning toward the limit). Bounded by construction: either
@@ -312,7 +332,7 @@ impl Default for PollerConfig {
     fn default() -> Self {
         Self {
             threshold: 90.0,
-            interval_seconds: 60.0,
+            interval_seconds: poll_policy::DEFAULT_INTERVAL_S,
             cooldown_seconds: 300.0,
             hysteresis_pct: 10.0,
             strategy: Strategy::MostHeadroom,

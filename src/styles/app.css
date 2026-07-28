@@ -198,7 +198,11 @@ h3 {
 .pane-head h3 {
   font-size: 15px;
 }
+/* Pushed right so the heading stays left and the count sits beside whatever
+   action the pane puts at the end, rather than stranded in the middle once
+   `justify-content: space-between` has three children to distribute. */
 .pane-head .sub {
+  margin-left: auto;
   font-size: 12px;
   color: var(--faint);
 }
@@ -350,6 +354,40 @@ table.accts tr.is-active td {
 .btn.ghost {
   border-color: transparent;
   color: var(--muted);
+}
+.btn:disabled {
+  color: var(--faint);
+  cursor: default;
+}
+/* Without this the hover fill still fires on a disabled control, which reads
+   as "clickable" to anyone using a mouse. */
+.btn:disabled:hover {
+  background: transparent;
+}
+
+/* ─────────── manual refresh ─────────── */
+
+.refresh {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+.refresh-msg {
+  font-size: 11px;
+  color: var(--faint);
+}
+.refresh-msg.err {
+  color: var(--danger);
+}
+/* The popover is 340px wide, so a message beside the button would either
+   truncate or push the button off. Give it its own line instead — dropping it
+   entirely would hide refresh failures. */
+.refresh.compact {
+  flex-wrap: wrap;
+  gap: 4px 8px;
+}
+.refresh.compact .refresh-msg {
+  flex-basis: 100%;
 }
 
 .stat-row {

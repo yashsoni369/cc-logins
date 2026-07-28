@@ -18,6 +18,7 @@ import { hasBackend, IpcError, previewTarget, switchAccount } from "@/lib/api";
 import { useSnapshot } from "@/lib/useSnapshot";
 import { useTheme } from "@/lib/useTheme";
 import UsageMeter from "@/components/UsageMeter";
+import { RefreshButton } from "@/components/RefreshButton";
 
 /** Matches the Settings screen's default auto-switch threshold and grace period. */
 const GRACE_PERIOD_SECONDS = 60;
@@ -414,7 +415,14 @@ export default function PopoverPanel() {
             <span>Auto-switch</span>
             <span className="pill on">on</span>
             <span className="sp"></span>
-            <span className="kbd">Ctrl+Shift+A</span>
+            {/*
+              This slot used to advertise a "Ctrl+Shift+A" shortcut. Nothing
+              registered it — `tauri-plugin-global-shortcut` is not even a
+              dependency — so it was a keystroke hint for a keystroke that did
+              nothing, carried over from the wireframe. Replaced with a control
+              that does what it says.
+            */}
+            <RefreshButton compact />
           </>
         )}
       </div>

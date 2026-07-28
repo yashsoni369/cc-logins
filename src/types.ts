@@ -251,8 +251,6 @@ export interface Settings {
   autoSwitchEnabled: boolean;
   /** 50..99, clamped by the backend on save. */
   threshold: number;
-  /** 15..3600 seconds, clamped by the backend on save. */
-  intervalSeconds: number;
   /** 0..86400 seconds, clamped by the backend on save. */
   cooldownSeconds: number;
   /** 0..50, clamped by the backend on save. */

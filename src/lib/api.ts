@@ -155,6 +155,39 @@ export async function getSnapshot(): Promise<Sourced<Snapshot>> {
   return { data: await call<Snapshot>("snapshot"), live: true };
 }
 
+/** Outcome of a user-pressed Refresh. Mirrors `commands::RefreshResult`. */
+export interface RefreshResult {
+  snapshot: Snapshot;
+  /**
+   * False when the backend's cooldown was still running and `snapshot` is the
+   * value it already held. Reported separately from the numbers themselves
+   * because a real fetch returning unchanged usage is a different event from
+   * a fetch that never happened, and the UI must not imply the first when it
+   * got the second.
+   */
+  refreshed: boolean;
+  /** Seconds until pressing Refresh will actually fetch again. */
+  retryAfterSeconds: number;
+}
+
+/**
+ * Fetch usage now, at the user's request.
+ *
+ * The poll cadence is fixed in the backend, so this is the way to get a
+ * current reading on demand. The backend throttles it (see
+ * `commands::MANUAL_REFRESH_COOLDOWN`) because it spends from the same
+ * per-token request budget the snapshot cache exists to protect; when the
+ * cooldown is active it returns the held snapshot with `refreshed: false`
+ * rather than failing.
+ *
+ * Throws with no backend instead of returning mock data: this is an action the
+ * user explicitly took, and silently reporting a refresh that never happened
+ * would be the same lie `saveSettings` refuses to tell.
+ */
+export async function refreshSnapshot(): Promise<RefreshResult> {
+  return call<RefreshResult>("refresh_snapshot");
+}
+
 /**
  * Detected credential realms.
  *
@@ -396,7 +429,6 @@ export async function historyAvailable(): Promise<Sourced<boolean>> {
 export const DEFAULT_SETTINGS: Settings = {
   autoSwitchEnabled: false,
   threshold: 90,
-  intervalSeconds: 300,
   cooldownSeconds: 300,
   hysteresisPct: 10,
   unhealthyTicks: 3,

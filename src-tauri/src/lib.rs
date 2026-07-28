@@ -172,7 +172,8 @@ fn init_logging() {
 fn poller_config_from_settings(s: &settings::Settings) -> poller::PollerConfig {
     poller::PollerConfig {
         threshold: s.threshold as f64,
-        interval_seconds: s.interval_seconds as f64,
+        // Fixed, not user-configurable — see `poll_policy::DEFAULT_INTERVAL_S`.
+        interval_seconds: poller::poll_policy::DEFAULT_INTERVAL_S,
         cooldown_seconds: s.cooldown_seconds as f64,
         hysteresis_pct: s.hysteresis_pct as f64,
         strategy: match s.strategy {
@@ -222,6 +223,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             commands::accounts,
             commands::snapshot,
+            commands::refresh_snapshot,
             commands::environments,
             commands::preview_target,
             commands::switch_account,
