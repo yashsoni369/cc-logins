@@ -11,8 +11,36 @@ permissions:
   contents: write
 
 jobs:
+  # A tag says nothing about what the files claim. Tauri stamps the version
+  # from tauri.conf.json into every installer, so pushing v0.2.0 while the
+  # files still say 0.1.0 produces a v0.2.0 release full of 0.1.0 artifacts.
+  verify-version:
+    name: Version matches tag
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Compare tag against all three version fields
+        run: |
+          TAG="${GITHUB_REF_NAME#v}"
+          PKG=$(node -p "require('./package.json').version")
+          CONF=$(node -p "require('./src-tauri/tauri.conf.json').version")
+          CARGO=$(grep -m1 '^version = ' src-tauri/Cargo.toml | cut -d'"' -f2)
+
+          echo "tag=$TAG package.json=$PKG tauri.conf.json=$CONF Cargo.toml=$CARGO"
+
+          fail=0
+          for pair in "package.json:$PKG" "tauri.conf.json:$CONF" "Cargo.toml:$CARGO"; do
+            name="${pair%%:*}"; value="${pair#*:}"
+            if [ "$value" != "$TAG" ]; then
+              echo "::error::$name is $value but the tag is $TAG"
+              fail=1
+            fi
+          done
+          exit $fail
+
   release:
     name: Build (${{ matrix.platform }})
+    needs: verify-version
     strategy:
       fail-fast: false
       matrix:
@@ -111,3 +139,9 @@ jobs:
             running them — see the README's "Signing" section for what that means and why.
           releaseDraft: true
           prerelease: false
+
+          # Tauri's default asset names embed the version, which breaks
+          # `releases/latest/download/<file>` permalinks on every release.
+          # Dropping [version] makes those links stable; [arch] still separates
+          # the two macOS builds.
+          releaseAssetNamePattern: CC-Logins-[platform]-[arch][setup][ext]

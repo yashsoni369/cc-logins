@@ -36,6 +36,20 @@ jobs:
 
       - run: pnpm install --frozen-lockfile
 
+      # Three files carry the version and nothing keeps them in step. Tauri
+      # stamps tauri.conf.json's into the installers, so drift ships wrong
+      # numbers to users rather than failing anything loudly.
+      - name: Versions agree across package.json, tauri.conf.json and Cargo.toml
+        run: |
+          PKG=$(node -p "require('./package.json').version")
+          CONF=$(node -p "require('./src-tauri/tauri.conf.json').version")
+          CARGO=$(grep -m1 '^version = ' src-tauri/Cargo.toml | cut -d'"' -f2)
+          echo "package.json=$PKG tauri.conf.json=$CONF Cargo.toml=$CARGO"
+          if [ "$PKG" != "$CONF" ] || [ "$PKG" != "$CARGO" ]; then
+            echo "::error::version mismatch: package.json=$PKG tauri.conf.json=$CONF Cargo.toml=$CARGO"
+            exit 1
+          fi
+
       - name: Typecheck
         run: pnpm exec tsc --noEmit
 
