@@ -236,6 +236,7 @@ pub fn run() {
             commands::history_available,
             commands::get_settings,
             commands::set_settings,
+            commands::data_locations,
         ])
         .setup(|app| {
             let handle = app.handle().clone();

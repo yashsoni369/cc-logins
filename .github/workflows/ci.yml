@@ -9,7 +9,10 @@ on:
 # Cancel superseded runs on the same ref so pushing twice in a row doesn't
 # burn double the CI minutes.
 concurrency:
-  group: ci-${{ github.workflow }}-${{ github.ref }}
+  # event_name is part of the key so a push to main does not cancel a
+  # workflow_dispatch run on the same ref — which is how the only two
+  # full three-OS runs so far both died before finishing.
+  group: ci-${{ github.workflow }}-${{ github.ref }}-${{ github.event_name }}
   cancel-in-progress: true
 
 env:

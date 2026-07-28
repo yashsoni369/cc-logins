@@ -18,7 +18,15 @@
  * exists would be a lie about something that touches credentials.
  */
 
-import type { Account, DayStat, Environment, HistorySummary, Settings, Snapshot } from "@/types";
+import type {
+  Account,
+  DataLocations,
+  DayStat,
+  Environment,
+  HistorySummary,
+  Settings,
+  Snapshot,
+} from "@/types";
 import { stableKey } from "@/types";
 import { mockHistoryRanges, mockSnapshot, type HistoryRangeId } from "@/lib/mock";
 
@@ -463,4 +471,55 @@ export async function setSettings(settings: Settings): Promise<Settings> {
     throw new IpcError("internal", "Not running in the desktop app, so settings cannot be saved.");
   }
   return call<Settings>("set_settings", { settings });
+}
+
+// ─── about ───────────────────────────────────────────────────────────────
+
+/** Resolved once per session: the version cannot change while the app runs. */
+let versionPromise: Promise<string | null> | null = null;
+
+/**
+ * The version the bundler stamped into this build, from Tauri's own
+ * `getVersion()` — never a compiled-in number that can drift from what
+ * shipped. `null` with no backend or on failure; callers must render a
+ * placeholder rather than invent one.
+ */
+export function appVersion(): Promise<string | null> {
+  versionPromise ??= (async () => {
+    if (!hasBackend()) return null;
+    try {
+      // Lazy, like `call` above, so a plain-browser session never loads it.
+      const { getVersion } = await import("@tauri-apps/api/app");
+      return await getVersion();
+    } catch {
+      return null;
+    }
+  })();
+  return versionPromise;
+}
+
+/**
+ * Absolute paths to this app's vault, settings/history dir and log file. A
+ * reader, so it degrades to `null` with no backend rather than throwing.
+ */
+export async function dataLocations(): Promise<Sourced<DataLocations | null>> {
+  if (!hasBackend()) return { data: null, live: false };
+  return { data: await call<DataLocations>("data_locations"), live: true };
+}
+
+/**
+ * Open a URL in the user's real browser. Never a plain `<a href>`: in the
+ * desktop app that navigates the webview itself and replaces the UI.
+ */
+export async function openExternal(url: string): Promise<void> {
+  if (!hasBackend()) {
+    window.open(url, "_blank", "noopener,noreferrer");
+    return;
+  }
+  try {
+    const { openUrl } = await import("@tauri-apps/plugin-opener");
+    await openUrl(url);
+  } catch (raw) {
+    throw toIpcError(raw);
+  }
 }

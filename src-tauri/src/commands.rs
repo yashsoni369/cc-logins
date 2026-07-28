@@ -616,6 +616,37 @@ pub fn history_available(state: tauri::State<'_, AppState>) -> bool {
     state.history.is_some()
 }
 
+// ─── about ───────────────────────────────────────────────────────────────────
+
+/// Absolute paths to the files this app owns, for the About section. Resolved
+/// here because only this side knows where they actually landed.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DataLocations {
+    /// This app's own account vault — never the `cswap` CLI's directory.
+    pub account_vault: String,
+    /// Settings file and history database.
+    pub data_dir: String,
+    pub log_file: String,
+}
+
+/// Where this app keeps its files. Pure path resolution with no I/O, so it
+/// cannot fail and returns directly rather than an [`IpcResult`].
+#[tauri::command]
+pub fn data_locations(state: tauri::State<'_, AppState>) -> DataLocations {
+    data_locations_in(&state.data_dir)
+}
+
+/// Body of [`data_locations`], taking the dir directly so it is testable
+/// without a live `tauri::State`.
+fn data_locations_in(data_dir: &std::path::Path) -> DataLocations {
+    DataLocations {
+        account_vault: crate::paths::backup_root().display().to_string(),
+        data_dir: data_dir.display().to_string(),
+        log_file: crate::log_path().display().to_string(),
+    }
+}
+
 // ─── settings ────────────────────────────────────────────────────────────────
 
 #[tauri::command]
@@ -861,6 +892,32 @@ mod tests {
             let mapped: IpcError = e.into();
             assert!(matches!(mapped, IpcError::Credential(_)), "got {mapped:?}");
         }
+    }
+
+    // -- data locations (About section) --------------------------------------
+
+    #[test]
+    fn data_locations_reports_the_vault_and_data_dir_it_resolves() {
+        // Takes the env lock and a vault override because `backup_root()`
+        // refuses to resolve outside a temp dir under `cfg(test)`.
+        let _lock = crate::test_support::env_lock();
+        let vault = tempfile::tempdir().expect("temp dir");
+        let _store = crate::test_support::StoreRootGuard::set(vault.path().to_path_buf());
+        let data = tempfile::tempdir().expect("temp dir");
+
+        let locations = data_locations_in(data.path());
+        assert_eq!(locations.account_vault, vault.path().display().to_string());
+        assert_eq!(locations.data_dir, data.path().display().to_string());
+        assert!(
+            locations.log_file.ends_with("app.log"),
+            "got {}",
+            locations.log_file
+        );
+
+        // The UI reads these by camelCase name.
+        let json = serde_json::to_string(&locations).unwrap();
+        assert!(json.contains("accountVault"), "got {json}");
+        assert!(json.contains("logFile"), "got {json}");
     }
 
     #[test]

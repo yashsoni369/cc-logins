@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
+import AboutSection from "./AboutSection";
 import { getSettings, IpcError, setSettings } from "../lib/api";
 import type { Theme } from "../lib/useTheme";
 import type { Settings } from "../types";
@@ -387,6 +388,8 @@ export default function SettingsScreen({ theme, onThemeChange, themeError }: Set
           </div>
         </div>
       </div>
+
+      <AboutSection />
     </div>
   );
 }

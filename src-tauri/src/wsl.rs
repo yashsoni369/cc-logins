@@ -728,6 +728,12 @@ mod tests {
     #[cfg(not(target_os = "windows"))]
     #[test]
     fn non_windows_public_api_is_a_native_only_no_op() {
+        // detect_environments() resolves the native config home, so HOME has
+        // to be isolated or `guard_real_store` refuses the run.
+        let _lock = env_lock();
+        let home = TempDir::new().unwrap();
+        let _home_guard = set_home(home.path());
+
         assert!(!is_wsl_available());
         assert_eq!(list_distros().unwrap(), Vec::new());
         let environments = detect_environments();

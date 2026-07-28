@@ -1020,11 +1020,22 @@ mod tests {
         let _lock = env_lock();
         let home = TempDir::new().unwrap();
         let _home_guard = set_home(home.path());
+        // Unset so the Linux branch is deterministic; CI runners set this.
+        let _xdg_guard = EnvGuard::unset("XDG_DATA_HOME");
         let vault = TempDir::new().unwrap();
         let _store_guard = crate::test_support::StoreRootGuard::set(vault.path().to_path_buf());
 
+        // The point of the test: the vault is never the CLI's directory.
         assert_ne!(backup_root(), cswap_store_root());
-        assert_eq!(cswap_store_root(), home.path().join(".claude-swap-backup"));
+
+        // cswap's own layout differs per platform — XDG on Linux, a dotdir
+        // elsewhere — so the expectation has to as well.
+        #[cfg(any(windows, target_os = "macos"))]
+        let expected = home.path().join(".claude-swap-backup");
+        #[cfg(not(any(windows, target_os = "macos")))]
+        let expected = home.path().join(".local").join("share").join("claude-swap");
+
+        assert_eq!(cswap_store_root(), expected);
     }
 
     // -- cswap_store_root_for (platform-parameterized XDG logic) ------------

@@ -273,6 +273,21 @@ export interface Settings {
   theme: "system" | "day" | "night";
 }
 
+// ── about ─────────────────────────────────────────────────────────────────
+
+/**
+ * Absolute paths to the files this app owns, mirroring
+ * `src-tauri/src/commands.rs::DataLocations`. Always resolved by the backend
+ * — never rebuilt here from platform guesses.
+ */
+export interface DataLocations {
+  /** This app's own account vault. */
+  accountVault: string;
+  /** Settings file and history database. */
+  dataDir: string;
+  logFile: string;
+}
+
 // ── history ───────────────────────────────────────────────────────────────
 
 /**

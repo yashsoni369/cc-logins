@@ -1180,3 +1180,42 @@ tr.acct-details-row td {
   color: var(--faint);
   margin-left: auto;
 }
+
+/* ─────────── about section (inside Settings) ─────────── */
+
+/* Chrome, not quota state: --interact is the interactive colour, same as
+   .navlink and the buttons. */
+.about-link {
+  color: var(--interact);
+  text-decoration: underline;
+  text-underline-offset: 2px;
+  cursor: pointer;
+  width: fit-content;
+}
+.about-link:hover {
+  color: var(--ink);
+}
+
+.about-note {
+  font-size: 12px;
+  color: var(--muted);
+  max-width: 52ch;
+  line-height: 1.5;
+}
+
+.about-path {
+  display: grid;
+  grid-template-columns: 128px minmax(0, 1fr);
+  gap: 10px;
+  align-items: baseline;
+}
+.about-path-k {
+  font-size: 11.5px;
+  color: var(--faint);
+}
+/* Absolute paths are long and must stay readable rather than widen the pane. */
+.about-path-v {
+  font-size: 11.5px;
+  color: var(--muted);
+  overflow-wrap: anywhere;
+}
