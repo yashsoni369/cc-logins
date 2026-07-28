@@ -79,6 +79,7 @@ pub enum FaultPoint {
     BeforeRollbackCredential,
     BeforeRollbackVerification,
     BeforeRecoveryCleanup,
+    AfterRecoveryJournalRemoval,
 }
 
 pub trait FaultInjector: Send + Sync {
@@ -445,8 +446,12 @@ pub(crate) fn execute_locked<H: StoreHost>(
         faults.hit(FaultPoint::BeforeCleanup)?;
         remove_stage(&config_stage_path);
         remove_stage(&sequence_stage_path);
-        recovery.remove_transaction(&transaction_id)?;
         journal_store.remove(&transaction_id)?;
+        if let Err(error) = recovery.remove_transaction(&transaction_id) {
+            log::warn!(
+                "switch {transaction_id} committed, but orphaned protected recovery artifacts could not be removed: {error}"
+            );
+        }
         Ok(())
     })();
 
@@ -507,8 +512,12 @@ pub(crate) fn execute_locked<H: StoreHost>(
 
     let operation_error = operation.unwrap_err();
     if rollback_errors.is_empty() {
-        let _ = recovery.remove_transaction(&transaction_id);
-        let _ = journal_store.remove(&transaction_id);
+        // The journal is the recovery authority. Remove and sync it before
+        // deleting dispensable before-images: a crash in the opposite order
+        // leaves a live journal whose references can no longer be restored.
+        if journal_store.remove(&transaction_id).is_ok() {
+            let _ = recovery.remove_transaction(&transaction_id);
+        }
         Err(operation_error)
     } else {
         let error = TransactionError::RollbackIncomplete {
@@ -747,8 +756,13 @@ fn recover_pending_switch_inner(
 
     faults.hit(FaultPoint::BeforeRecoveryCleanup)?;
     remove_journal_stages(&journal);
-    recovery.remove_transaction(&transaction_id)?;
     journal_store.remove(&transaction_id)?;
+    faults.hit(FaultPoint::AfterRecoveryJournalRemoval)?;
+    if let Err(error) = recovery.remove_transaction(&transaction_id) {
+        log::warn!(
+            "switch {transaction_id} was recovered, but orphaned protected recovery artifacts could not be removed: {error}"
+        );
+    }
     set_recovery_requirement(None);
     Ok(result)
 }
@@ -891,6 +905,7 @@ mod tests {
             "AfterSequenceInstall" => FaultPoint::AfterSequenceInstall,
             "AfterCommitSync" => FaultPoint::AfterCommitSync,
             "BeforeRollbackConfig" => FaultPoint::BeforeRollbackConfig,
+            "AfterRecoveryJournalRemoval" => FaultPoint::AfterRecoveryJournalRemoval,
             other => panic!("unknown crash fault point {other}"),
         }
     }
@@ -1352,6 +1367,61 @@ mod tests {
         );
         assert_eq!(fs::read(plan.sequence_path).unwrap(), sequence);
         assert!(!JournalStore::new(env.vault.path()).path().exists());
+    }
+
+    #[test]
+    fn process_death_after_recovery_journal_removal_never_blocks_restart() {
+        let env = setup();
+        let executable = std::env::current_exe().unwrap();
+        let child_args = [
+            "--exact",
+            "switch_transaction::tests::process_death_child",
+            "--nocapture",
+        ];
+        let first = std::process::Command::new(&executable)
+            .args(child_args)
+            .env("CC_LOGINS_CRASH_TEST_VAULT", env.vault.path())
+            .env("CC_LOGINS_CRASH_TEST_POINT", "AfterActiveCredentialInstall")
+            .env("HOME", env._home_dir.path())
+            .env("USERPROFILE", env._home_dir.path())
+            .env("CLAUDE_CONFIG_DIR", env._config_dir.path())
+            .env_remove("XDG_DATA_HOME")
+            .env_remove("WSL_DISTRO_NAME")
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .unwrap();
+        assert!(!first.success());
+        age_crashed_claude_locks();
+
+        let second = std::process::Command::new(&executable)
+            .args(child_args)
+            .env("CC_LOGINS_CRASH_TEST_VAULT", env.vault.path())
+            .env(
+                "CC_LOGINS_CRASH_TEST_RECOVERY_POINT",
+                "AfterRecoveryJournalRemoval",
+            )
+            .env("HOME", env._home_dir.path())
+            .env("USERPROFILE", env._home_dir.path())
+            .env("CLAUDE_CONFIG_DIR", env._config_dir.path())
+            .env_remove("CC_LOGINS_CRASH_TEST_POINT")
+            .env_remove("XDG_DATA_HOME")
+            .env_remove("WSL_DISTRO_NAME")
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .unwrap();
+        assert!(!second.success());
+
+        assert!(
+            !JournalStore::new(env.vault.path()).path().exists(),
+            "the durable journal must disappear before dispensable recovery blobs"
+        );
+        assert_eq!(
+            recover_pending_switch_with(Duration::from_millis(50)).unwrap(),
+            RecoveryDisposition::NothingToRecover
+        );
+        assert!(recovery_requirement().is_none());
     }
 
     #[test]
