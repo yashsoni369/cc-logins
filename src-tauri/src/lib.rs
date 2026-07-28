@@ -11,6 +11,7 @@
 pub mod commands;
 pub mod credentials;
 pub mod history;
+pub mod linux;
 pub mod locking;
 pub mod login;
 pub mod migrate;
@@ -51,6 +52,9 @@ fn reveal(app: &tauri::AppHandle) {
         let _ = w.show();
         let _ = w.unminimize();
         let _ = w.set_focus();
+        // No-op off Linux. See `linux::nudge_window` for the focus bug this
+        // works around and why a plain `set_focus` is not enough there.
+        linux::nudge_window(w);
     }
 }
 
@@ -63,7 +67,9 @@ fn reveal(app: &tauri::AppHandle) {
 /// on the click event and there is no reliable cross-platform way to obtain it
 /// from JavaScript.
 fn toggle_popover(app: &tauri::AppHandle, anchor: tauri::Rect) {
-    let Some(w) = app.get_webview_window("popover") else { return };
+    let Some(w) = app.get_webview_window("popover") else {
+        return;
+    };
 
     // Second click closes it, like a real menu.
     if w.is_visible().unwrap_or(false) {
@@ -76,6 +82,7 @@ fn toggle_popover(app: &tauri::AppHandle, anchor: tauri::Rect) {
     }
     let _ = w.show();
     let _ = w.set_focus();
+    linux::nudge_window(w);
 }
 
 /// Work out where to put the popover given the tray icon's rectangle.
@@ -142,13 +149,15 @@ fn init_logging() {
     );
     builder.format_timestamp_millis();
 
-    match std::fs::OpenOptions::new().create(true).append(true).open(&path) {
-        Ok(file) => {
-            builder.target(env_logger::Target::Pipe(Box::new(file)));
-        }
-        // Falling back to stderr is better than no logging at all, and must
-        // never stop the app starting.
-        Err(_) => {}
+    // On failure, fall through and let env_logger keep its default stderr
+    // target: losing the log is better than not starting, and must never stop
+    // the app booting.
+    if let Ok(file) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+    {
+        builder.target(env_logger::Target::Pipe(Box::new(file)));
     }
 
     let _ = builder.try_init();
@@ -272,7 +281,10 @@ pub fn run() {
             // mid-flight.
             let swept = login::sweep_stale_login_dirs(std::time::Duration::from_secs(3600));
             if swept > 0 {
-                log::info!("swept {swept} stale login director{}", if swept == 1 { "y" } else { "ies" });
+                log::info!(
+                    "swept {swept} stale login director{}",
+                    if swept == 1 { "y" } else { "ies" }
+                );
             }
 
             app.manage(commands::AppState::new(data_dir));
