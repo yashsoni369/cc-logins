@@ -17,7 +17,7 @@ use tauri::Emitter;
 
 use crate::login::{self, LoginError};
 use crate::model::{Account, Environment, Snapshot};
-use crate::switcher::{self, Strategy, SwitchError};
+use crate::switcher::{self, SwitchError};
 
 /// Errors cross the IPC boundary as a tagged object rather than a bare string,
 /// so the UI can distinguish "nothing is set up yet" (show onboarding) from
@@ -486,21 +486,6 @@ pub async fn set_account_enabled(
 // CLI rather than a standalone tool, which is not what it is. The function
 // stays (it is tested, and useful for seeding a vault during development) but
 // nothing user-facing reaches it.
-
-/// The account the auto-switcher would move to right now, without moving.
-///
-/// Read-only on purpose: it powers the "next" hint in the popover, and lets the
-/// switch path be inspected before it is ever trusted to run on its own.
-#[tauri::command]
-pub fn preview_target(strategy: Option<String>) -> IpcResult<Option<Account>> {
-    let strategy = match strategy.as_deref() {
-        Some("next-available") => Strategy::NextAvailable,
-        Some("consume-first") => Strategy::ConsumeFirst,
-        _ => Strategy::MostHeadroom,
-    };
-    let accounts = switcher::read_accounts()?;
-    Ok(switcher::pick_target(&accounts, strategy).cloned())
-}
 
 // ─── application state ───────────────────────────────────────────────────────
 

@@ -91,9 +91,11 @@ strongest check available today.
   starts relocating auth tokens before being asked isn't trustworthy, so the default is to do
   nothing.
 - **A 60-second grace period before an armed automatic switch fires.** When auto-switch is on and
-  a threshold is crossed, you get a visible countdown — and a chance to cancel — before anything
-  actually happens. Silently swapping credentials out from under a task in progress is worse than
-  the rate limit it's trying to avoid.
+  a threshold is crossed, the backend publishes the chosen target and exact deadline. The popover
+  renders that authoritative countdown rather than trying to recreate the decision from quota
+  percentages. **Hold 1h** is persisted, so it remains paused across popover closes and app
+  restarts. Silently swapping credentials out from under a task in progress is worse than the rate
+  limit it's trying to avoid.
 - **A stopped WSL distro is never woken by a background poll.** Touching a WSL distro's files over
   the `\\wsl$` path silently boots its VM, even for something as innocuous as checking whether a
   file exists. This app only ever calls `wsl.exe`'s list commands from its polling loop, which are

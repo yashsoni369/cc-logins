@@ -273,7 +273,6 @@ pub fn run() {
             commands::snapshot,
             commands::refresh_snapshot,
             commands::environments,
-            commands::preview_target,
             commands::switch_account,
             commands::add_current_account,
             commands::interactive_login,

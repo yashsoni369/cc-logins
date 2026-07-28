@@ -225,14 +225,6 @@ export async function getEnvironments(): Promise<Sourced<Environment[]>> {
   return { data: await call<Environment[]>("environments"), live: true };
 }
 
-/** Where the auto-switcher would move right now, without moving. Read-only. */
-export async function previewTarget(
-  strategy?: "most-headroom" | "next-available" | "consume-first",
-): Promise<Account | null> {
-  if (!hasBackend()) return null;
-  return call<Account | null>("preview_target", { strategy });
-}
-
 // ─── events ──────────────────────────────────────────────────────────────
 // The Rust poller (`src-tauri/src/poller.rs`) is the single owner of usage
 // fetching: it runs one adaptive-cadence loop against the per-token-budgeted

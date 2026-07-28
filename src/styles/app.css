@@ -812,6 +812,12 @@ hr.rule {
 }
 
 /* ─────────── tray popover ─────────── */
+
+/* Daemon phase banners are rendered from backend status. Keep multi-line
+   recovery diagnostics readable instead of forcing the generic one-line row. */
+.pop .banner > div {
+  line-height: 1.35;
+}
 /*
  * The popover window (see src/popover.tsx, src/components/PopoverPanel.tsx)
  * is its own Vite/Tauri entry, but loads this same stylesheet so its markup
