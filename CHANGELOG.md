@@ -43,6 +43,10 @@ when it happens.
   endpoint is not assigned to the configured slot when the profile oracle proves it
   belongs to another account; definitive lineage verdicts are memoized, while partial
   or unavailable oracle results remain retryable.
+- Active OAuth recovery matching current cswap: expired or server-rejected active
+  generations refresh under Claude-compatible credential locks, recheck account and
+  lineage ownership before consuming a grant, and persist the successor to both the live
+  credential and its slot backup. Exact `invalid_grant` results remain generation-bound.
 
 ### Security
 

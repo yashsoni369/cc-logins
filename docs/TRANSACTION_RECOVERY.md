@@ -17,8 +17,10 @@ The lock order is fixed:
 
 The Claude directory-lock paths and timing match Claude Code 2.1.218 as represented by pinned cswap
 commit `65d208081a4985b9fd1786bc258d5172d196bee2`: credential locks become stale after 60 seconds and
-the config lock after 10 seconds. CC Logins refreshes lock mtimes every three seconds and never holds
-these locks across OAuth or other network work.
+the config lock after 10 seconds. CC Logins refreshes lock mtimes every three seconds. Switching and
+identity/usage lookups never hold the full lock set across network work. Active-token refresh is the
+same bounded exception as current cswap: its six-second grant POST holds only the optional cswap,
+Claude credential, and GUI vault locks; it never holds or later nests the config lock.
 
 ## Credential provenance
 

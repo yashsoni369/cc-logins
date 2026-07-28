@@ -102,7 +102,9 @@ Plain advisory OS locks — `msvcrt.locking` on Windows, `fcntl.flock` on POSIX,
 0.1 s poll, 10 s default timeout. Rust speaks both natively (`LockFileEx` / `flock`). **This is why
 interop works.** Implement the identical protocol and coexistence is free.
 
-Rule inherited from upstream: *never hold a credential/config lock across a network call.*
+Current upstream keeps profile and usage calls outside locks. Its one deliberate exception is an
+active-token refresh grant: the bounded POST runs under the account and Claude credential locks so
+Claude Code cannot consume the same refresh generation concurrently. The config lock is not held.
 
 ### 3.3 base64 `.enc` is not encryption
 
@@ -264,7 +266,8 @@ Locks are split to match the resources and acquired in one structural order: the
 `<cswap-store>/.lock` OS file lock, Claude Code's primary `.oauth_refresh.lock`, its legacy
 credential lock, its global-config lock, then this GUI's private vault lock. The primary/legacy pair
 and staleness values track Claude Code 2.1.218 through pinned cswap commit
-`65d208081a4985b9fd1786bc258d5172d196bee2`. No network call occurs while this set is held.
+`65d208081a4985b9fd1786bc258d5172d196bee2`. No network call occurs while this **full** set is held;
+active refresh uses a narrower set without the config lock and a six-second request deadline.
 
 Switching is a durable transaction, not merely three atomic writes. Protected before-images and a
 secret-free phased journal recover the active credential backend, global config, and sequence after
