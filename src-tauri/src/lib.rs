@@ -18,6 +18,7 @@ pub mod migrate;
 pub mod model;
 pub mod oauth;
 pub mod oauth_quarantine;
+pub mod oauth_refresh;
 pub mod paths;
 pub mod poller;
 pub mod resilience;
