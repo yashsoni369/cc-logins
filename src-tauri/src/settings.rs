@@ -10,9 +10,17 @@
 //! and friends) so a user reading both tools sees the same vocabulary and the
 //! same numbers mean the same things.
 
-use std::path::{Path, PathBuf};
+use std::{
+    path::{Path, PathBuf},
+    sync::{Mutex, MutexGuard},
+    time::Duration,
+};
 
+use chrono::{DateTime, Duration as ChronoDuration, Utc};
 use serde::{Deserialize, Serialize};
+use tokio::sync::watch;
+
+use crate::runtime::RuntimePolicy;
 
 /// How the next account is chosen when auto-switching.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize)]
@@ -83,6 +91,11 @@ pub struct Settings {
     /// trustworthy. The user opts in.
     pub auto_switch_enabled: bool,
 
+    /// A persisted global pause for automatic switching. Polling, history,
+    /// and manual switching continue while this deadline is in the future.
+    #[serde(default)]
+    pub auto_switch_paused_until: Option<chrono::DateTime<chrono::Utc>>,
+
     /// Utilisation percentage that arms a switch. `cswap` default is 90.
     pub threshold: u8,
     /// Minimum gap between switches, to stop flip-flopping.
@@ -117,6 +130,7 @@ impl Default for Settings {
     fn default() -> Self {
         Self {
             auto_switch_enabled: false,
+            auto_switch_paused_until: None,
             threshold: 90,
             cooldown_seconds: 300,
             hysteresis_pct: 10,
@@ -146,6 +160,229 @@ impl Settings {
         self.grace_seconds = self.grace_seconds.min(3600);
         self.history_retention_days = self.history_retention_days.clamp(1, 3650);
         self
+    }
+}
+
+/// A complete, revisioned view of the persisted settings.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SettingsSnapshot {
+    pub revision: u64,
+    pub settings: Settings,
+}
+
+/// A partial settings update. `None` means the caller omitted a field.
+///
+/// The pause field is intentionally nested: an omitted value preserves the
+/// current deadline, while an explicit JSON `null` clears it.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct SettingsPatch {
+    pub auto_switch_enabled: Option<bool>,
+    #[serde(default, deserialize_with = "deserialize_present_nullable")]
+    pub auto_switch_paused_until: Option<Option<DateTime<Utc>>>,
+    pub threshold: Option<u8>,
+    pub cooldown_seconds: Option<u64>,
+    pub hysteresis_pct: Option<u8>,
+    pub unhealthy_ticks: Option<u8>,
+    pub strategy: Option<Strategy>,
+    pub grace_seconds: Option<u64>,
+    pub notify_on_switch: Option<bool>,
+    pub notify_on_exhausted: Option<bool>,
+    pub notify_on_expiry: Option<bool>,
+    pub start_at_login: Option<bool>,
+    pub theme: Option<Theme>,
+    pub history_retention_days: Option<i64>,
+}
+
+fn deserialize_present_nullable<'de, D, T>(deserializer: D) -> Result<Option<Option<T>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    Option::<T>::deserialize(deserializer).map(Some)
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum SettingsUpdateError {
+    #[error(
+        "settings revision conflict: expected revision {expected_revision}, current revision is {actual_revision}"
+    )]
+    Conflict {
+        expected_revision: u64,
+        actual_revision: u64,
+    },
+    #[error("failed to persist settings: {0}")]
+    Persist(#[from] SettingsError),
+    #[error("pause duration is outside the supported date range")]
+    InvalidDuration,
+}
+
+struct SettingsState {
+    revision: u64,
+    settings: Settings,
+}
+
+/// The single mutation path for settings, persisted state, and daemon policy.
+///
+/// Updates hold the state lock through persistence so concurrent callers
+/// cannot publish or save revisions out of order. The watch channel is only
+/// advanced after the atomic save succeeds.
+pub struct SettingsStore {
+    data_dir: PathBuf,
+    state: Mutex<SettingsState>,
+    policy_tx: watch::Sender<RuntimePolicy>,
+}
+
+impl SettingsStore {
+    pub fn new(data_dir: PathBuf, now: DateTime<Utc>) -> Self {
+        let settings = load(&data_dir);
+        let revision = 0;
+        let (policy_tx, _) = watch::channel(RuntimePolicy::from_settings(revision, &settings, now));
+        Self {
+            data_dir,
+            state: Mutex::new(SettingsState { revision, settings }),
+            policy_tx,
+        }
+    }
+
+    pub fn snapshot(&self) -> SettingsSnapshot {
+        let state = self.lock_state();
+        SettingsSnapshot {
+            revision: state.revision,
+            settings: state.settings.clone(),
+        }
+    }
+
+    pub fn subscribe_policy(&self) -> watch::Receiver<RuntimePolicy> {
+        self.policy_tx.subscribe()
+    }
+
+    pub fn update(
+        &self,
+        expected_revision: u64,
+        patch: SettingsPatch,
+        now: DateTime<Utc>,
+    ) -> Result<SettingsSnapshot, SettingsUpdateError> {
+        let mut state = self.lock_state();
+        if state.revision != expected_revision {
+            return Err(SettingsUpdateError::Conflict {
+                expected_revision,
+                actual_revision: state.revision,
+            });
+        }
+        self.commit_locked(&mut state, patch, now)
+    }
+
+    pub fn snooze(
+        &self,
+        duration: Duration,
+        now: DateTime<Utc>,
+    ) -> Result<SettingsSnapshot, SettingsUpdateError> {
+        let offset =
+            ChronoDuration::from_std(duration).map_err(|_| SettingsUpdateError::InvalidDuration)?;
+        let until = now
+            .checked_add_signed(offset)
+            .ok_or(SettingsUpdateError::InvalidDuration)?;
+        let mut state = self.lock_state();
+        self.commit_locked(
+            &mut state,
+            SettingsPatch {
+                auto_switch_paused_until: Some(Some(until)),
+                ..SettingsPatch::default()
+            },
+            now,
+        )
+    }
+
+    pub fn resume(&self, now: DateTime<Utc>) -> Result<SettingsSnapshot, SettingsUpdateError> {
+        let mut state = self.lock_state();
+        self.commit_locked(
+            &mut state,
+            SettingsPatch {
+                auto_switch_paused_until: Some(None),
+                ..SettingsPatch::default()
+            },
+            now,
+        )
+    }
+
+    fn lock_state(&self) -> MutexGuard<'_, SettingsState> {
+        self.state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    fn commit_locked(
+        &self,
+        state: &mut SettingsState,
+        patch: SettingsPatch,
+        now: DateTime<Utc>,
+    ) -> Result<SettingsSnapshot, SettingsUpdateError> {
+        let mut settings = state.settings.clone();
+        apply_patch(&mut settings, patch);
+        if settings
+            .auto_switch_paused_until
+            .is_some_and(|until| until <= now)
+        {
+            settings.auto_switch_paused_until = None;
+        }
+        settings = settings.sanitised();
+        let revision = state.revision.saturating_add(1);
+
+        save(&self.data_dir, &settings)?;
+
+        state.revision = revision;
+        state.settings = settings.clone();
+        self.policy_tx
+            .send_replace(RuntimePolicy::from_settings(revision, &settings, now));
+
+        Ok(SettingsSnapshot { revision, settings })
+    }
+}
+
+fn apply_patch(settings: &mut Settings, patch: SettingsPatch) {
+    if let Some(value) = patch.auto_switch_enabled {
+        settings.auto_switch_enabled = value;
+    }
+    if let Some(value) = patch.auto_switch_paused_until {
+        settings.auto_switch_paused_until = value;
+    }
+    if let Some(value) = patch.threshold {
+        settings.threshold = value;
+    }
+    if let Some(value) = patch.cooldown_seconds {
+        settings.cooldown_seconds = value;
+    }
+    if let Some(value) = patch.hysteresis_pct {
+        settings.hysteresis_pct = value;
+    }
+    if let Some(value) = patch.unhealthy_ticks {
+        settings.unhealthy_ticks = value;
+    }
+    if let Some(value) = patch.strategy {
+        settings.strategy = value;
+    }
+    if let Some(value) = patch.grace_seconds {
+        settings.grace_seconds = value;
+    }
+    if let Some(value) = patch.notify_on_switch {
+        settings.notify_on_switch = value;
+    }
+    if let Some(value) = patch.notify_on_exhausted {
+        settings.notify_on_exhausted = value;
+    }
+    if let Some(value) = patch.notify_on_expiry {
+        settings.notify_on_expiry = value;
+    }
+    if let Some(value) = patch.start_at_login {
+        settings.start_at_login = value;
+    }
+    if let Some(value) = patch.theme {
+        settings.theme = value;
+    }
+    if let Some(value) = patch.history_retention_days {
+        settings.history_retention_days = value;
     }
 }
 
@@ -198,7 +435,17 @@ pub fn save(dir: &Path, settings: &Settings) -> Result<(), SettingsError> {
 
 #[cfg(test)]
 mod tests {
+    use std::time::Duration;
+
+    use chrono::{DateTime, Duration as ChronoDuration, Utc};
+
     use super::*;
+
+    fn fixed_now() -> DateTime<Utc> {
+        DateTime::parse_from_rfc3339("2026-07-28T12:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc)
+    }
 
     #[test]
     fn auto_switch_is_off_by_default() {
@@ -209,6 +456,27 @@ mod tests {
     #[test]
     fn grace_period_defaults_to_a_real_pause() {
         assert_eq!(Settings::default().grace_seconds, 60);
+    }
+
+    #[test]
+    fn auto_switch_pause_is_absent_by_default() {
+        assert_eq!(Settings::default().auto_switch_paused_until, None);
+    }
+
+    #[test]
+    fn auto_switch_pause_round_trips_through_disk() {
+        let dir = tempfile::tempdir().unwrap();
+        let until = chrono::DateTime::parse_from_rfc3339("2026-07-28T13:00:00Z")
+            .unwrap()
+            .with_timezone(&chrono::Utc);
+        let settings = Settings {
+            auto_switch_paused_until: Some(until),
+            ..Settings::default()
+        };
+
+        save(dir.path(), &settings).unwrap();
+
+        assert_eq!(load(dir.path()).auto_switch_paused_until, Some(until));
     }
 
     #[test]
@@ -336,5 +604,229 @@ mod tests {
         )
         .unwrap();
         assert_eq!(load(dir.path()).threshold, 80);
+    }
+
+    #[test]
+    fn settings_store_patch_changes_only_named_fields() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = SettingsStore::new(dir.path().to_path_buf(), fixed_now());
+
+        let result = store
+            .update(
+                0,
+                SettingsPatch {
+                    threshold: Some(77),
+                    ..SettingsPatch::default()
+                },
+                fixed_now(),
+            )
+            .unwrap();
+
+        assert_eq!(result.revision, 1);
+        assert_eq!(result.settings.threshold, 77);
+        assert_eq!(result.settings.theme, Theme::System);
+        assert_eq!(result.settings.grace_seconds, 60);
+    }
+
+    #[test]
+    fn settings_store_sanitises_patches_before_persisting_and_publishing() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = SettingsStore::new(dir.path().to_path_buf(), fixed_now());
+
+        let result = store
+            .update(
+                0,
+                SettingsPatch {
+                    threshold: Some(255),
+                    unhealthy_ticks: Some(0),
+                    ..SettingsPatch::default()
+                },
+                fixed_now(),
+            )
+            .unwrap();
+
+        assert_eq!(result.settings.threshold, 99);
+        assert_eq!(result.settings.unhealthy_ticks, 1);
+        assert_eq!(load(dir.path()).threshold, 99);
+        assert_eq!(store.subscribe_policy().borrow().threshold, 99.0);
+    }
+
+    #[test]
+    fn settings_patch_json_distinguishes_omission_null_and_value() {
+        let omitted: SettingsPatch = serde_json::from_str("{}").unwrap();
+        let cleared: SettingsPatch =
+            serde_json::from_str(r#"{"autoSwitchPausedUntil":null}"#).unwrap();
+        let until = fixed_now() + ChronoDuration::hours(1);
+        let valued: SettingsPatch = serde_json::from_value(serde_json::json!({
+            "autoSwitchPausedUntil": until,
+        }))
+        .unwrap();
+
+        assert_eq!(omitted.auto_switch_paused_until, None);
+        assert_eq!(cleared.auto_switch_paused_until, Some(None));
+        assert_eq!(valued.auto_switch_paused_until, Some(Some(until)));
+        assert!(serde_json::from_str::<SettingsPatch>(r#"{"futureSetting":true}"#).is_err());
+    }
+
+    #[test]
+    fn settings_store_rejects_stale_revision_without_changing_state_or_disk() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = SettingsStore::new(dir.path().to_path_buf(), fixed_now());
+        store
+            .update(
+                0,
+                SettingsPatch {
+                    threshold: Some(78),
+                    ..SettingsPatch::default()
+                },
+                fixed_now(),
+            )
+            .unwrap();
+        let disk_before = std::fs::read(settings_path(dir.path())).unwrap();
+
+        let error = store
+            .update(
+                0,
+                SettingsPatch {
+                    grace_seconds: Some(5),
+                    ..SettingsPatch::default()
+                },
+                fixed_now(),
+            )
+            .unwrap_err();
+
+        assert!(matches!(
+            error,
+            SettingsUpdateError::Conflict {
+                expected_revision: 0,
+                actual_revision: 1
+            }
+        ));
+        assert_eq!(store.snapshot().revision, 1);
+        assert_eq!(store.snapshot().settings.threshold, 78);
+        assert_eq!(store.snapshot().settings.grace_seconds, 60);
+        assert_eq!(
+            std::fs::read(settings_path(dir.path())).unwrap(),
+            disk_before
+        );
+    }
+
+    #[test]
+    fn settings_store_publishes_the_latest_complete_policy() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = SettingsStore::new(dir.path().to_path_buf(), fixed_now());
+        let policy = store.subscribe_policy();
+
+        store
+            .update(
+                0,
+                SettingsPatch {
+                    threshold: Some(81),
+                    ..SettingsPatch::default()
+                },
+                fixed_now(),
+            )
+            .unwrap();
+        store
+            .update(
+                1,
+                SettingsPatch {
+                    grace_seconds: Some(15),
+                    ..SettingsPatch::default()
+                },
+                fixed_now(),
+            )
+            .unwrap();
+
+        let current = policy.borrow().clone();
+        assert_eq!(current.revision, 2);
+        assert_eq!(current.threshold, 81.0);
+        assert_eq!(current.grace.as_secs(), 15);
+    }
+
+    #[test]
+    fn settings_store_failed_save_does_not_advance_or_publish() {
+        let temp = tempfile::tempdir().unwrap();
+        let blocked = temp.path().join("settings-parent-is-a-file");
+        let store = SettingsStore::new(blocked.clone(), fixed_now());
+        let policy = store.subscribe_policy();
+        std::fs::write(&blocked, b"not a directory").unwrap();
+
+        let error = store
+            .update(
+                0,
+                SettingsPatch {
+                    threshold: Some(75),
+                    ..SettingsPatch::default()
+                },
+                fixed_now(),
+            )
+            .unwrap_err();
+
+        assert!(matches!(error, SettingsUpdateError::Persist(_)));
+        assert_eq!(store.snapshot().revision, 0);
+        assert_eq!(store.snapshot().settings.threshold, 90);
+        assert_eq!(policy.borrow().revision, 0);
+        assert_eq!(policy.borrow().threshold, 90.0);
+    }
+
+    #[test]
+    fn settings_store_omitted_pause_preserves_it_and_explicit_null_clears_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = SettingsStore::new(dir.path().to_path_buf(), fixed_now());
+        let until = fixed_now() + ChronoDuration::hours(1);
+        store
+            .update(
+                0,
+                SettingsPatch {
+                    auto_switch_paused_until: Some(Some(until)),
+                    ..SettingsPatch::default()
+                },
+                fixed_now(),
+            )
+            .unwrap();
+
+        let preserved = store
+            .update(
+                1,
+                SettingsPatch {
+                    threshold: Some(80),
+                    ..SettingsPatch::default()
+                },
+                fixed_now(),
+            )
+            .unwrap();
+        assert_eq!(preserved.settings.auto_switch_paused_until, Some(until));
+
+        let cleared = store
+            .update(
+                2,
+                SettingsPatch {
+                    auto_switch_paused_until: Some(None),
+                    ..SettingsPatch::default()
+                },
+                fixed_now(),
+            )
+            .unwrap();
+        assert_eq!(cleared.settings.auto_switch_paused_until, None);
+    }
+
+    #[test]
+    fn settings_store_snooze_and_resume_use_the_canonical_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = SettingsStore::new(dir.path().to_path_buf(), fixed_now());
+
+        let snoozed = store
+            .snooze(Duration::from_secs(3600), fixed_now())
+            .unwrap();
+        assert_eq!(
+            snoozed.settings.auto_switch_paused_until,
+            Some(fixed_now() + ChronoDuration::hours(1))
+        );
+        assert_eq!(snoozed.revision, 1);
+
+        let resumed = store.resume(fixed_now()).unwrap();
+        assert_eq!(resumed.settings.auto_switch_paused_until, None);
+        assert_eq!(resumed.revision, 2);
     }
 }

@@ -91,9 +91,11 @@ strongest check available today.
   starts relocating auth tokens before being asked isn't trustworthy, so the default is to do
   nothing.
 - **A 60-second grace period before an armed automatic switch fires.** When auto-switch is on and
-  a threshold is crossed, you get a visible countdown — and a chance to cancel — before anything
-  actually happens. Silently swapping credentials out from under a task in progress is worse than
-  the rate limit it's trying to avoid.
+  a threshold is crossed, the backend publishes the chosen target and exact deadline. The popover
+  renders that authoritative countdown rather than trying to recreate the decision from quota
+  percentages. **Hold 1h** is persisted, so it remains paused across popover closes and app
+  restarts. Silently swapping credentials out from under a task in progress is worse than the rate
+  limit it's trying to avoid.
 - **A stopped WSL distro is never woken by a background poll.** Touching a WSL distro's files over
   the `\\wsl$` path silently boots its VM, even for something as innocuous as checking whether a
   file exists. This app only ever calls `wsl.exe`'s list commands from its polling loop, which are
@@ -117,27 +119,14 @@ background poller.
 | Settings and usage history | the same `dev.apex36.cc-logins` directory |
 | Log file | `%APPDATA%\cc-logins\app.log` · `~/Library/Application Support/cc-logins/app.log` · `~/.local/share/cc-logins/app.log` |
 
-## Relationship to the `cswap` CLI
-
-[claude-swap](https://github.com/realiti4/claude-swap) (`cswap`) is an existing, more mature
-Python CLI and macOS menu bar tool that solves the same problem. This app is **not** a wrapper
-around it — it never shells out to `cswap`, and it doesn't require it to be installed. It's an
-independent Rust implementation: the credential handling, path resolution, OAuth refresh, and
-usage-tracking logic are ported from `claude-swap` (MIT-licensed, ported with attribution — see
-[LICENSE](LICENSE)), rewritten in Rust rather than wrapped.
-
-It keeps its own credential vault in its own app-data directory — never inside `cswap`'s directory
-— so a bug in this project can't corrupt `cswap`'s accounts, or vice versa. The two tools still
-interoperate where it counts: it locks the shared credentials file using the same cross-process
-file-locking protocol `cswap` does (`flock` on Linux/macOS, `LockFileEx` on Windows), so a `cswap`
-process running in a terminal and this app sitting in the tray can touch the same files without
-corrupting each other. That lock compatibility is checked by an automated test that runs the real,
-installed `claude_swap` Python package on one side and this app's Rust lock implementation on the
-other, contending for the same lock file — not two separate reimplementations that happen to agree.
+Switches are journaled across the active credential, global config, and account sequence. If the
+process terminates between those writes, startup restores a noncommitted switch or verifies a
+committed one before switching is enabled again. See
+[transaction recovery](docs/TRANSACTION_RECOVERY.md).
 
 ### How credentials are stored
 
-Accounts live in this app's own directory, not in the CLI's. Each stored credential carries a
+Accounts live in this app's own data directory. Each stored credential carries a
 self-describing envelope recording what protection was actually applied:
 
 ```json
@@ -185,7 +174,6 @@ public issue; see [SECURITY.md](SECURITY.md).
 
 ## License
 
-MIT — see [LICENSE](LICENSE). Portions of the credential, path-resolution, locking, and
-usage-tracking logic are ported from [claude-swap](https://github.com/realiti4/claude-swap) by
-Onur Cetinkol (`realiti4`), also MIT-licensed; that attribution is reproduced in full in
-[LICENSE](LICENSE) as the license requires.
+MIT — see [LICENSE](LICENSE). Portions are adapted from
+[claude-swap](https://github.com/realiti4/claude-swap) by Onur Cetinkol (`realiti4`) under the
+MIT License; full attribution is included in [LICENSE](LICENSE).

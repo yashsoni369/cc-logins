@@ -123,7 +123,7 @@ files this task's constraints don't let me edit, so it isn't in `resilience.rs`.
 
 ---
 
-## 4. Atomic config/credential writes — already at parity, no action needed
+## 4. Atomic file replacement and cross-file switching — implemented with recovery
 
 **What cc-switch does.** `config.rs::atomic_write` (line 297): write to `<name>.tmp.<nanos>` in the
 same directory, `flush()`, then `rename()` over the target (with an explicit `remove_file` first on
@@ -132,16 +132,21 @@ Windows, since `rename` fails there if the destination exists). `codex_config.rs
 A back to its pre-write bytes (or delete it if it didn't exist before) — a two-file transaction that
 never leaves the pair in a state neither caller nor a previous run would recognize.
 
-**What we do.** The same primitive, independently: `switcher.rs::atomic_write` (line 235,
-explicitly documented at line 92 as "mirrors `credentials.rs::atomic_write`") and
-`credentials.rs::atomic_write` (line 328) both write-to-temp-then-rename, and `settings.rs` (line
-196-197) does the same for the settings file. `commands.rs::switch_account`'s own doc comment
-(`commands.rs:205-207`) states the same "back up the outgoing login before writing anything about the
-target" discipline cc-switch's two-file rollback embodies.
+**What we do now.** `durable_fs.rs` provides synced sibling staging, `ReplaceFileW` / write-through
+`MoveFileExW` on Windows, and rename plus parent-directory sync on Unix. That gives atomic visibility
+for each regular file, but the old review incorrectly treated per-file atomicity as a transaction
+across the active credential backend, `~/.claude.json`, and `sequence.json`.
 
-**Verdict: no action.** This is the one area where independent implementation of the same lesson
-(claude-swap's Python original, ported per `credentials.rs`'s doc comments) already matches or
-slightly exceeds cc-switch's own practice. Worth confirming, not worth touching.
+`switch_transaction.rs` now supplies the missing cross-file guarantee. It snapshots exact presence
+and bytes for every active credential backend, persists protected before-images and a secret-free
+journal, stages regular-file outputs, advances durable phases after each live write, verifies the
+committed target, and rolls every noncommitted phase back in reverse order. The outgoing account's
+credential/config generation is monotonic: once safely captured it is preserved even when the live
+switch later rolls back.
+
+**Verdict: implemented and fault-tested.** Atomic replacement prevents torn individual files;
+the journal and protected before-images make the multi-file operation recoverable. These are
+different guarantees and neither substitutes for the other.
 
 ---
 
@@ -187,7 +192,7 @@ budgeting for before it's hit by a real user, not on having reproduced it myself
 
 ---
 
-## 6. Startup crash-recovery / interrupted-mutation detection — narrower risk here, not urgent
+## 6. Startup crash-recovery / interrupted-mutation detection — implemented
 
 **What cc-switch does.** `services/proxy.rs::recover_from_crash` (line 2182) and
 `detect_takeover_in_live_configs` (line 2206): on startup, check whether the shared "live" provider
@@ -195,17 +200,20 @@ config files were left in a "taken over" placeholder state by a proxy session th
 and if so, restore them from a DB-tracked backup automatically, rather than leaving the user's Claude
 Code / Codex config pointed at a placeholder.
 
-**What we do.** `switcher.rs`'s switch path backs up the outgoing credential before writing the new
-one (§4), and every write is atomic — so the specific failure mode cc-switch guards against (a file
-left mid-write, or written but never cleaned up after a crash) is already structurally narrower for
-us: `atomic_write`'s rename step means `~/.claude/.credentials.json` is never observed half-written,
-only "still the old value" (benign — Claude Code keeps working with the account it had) or "the new
-value" (the switch completed). There is no analogous placeholder-takeover state in this app's design.
+**What we do now.** Startup loads `switch-journal.json` before application state or the poller starts.
+Noncommitted phases restore the outgoing live credential, global config, and sequence exactly;
+`Committed` verifies the target hashes and cleans retained recovery artifacts. Unknown schemas,
+malformed journals, missing/tampered before-images, and incomplete rollback all fail closed. Manual
+and automatic switching remain disabled and the daemon reports `recoveryRequired` until recovery
+succeeds.
 
-**Verdict: worth a lightweight startup consistency check eventually, not urgent now.** The blast
-radius cc-switch's version defends against (a shared config left actively broken) doesn't have a
-direct equivalent in our switch model. Out of scope for `resilience.rs` regardless — this would touch
-`switcher.rs`/`commands.rs`, not something self-contained.
+The lock protocol is intentionally the same as current cswap/Claude Code. A hard termination leaves
+proper-lockfile directories behind; fresh credential locks are not stolen for 60 seconds. Startup
+tries once, then bounded background retries cross that staleness window without blocking the UI.
+
+**Verdict: implemented and process-death tested.** Tests terminate a child with `abort()` after the
+journal, each live write, and commit, then recover from a fresh process. A second termination during
+rollback is also recovered idempotently.
 
 ---
 

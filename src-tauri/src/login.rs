@@ -135,6 +135,9 @@ pub struct LoginOutcome {
     /// Claude Code itself writes and the same shape [`crate::credentials::CredentialStore`]
     /// expects for a stored account.
     pub credentials: String,
+    /// Stable account UUID from the resolved profile. Replacement flows use
+    /// this to prove an isolated login belongs to the selected existing slot.
+    pub uuid: Option<String>,
     /// Best-effort identity resolved via [`crate::oauth::fetch_oauth_profile`].
     /// `None` if the profile lookup failed or was unreachable — the login
     /// itself still succeeded; the caller should fall back to a placeholder
@@ -704,6 +707,10 @@ pub async fn interactive_login() -> Result<LoginOutcome, LoginError> {
 
     Ok(LoginOutcome {
         credentials,
+        uuid: identity
+            .as_ref()
+            .map(|i| i.uuid.clone())
+            .filter(|uuid| !uuid.is_empty()),
         email: identity.as_ref().and_then(|i| i.email.clone()),
         organization_uuid: identity.as_ref().and_then(|i| i.organization_uuid.clone()),
     })

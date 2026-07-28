@@ -12,11 +12,12 @@
 //! grouped separately below so the boundary is impossible to miss when reading
 //! this file. No polling path may ever call a mutating command.
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
+use tauri::Emitter;
 
 use crate::login::{self, LoginError};
 use crate::model::{Account, Environment, Snapshot};
-use crate::switcher::{self, Strategy, SwitchError};
+use crate::switcher::{self, SwitchError};
 
 /// Errors cross the IPC boundary as a tagged object rather than a bare string,
 /// so the UI can distinguish "nothing is set up yet" (show onboarding) from
@@ -30,7 +31,12 @@ use crate::switcher::{self, Strategy, SwitchError};
 /// single `String`: a rewording in `login.rs`/`switcher.rs` cannot silently
 /// change what the UI does, because nothing in the UI reads those words.
 #[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase", tag = "kind", content = "detail")]
+#[serde(
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase",
+    tag = "kind",
+    content = "detail"
+)]
 pub enum IpcError {
     /// No accounts are managed yet — the first-run screen, not an error state.
     NotConfigured,
@@ -58,8 +64,32 @@ pub enum IpcError {
     /// Refused to disable the currently-active account — auto-switch would
     /// have nowhere valid to land.
     CannotDisableActive(String),
+    /// The server proved this account's refresh-token lineage is dead.
+    ReloginRequired(String),
+    /// An interrupted switch could not be recovered automatically.
+    RecoveryRequired(String),
+    /// A settings editor tried to overwrite a newer canonical revision.
+    SettingsConflict {
+        expected_revision: u64,
+        actual_revision: u64,
+    },
     /// Anything else.
     Internal(String),
+}
+
+impl From<crate::settings::SettingsUpdateError> for IpcError {
+    fn from(error: crate::settings::SettingsUpdateError) -> Self {
+        match error {
+            crate::settings::SettingsUpdateError::Conflict {
+                expected_revision,
+                actual_revision,
+            } => Self::SettingsConflict {
+                expected_revision,
+                actual_revision,
+            },
+            other => Self::Internal(other.to_string()),
+        }
+    }
 }
 
 impl From<SwitchError> for IpcError {
@@ -70,12 +100,41 @@ impl From<SwitchError> for IpcError {
         // `Internal`.
         match &e {
             SwitchError::NoAccountsManaged => IpcError::NotConfigured,
-            SwitchError::Locking(_) => IpcError::Busy(e.to_string()),
+            SwitchError::Locking(_) | SwitchError::LiveStateLock(_) => {
+                IpcError::Busy(e.to_string())
+            }
+            SwitchError::Transaction(_)
+                if crate::switch_transaction::recovery_requirement().is_some() =>
+            {
+                IpcError::RecoveryRequired(e.to_string())
+            }
+            SwitchError::Transaction(
+                crate::switch_transaction::TransactionError::RecoveryRequired,
+            )
+            | SwitchError::Transaction(
+                crate::switch_transaction::TransactionError::RollbackIncomplete { .. },
+            ) => IpcError::RecoveryRequired(e.to_string()),
+            SwitchError::TargetGenerationChanged(_) => IpcError::Busy(e.to_string()),
+            SwitchError::Refresh(crate::oauth_refresh::RefreshCoordinatorError::Lease(_)) => {
+                IpcError::Busy(e.to_string())
+            }
+            SwitchError::Refresh(
+                crate::oauth_refresh::RefreshCoordinatorError::ReloginRequired,
+            ) => IpcError::ReloginRequired(e.to_string()),
+            SwitchError::Refresh(
+                crate::oauth_refresh::RefreshCoordinatorError::RefreshFailed(_)
+                | crate::oauth_refresh::RefreshCoordinatorError::Usage(_),
+            ) => IpcError::Unreachable(e.to_string()),
             // Credential-store problems: the store itself is unreadable,
             // missing, empty, or otherwise not trustworthy — as distinct
             // from a business-rule refusal below, where the store is fine
             // and the requested mutation just isn't valid right now.
             SwitchError::Credential(_)
+            | SwitchError::Transaction(
+                crate::switch_transaction::TransactionError::Credential(_)
+                | crate::switch_transaction::TransactionError::CredentialRead
+                | crate::switch_transaction::TransactionError::EmptyActiveCredential,
+            )
             | SwitchError::CredentialRead
             | SwitchError::NoStoredCredentials(_)
             | SwitchError::NoStoredConfig(_)
@@ -83,7 +142,12 @@ impl From<SwitchError> for IpcError {
             | SwitchError::EmptyActiveCredential(_)
             | SwitchError::Stash(_)
             | SwitchError::NoLiveCredential
-            | SwitchError::InvalidCredential(_) => IpcError::Credential(e.to_string()),
+            | SwitchError::InvalidCredential(_)
+            | SwitchError::Refresh(
+                crate::oauth_refresh::RefreshCoordinatorError::Missing
+                | crate::oauth_refresh::RefreshCoordinatorError::PersistenceFailed(_)
+                | crate::oauth_refresh::RefreshCoordinatorError::InvalidCredential,
+            ) => IpcError::Credential(e.to_string()),
             // Business-rule refusals: the requested mutation is invalid
             // given the current state, not an I/O or credential-store
             // failure. Each gets its own structural kind so the UI can
@@ -95,6 +159,7 @@ impl From<SwitchError> for IpcError {
             // the UI still gets the full, specific message via `e.to_string()`.
             SwitchError::UnknownAccount(_)
             | SwitchError::InvalidToken(_)
+            | SwitchError::Transaction(_)
             | SwitchError::Io(_)
             | SwitchError::Json(_) => IpcError::Internal(e.to_string()),
         }
@@ -311,6 +376,13 @@ fn merge_environments(snap: &mut Snapshot) {
 // ─── mutating commands ───────────────────────────────────────────────────────
 // These change which login Claude Code will use. Never call from a poller.
 
+fn refuse_if_recovery_required() -> IpcResult<()> {
+    match crate::switch_transaction::recovery_requirement() {
+        Some(detail) => Err(IpcError::RecoveryRequired(detail)),
+        None => Ok(()),
+    }
+}
+
 /// Switch the live login to `account_number`.
 ///
 /// Explicitly user-initiated. Takes the credential lock for the whole mutation
@@ -328,6 +400,7 @@ pub async fn switch_account(
     app: tauri::AppHandle,
     account_number: u32,
 ) -> IpcResult<Snapshot> {
+    refuse_if_recovery_required()?;
     let accounts = switcher::read_accounts()?;
     let target = accounts
         .iter()
@@ -338,7 +411,7 @@ pub async fn switch_account(
     // doesn't leave the tray sitting on the outgoing account's stale number.
     crate::poller::publish_switching(&app);
 
-    switcher::switch_to(target)?;
+    switcher::switch_to(target).await?;
 
     // Bypass the cache: it holds the pre-switch state by definition, and
     // showing the user the state from before their own action is a lie.
@@ -365,6 +438,7 @@ pub async fn add_current_account(
     app: tauri::AppHandle,
     alias: Option<String>,
 ) -> IpcResult<Snapshot> {
+    refuse_if_recovery_required()?;
     switcher::add_current_account(alias.as_deref())?;
     let snap = snapshot_uncached(&state).await?;
     crate::poller::publish_snapshot(&app, &snap);
@@ -401,11 +475,38 @@ pub async fn interactive_login(
     app: tauri::AppHandle,
     alias: Option<String>,
 ) -> IpcResult<Snapshot> {
+    refuse_if_recovery_required()?;
     let outcome = login::interactive_login().await?;
+    refuse_if_recovery_required()?;
     switcher::add_oauth_credential(
         &outcome.credentials,
         outcome.email.as_deref(),
         alias.as_deref(),
+    )?;
+    let snap = snapshot_uncached(&state).await?;
+    crate::poller::publish_snapshot(&app, &snap);
+    Ok(snap)
+}
+
+/// Re-authenticate one existing slot without creating a duplicate account.
+/// The login runs in the same isolated temporary config used by
+/// [`interactive_login`]; the captured identity must match `account_number`
+/// before the backend writes any credential bytes.
+#[tauri::command]
+pub async fn relogin_account(
+    state: tauri::State<'_, AppState>,
+    app: tauri::AppHandle,
+    account_number: u32,
+) -> IpcResult<Snapshot> {
+    refuse_if_recovery_required()?;
+    let outcome = login::interactive_login().await?;
+    refuse_if_recovery_required()?;
+    switcher::replace_oauth_credential(
+        account_number,
+        &outcome.credentials,
+        outcome.uuid.as_deref(),
+        outcome.email.as_deref(),
+        outcome.organization_uuid.as_deref(),
     )?;
     let snap = snapshot_uncached(&state).await?;
     crate::poller::publish_snapshot(&app, &snap);
@@ -428,6 +529,7 @@ pub async fn add_token(
     email: Option<String>,
     alias: Option<String>,
 ) -> IpcResult<Snapshot> {
+    refuse_if_recovery_required()?;
     switcher::add_token(&token, email.as_deref(), alias.as_deref())?;
     let snap = snapshot_uncached(&state).await?;
     crate::poller::publish_snapshot(&app, &snap);
@@ -447,6 +549,7 @@ pub async fn set_account_enabled(
     account_number: u32,
     enabled: bool,
 ) -> IpcResult<Snapshot> {
+    refuse_if_recovery_required()?;
     switcher::set_account_enabled(account_number, enabled)?;
     let snap = snapshot_uncached(&state).await?;
     crate::poller::publish_snapshot(&app, &snap);
@@ -460,21 +563,6 @@ pub async fn set_account_enabled(
 // CLI rather than a standalone tool, which is not what it is. The function
 // stays (it is tested, and useful for seeding a vault during development) but
 // nothing user-facing reaches it.
-
-/// The account the auto-switcher would move to right now, without moving.
-///
-/// Read-only on purpose: it powers the "next" hint in the popover, and lets the
-/// switch path be inspected before it is ever trusted to run on its own.
-#[tauri::command]
-pub fn preview_target(strategy: Option<String>) -> IpcResult<Option<Account>> {
-    let strategy = match strategy.as_deref() {
-        Some("next-available") => Strategy::NextAvailable,
-        Some("consume-first") => Strategy::ConsumeFirst,
-        _ => Strategy::MostHeadroom,
-    };
-    let accounts = switcher::read_accounts()?;
-    Ok(switcher::pick_target(&accounts, strategy).cloned())
-}
 
 // ─── application state ───────────────────────────────────────────────────────
 
@@ -498,7 +586,9 @@ pub struct AppState {
     /// Local usage history. `None` if the database could not be opened — the
     /// app must still run without history rather than refusing to start.
     pub history: Option<crate::history::HistoryStore>,
-    pub settings: std::sync::Mutex<crate::settings::Settings>,
+    pub settings: crate::settings::SettingsStore,
+    /// Canonical daemon phase used by hydration and global status events.
+    pub daemon_status: crate::runtime::DaemonStatusStore,
     /// When the user last forced a fetch with the Refresh control.
     ///
     /// The Refresh button spends a real request against the same per-token
@@ -511,7 +601,21 @@ pub struct AppState {
 
 impl AppState {
     pub fn new(data_dir: std::path::PathBuf) -> Self {
-        let settings = crate::settings::load(&data_dir);
+        let now = chrono::Utc::now();
+        let settings = crate::settings::SettingsStore::new(data_dir.clone(), now);
+        let policy = {
+            let receiver = settings.subscribe_policy();
+            let current = receiver.borrow().clone();
+            current
+        };
+        let daemon_status = crate::runtime::DaemonStatusStore::new(&policy, now);
+        if let Some(detail) = crate::switch_transaction::recovery_requirement() {
+            let _ = daemon_status.transition(
+                policy.revision,
+                crate::runtime::DaemonPhase::RecoveryRequired { detail },
+                now,
+            );
+        }
         let history = match crate::history::HistoryStore::open(&data_dir) {
             Ok(h) => Some(h),
             Err(e) => {
@@ -522,7 +626,8 @@ impl AppState {
         Self {
             data_dir,
             history,
-            settings: std::sync::Mutex::new(settings),
+            settings,
+            daemon_status,
             snapshot_cache: std::sync::Mutex::new(None),
             last_manual_refresh: std::sync::Mutex::new(None),
         }
@@ -649,29 +754,126 @@ fn data_locations_in(data_dir: &std::path::Path) -> DataLocations {
 
 // ─── settings ────────────────────────────────────────────────────────────────
 
-#[tauri::command]
-pub fn get_settings(state: tauri::State<'_, AppState>) -> crate::settings::Settings {
-    state.settings.lock().map(|s| s.clone()).unwrap_or_default()
+const SETTINGS_UPDATED_EVENT: &str = "settings://updated";
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct UpdateSettingsInput {
+    pub expected_revision: u64,
+    pub patch: crate::settings::SettingsPatch,
 }
 
-/// Persist settings. Values are clamped on save, so a bad number cannot brick
-/// the next launch.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct SnoozeAutoSwitchInput {
+    pub duration_seconds: u64,
+}
+
 #[tauri::command]
-pub fn set_settings(
+pub fn get_settings(state: tauri::State<'_, AppState>) -> crate::settings::SettingsSnapshot {
+    get_settings_from(&state)
+}
+
+#[tauri::command]
+pub fn get_daemon_status(state: tauri::State<'_, AppState>) -> crate::runtime::DaemonStatus {
+    state.daemon_status.snapshot()
+}
+
+#[tauri::command]
+pub fn update_settings(
+    app: tauri::AppHandle,
     state: tauri::State<'_, AppState>,
-    settings: crate::settings::Settings,
-) -> IpcResult<crate::settings::Settings> {
-    let clean = settings.sanitised();
-    crate::settings::save(&state.data_dir, &clean)
-        .map_err(|e| IpcError::Internal(e.to_string()))?;
-    if let Ok(mut guard) = state.settings.lock() {
-        *guard = clean.clone();
+    input: UpdateSettingsInput,
+) -> IpcResult<crate::settings::SettingsSnapshot> {
+    update_settings_at(&state, input, chrono::Utc::now(), |snapshot| {
+        app.emit(SETTINGS_UPDATED_EVENT, snapshot)
+    })
+}
+
+#[tauri::command]
+pub fn snooze_auto_switch(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, AppState>,
+    input: SnoozeAutoSwitchInput,
+) -> IpcResult<crate::settings::SettingsSnapshot> {
+    snooze_auto_switch_at(&state, input, chrono::Utc::now(), |snapshot| {
+        app.emit(SETTINGS_UPDATED_EVENT, snapshot)
+    })
+}
+
+#[tauri::command]
+pub fn resume_auto_switch(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, AppState>,
+) -> IpcResult<crate::settings::SettingsSnapshot> {
+    resume_auto_switch_at(&state, chrono::Utc::now(), |snapshot| {
+        app.emit(SETTINGS_UPDATED_EVENT, snapshot)
+    })
+}
+
+fn get_settings_from(state: &AppState) -> crate::settings::SettingsSnapshot {
+    state.settings.snapshot()
+}
+
+fn update_settings_at<E, F>(
+    state: &AppState,
+    input: UpdateSettingsInput,
+    now: chrono::DateTime<chrono::Utc>,
+    emit: F,
+) -> IpcResult<crate::settings::SettingsSnapshot>
+where
+    E: std::fmt::Display,
+    F: FnOnce(&crate::settings::SettingsSnapshot) -> Result<(), E>,
+{
+    let snapshot = state
+        .settings
+        .update(input.expected_revision, input.patch, now)?;
+    emit(&snapshot).map_err(|error| IpcError::Internal(error.to_string()))?;
+    Ok(snapshot)
+}
+
+fn snooze_auto_switch_at<E, F>(
+    state: &AppState,
+    input: SnoozeAutoSwitchInput,
+    now: chrono::DateTime<chrono::Utc>,
+    emit: F,
+) -> IpcResult<crate::settings::SettingsSnapshot>
+where
+    E: std::fmt::Display,
+    F: FnOnce(&crate::settings::SettingsSnapshot) -> Result<(), E>,
+{
+    if input.duration_seconds == 0 {
+        return Err(IpcError::Internal(
+            "snooze duration must be greater than zero".to_string(),
+        ));
     }
-    Ok(clean)
+    let snapshot = state
+        .settings
+        .snooze(std::time::Duration::from_secs(input.duration_seconds), now)?;
+    emit(&snapshot).map_err(|error| IpcError::Internal(error.to_string()))?;
+    Ok(snapshot)
+}
+
+fn resume_auto_switch_at<E, F>(
+    state: &AppState,
+    now: chrono::DateTime<chrono::Utc>,
+    emit: F,
+) -> IpcResult<crate::settings::SettingsSnapshot>
+where
+    E: std::fmt::Display,
+    F: FnOnce(&crate::settings::SettingsSnapshot) -> Result<(), E>,
+{
+    let snapshot = state.settings.resume(now)?;
+    emit(&snapshot).map_err(|error| IpcError::Internal(error.to_string()))?;
+    Ok(snapshot)
 }
 
 #[cfg(test)]
 mod tests {
+    use std::cell::Cell;
+
+    use chrono::{DateTime, Duration as ChronoDuration, Utc};
+
     use super::*;
 
     /// An `AppState` rooted in a temp dir.
@@ -683,6 +885,210 @@ mod tests {
         let dir = tempfile::tempdir().expect("temp dir");
         let state = AppState::new(dir.path().to_path_buf());
         (dir, state)
+    }
+
+    fn fixed_now() -> DateTime<Utc> {
+        DateTime::parse_from_rfc3339("2026-07-28T12:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc)
+    }
+
+    #[test]
+    fn update_settings_hydrates_a_revisioned_snapshot() {
+        let (_dir, state) = temp_state();
+
+        let snapshot = get_settings_from(&state);
+
+        assert_eq!(snapshot.revision, 0);
+        assert_eq!(snapshot.settings, crate::settings::Settings::default());
+    }
+
+    #[test]
+    fn update_settings_rejects_stale_overwrites_with_a_structural_conflict() {
+        let (_dir, state) = temp_state();
+        update_settings_at(
+            &state,
+            UpdateSettingsInput {
+                expected_revision: 0,
+                patch: crate::settings::SettingsPatch {
+                    threshold: Some(77),
+                    ..Default::default()
+                },
+            },
+            fixed_now(),
+            |_| Ok::<(), String>(()),
+        )
+        .unwrap();
+
+        let error = update_settings_at(
+            &state,
+            UpdateSettingsInput {
+                expected_revision: 0,
+                patch: crate::settings::SettingsPatch {
+                    grace_seconds: Some(5),
+                    ..Default::default()
+                },
+            },
+            fixed_now(),
+            |_| Ok::<(), String>(()),
+        )
+        .unwrap_err();
+
+        assert!(matches!(
+            &error,
+            IpcError::SettingsConflict {
+                expected_revision: 0,
+                actual_revision: 1
+            }
+        ));
+        assert_eq!(state.settings.snapshot().settings.threshold, 77);
+        assert_eq!(state.settings.snapshot().settings.grace_seconds, 60);
+        assert_eq!(
+            serde_json::to_value(error).unwrap(),
+            serde_json::json!({
+                "kind": "settingsConflict",
+                "detail": { "expectedRevision": 0, "actualRevision": 1 }
+            })
+        );
+    }
+
+    #[test]
+    fn update_settings_emits_only_after_the_successful_state_is_canonical() {
+        let (dir, state) = temp_state();
+        let emitted = Cell::new(false);
+
+        let result = update_settings_at(
+            &state,
+            UpdateSettingsInput {
+                expected_revision: 0,
+                patch: crate::settings::SettingsPatch {
+                    threshold: Some(79),
+                    ..Default::default()
+                },
+            },
+            fixed_now(),
+            |snapshot| {
+                assert_eq!(state.settings.snapshot(), *snapshot);
+                assert_eq!(crate::settings::load(dir.path()), snapshot.settings);
+                emitted.set(true);
+                Ok::<(), String>(())
+            },
+        )
+        .unwrap();
+
+        assert!(emitted.get());
+        assert_eq!(result.revision, 1);
+    }
+
+    #[test]
+    fn update_settings_does_not_emit_after_a_failed_mutation() {
+        let temp = tempfile::tempdir().unwrap();
+        let blocked = temp.path().join("settings-parent-is-a-file");
+        std::fs::write(&blocked, b"not a directory").unwrap();
+        let state = AppState {
+            snapshot_cache: std::sync::Mutex::new(None),
+            data_dir: blocked.clone(),
+            history: None,
+            settings: crate::settings::SettingsStore::new(blocked, fixed_now()),
+            daemon_status: crate::runtime::DaemonStatusStore::new(
+                &crate::runtime::RuntimePolicy::from_settings(
+                    0,
+                    &crate::settings::Settings::default(),
+                    fixed_now(),
+                ),
+                fixed_now(),
+            ),
+            last_manual_refresh: std::sync::Mutex::new(None),
+        };
+        let emitted = Cell::new(false);
+
+        let result = update_settings_at(
+            &state,
+            UpdateSettingsInput {
+                expected_revision: 0,
+                patch: crate::settings::SettingsPatch {
+                    threshold: Some(79),
+                    ..Default::default()
+                },
+            },
+            fixed_now(),
+            |_| {
+                emitted.set(true);
+                Ok::<(), String>(())
+            },
+        );
+
+        assert!(result.is_err());
+        assert!(!emitted.get());
+    }
+
+    #[test]
+    fn snooze_auto_switch_uses_the_exact_requested_deadline() {
+        let (_dir, state) = temp_state();
+
+        let result = snooze_auto_switch_at(
+            &state,
+            SnoozeAutoSwitchInput {
+                duration_seconds: 3600,
+            },
+            fixed_now(),
+            |_| Ok::<(), String>(()),
+        )
+        .unwrap();
+
+        assert_eq!(
+            result.settings.auto_switch_paused_until,
+            Some(fixed_now() + ChronoDuration::hours(1))
+        );
+        assert_eq!(result.revision, 1);
+    }
+
+    #[test]
+    fn snooze_auto_switch_rejects_zero_without_emitting() {
+        let (_dir, state) = temp_state();
+        let emitted = Cell::new(false);
+
+        let result = snooze_auto_switch_at(
+            &state,
+            SnoozeAutoSwitchInput {
+                duration_seconds: 0,
+            },
+            fixed_now(),
+            |_| {
+                emitted.set(true);
+                Ok::<(), String>(())
+            },
+        );
+
+        assert!(result.is_err());
+        assert!(!emitted.get());
+        assert_eq!(state.settings.snapshot().revision, 0);
+    }
+
+    #[test]
+    fn snooze_resume_clears_the_persisted_pause_and_emits_the_new_snapshot() {
+        let (_dir, state) = temp_state();
+        snooze_auto_switch_at(
+            &state,
+            SnoozeAutoSwitchInput {
+                duration_seconds: 60,
+            },
+            fixed_now(),
+            |_| Ok::<(), String>(()),
+        )
+        .unwrap();
+        let emitted = Cell::new(false);
+
+        let result = resume_auto_switch_at(&state, fixed_now(), |snapshot| {
+            assert_eq!(snapshot.settings.auto_switch_paused_until, None);
+            emitted.set(true);
+            Ok::<(), String>(())
+        })
+        .unwrap();
+
+        assert!(emitted.get());
+        assert_eq!(result.settings.auto_switch_paused_until, None);
+        assert_eq!(result.revision, 2);
     }
 
     #[test]
@@ -872,6 +1278,36 @@ mod tests {
         };
         let mapped: IpcError = SwitchError::Locking(underlying).into();
         assert!(matches!(mapped, IpcError::Busy(_)), "got {mapped:?}");
+    }
+
+    #[test]
+    fn manual_relogin_required_is_a_structured_ipc_error() {
+        let mapped: IpcError =
+            SwitchError::Refresh(crate::oauth_refresh::RefreshCoordinatorError::ReloginRequired)
+                .into();
+        assert!(matches!(mapped, IpcError::ReloginRequired(_)));
+        assert_eq!(
+            serde_json::to_value(mapped).unwrap(),
+            serde_json::json!({
+                "kind": "reloginRequired",
+                "detail": "account requires re-login"
+            })
+        );
+    }
+
+    #[test]
+    fn pending_switch_recovery_is_a_structured_ipc_error() {
+        let mapped: IpcError =
+            SwitchError::Transaction(crate::switch_transaction::TransactionError::RecoveryRequired)
+                .into();
+        assert!(matches!(mapped, IpcError::RecoveryRequired(_)));
+        assert_eq!(
+            serde_json::to_value(mapped).unwrap(),
+            serde_json::json!({
+                "kind": "recoveryRequired",
+                "detail": "another switch transaction requires recovery"
+            })
+        );
     }
 
     #[test]

@@ -8,8 +8,10 @@
 //! Portions of the credential, path and usage logic are ported from
 //! claude-swap (MIT) — https://github.com/realiti4/claude-swap
 
+pub mod claude_locks;
 pub mod commands;
 pub mod credentials;
+pub mod durable_fs;
 pub mod history;
 pub mod linux;
 pub mod locking;
@@ -17,10 +19,16 @@ pub mod login;
 pub mod migrate;
 pub mod model;
 pub mod oauth;
+pub mod oauth_quarantine;
+pub mod oauth_refresh;
 pub mod paths;
 pub mod poller;
+pub mod recovery_store;
 pub mod resilience;
+pub mod runtime;
 pub mod settings;
+pub mod switch_journal;
+pub mod switch_transaction;
 pub mod switcher;
 pub mod tray;
 pub mod wsl;
@@ -182,30 +190,6 @@ fn init_logging() {
     let _ = builder.try_init();
 }
 
-/// Translate persisted settings into the poller's runtime config.
-///
-/// Two types rather than one on purpose: `Settings` is the user-facing,
-/// serialised shape (and must stay stable on disk), while `PollerConfig` is
-/// what the decision logic actually reasons over. Keeping them separate means a
-/// change to the daemon's internals cannot silently alter a saved settings file.
-fn poller_config_from_settings(s: &settings::Settings) -> poller::PollerConfig {
-    poller::PollerConfig {
-        threshold: s.threshold as f64,
-        // Fixed, not user-configurable — see `poll_policy::DEFAULT_INTERVAL_S`.
-        interval_seconds: poller::poll_policy::DEFAULT_INTERVAL_S,
-        cooldown_seconds: s.cooldown_seconds as f64,
-        hysteresis_pct: s.hysteresis_pct as f64,
-        strategy: match s.strategy {
-            settings::Strategy::MostHeadroom => switcher::Strategy::MostHeadroom,
-            settings::Strategy::NextAvailable => switcher::Strategy::NextAvailable,
-            settings::Strategy::ConsumeFirst => switcher::Strategy::ConsumeFirst,
-        },
-        unhealthy_ticks: s.unhealthy_ticks as u32,
-        grace_seconds: s.grace_seconds as f64,
-        auto_switch_enabled: s.auto_switch_enabled,
-    }
-}
-
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     // Without this, every `log::warn!` in oauth.rs, poller.rs and
@@ -259,6 +243,14 @@ pub fn run() {
     paths::set_store_root(data_dir.join("accounts"));
     log::info!("account vault: {}", paths::backup_root().display());
 
+    match switch_transaction::recover_pending_switch() {
+        Ok(switch_transaction::RecoveryDisposition::NothingToRecover) => {}
+        Ok(disposition) => log::warn!("recovered interrupted account switch: {disposition:?}"),
+        Err(error) => {
+            log::error!("automatic switch recovery failed; switching remains disabled: {error}")
+        }
+    }
+
     // Backstop for isolated-login temp dirs. They clean up on Drop, but an
     // abort runs no destructors, and one of those briefly holds a real
     // credential. Only sweeps dirs older than an hour so a login running in
@@ -296,17 +288,20 @@ pub fn run() {
             commands::snapshot,
             commands::refresh_snapshot,
             commands::environments,
-            commands::preview_target,
             commands::switch_account,
             commands::add_current_account,
             commands::interactive_login,
+            commands::relogin_account,
             commands::add_token,
             commands::set_account_enabled,
             commands::history_summary,
             commands::history_series,
             commands::history_available,
             commands::get_settings,
-            commands::set_settings,
+            commands::get_daemon_status,
+            commands::update_settings,
+            commands::snooze_auto_switch,
+            commands::resume_auto_switch,
             commands::data_locations,
         ])
         .setup(move |app| {
@@ -332,16 +327,46 @@ pub fn run() {
             // enabled auto-switch, which defaults to false — software that
             // starts moving credentials before being asked is not trustworthy.
             {
-                let cfg = poller_config_from_settings(
-                    &app.state::<commands::AppState>()
-                        .settings
-                        .lock()
-                        .map(|s| s.clone())
-                        .unwrap_or_default(),
-                );
+                let policy_rx = app
+                    .state::<commands::AppState>()
+                    .settings
+                    .subscribe_policy();
                 let poller_handle = handle.clone();
                 tauri::async_runtime::spawn(async move {
-                    poller::run(poller_handle, cfg).await;
+                    poller::run(poller_handle, policy_rx).await;
+                });
+            }
+
+            // A hard process termination leaves Claude Code's proper-lockfile
+            // directories behind. cswap/Claude deliberately protect a fresh
+            // credential lock for 60 seconds, so the synchronous startup
+            // attempt may truthfully defer recovery. Retry off the UI thread
+            // until that compatibility boundary passes; stop after six
+            // attempts and leave the durable recoveryRequired gate in place.
+            if switch_transaction::recovery_requirement().is_some() {
+                tauri::async_runtime::spawn(async move {
+                    for attempt in 1..=6 {
+                        tokio::time::sleep(std::time::Duration::from_secs(10)).await;
+                        let result = tokio::task::spawn_blocking(|| {
+                            switch_transaction::recover_pending_switch()
+                        })
+                        .await;
+                        match result {
+                            Ok(Ok(disposition)) => {
+                                log::warn!(
+                                    "background switch recovery succeeded on attempt {attempt}: \
+                                     {disposition:?}"
+                                );
+                                break;
+                            }
+                            Ok(Err(error)) => log::warn!(
+                                "background switch recovery attempt {attempt} deferred: {error}"
+                            ),
+                            Err(error) => log::warn!(
+                                "background switch recovery task {attempt} failed: {error}"
+                            ),
+                        }
+                    }
                 });
             }
 

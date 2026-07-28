@@ -3,16 +3,11 @@
 //!
 //! Ported from claude-swap (MIT) — <https://github.com/realiti4/claude-swap>,
 //! `claude_swap/switcher.py` (`ClaudeAccountSwitcher`). This is a narrow slice
-//! of a 4900-line module: only the switch path (backup the active credential,
-//! install a target account's credential, splice the global config's
-//! `oauthAccount` block) and the local, network-free account enumeration
-//! needed to build a [`Snapshot`]. Everything else in `switcher.py` — aliasing,
-//! adding/removing accounts, session-mode directories, the auto-switch daemon,
-//! import/export, foreign-credential provenance resolution, transactional
-//! rollback across multiple files, and Claude Code's own `~/.claude.lock` /
-//! `~/.claude.json.lock` directory-locks — is out of scope here and not
-//! reproduced. See the crate-level port report for what that means in
-//! practice.
+//! of a much larger module. The GUI ports the switch invariants it depends on:
+//! coordinated Claude/cswap locks, generation validation, outgoing credential
+//! provenance, durable journaling/rollback/recovery, and usage attribution.
+//! CLI-only surfaces such as aliases, sessions, and interactive import/export
+//! remain outside this module.
 //!
 //! # Account management additions
 //!
@@ -53,16 +48,16 @@
 //! - [`crate::locking`] — [`crate::locking::acquire_or_err`] guards every
 //!   mutation. Two *different* locks are in play here, not one shared between
 //!   this app and `cswap` — see the "Locking" section further down this file
-//!   (just above [`acquire_cswap_and_vault_locks`]) for the full split.
+//!   (in `crate::switch_transaction`) for the full split.
 //! - [`crate::paths`] — every on-disk location comes from here, never
 //!   hand-rolled: [`crate::paths::backup_root`] for OUR vault,
 //!   [`crate::paths::cswap_store_root`] for the CLI's (read-only interop
 //!   only), and `global_config_path`/`credentials_path`/`claude_config_home`
 //!   for Claude Code's official files.
 //! - [`crate::oauth`] — usage fetch, token refresh, and (new) profile lookup.
-//!   `try_fetch_usage_for_account` is called with `is_active` set correctly,
-//!   which is what keeps this port honest about never refreshing the active
-//!   account's token (Claude Code owns those bytes). [`add_current_account`]
+//!   Inactive refreshes use the generation coordinator; active refreshes use
+//!   the narrower Claude-compatible lock path below so Claude Code and this
+//!   app cannot consume the same grant concurrently. [`add_current_account`]
 //!   and [`add_token`] call `oauth::fetch_oauth_profile` — advisory, `None`
 //!   on any failure — to resolve account identity for duplicate detection;
 //!   see the "Duplicate detection by account identity" section above
@@ -74,42 +69,53 @@
 //! 1. **Lock the whole mutate.** Every mutating function in this module
 //!    acquires a [`crate::locking::FileLock`] before touching any file and
 //!    holds it for the entire operation. [`switch_to`] (and
-//!    [`import_from_cswap`], which also reads the CLI's store) hold two locks
+//!    [`import_from_cswap`], which also reads the CLI's store) hold its two
+//!    source/destination locks
 //!    — see the "Locking" section below.
-//! 2. **Never hold a lock across a network call.** [`read_snapshot`] fetches
-//!    usage with no lock held at all. [`add_current_account`],
+//! 2. **Keep network work outside mutation locks, except active refresh.**
+//!    Profile/usage calls and switch target freshening run without the full
+//!    live-state lock set. Current cswap's bounded exception is reproduced:
+//!    an active refresh grant holds the optional cswap lock, Claude's
+//!    credential locks, and the GUI vault lock so the refresh generation
+//!    cannot be consumed twice; it never holds the config lock.
+//!    [`add_current_account`],
 //!    [`add_token`], and [`add_oauth_credential`] are the exception to "no
 //!    mutating function makes a network call": each resolves account
 //!    identity via `oauth::fetch_oauth_profile` for duplicate detection, but
 //!    does so strictly BEFORE acquiring the vault lock, and treats a failed
 //!    lookup as advisory (degrade, don't block) — see
-//!    [`find_registered_slot_by_identity`]. Every other mutating function
-//!    still makes no network call at all.
+//!    [`find_registered_slot_by_identity`].
 //! 3. **Back up the outgoing credential before installing the new one.** See
 //!    [`switch_to`]'s doc comment and the `backup_happens_before_target_validation…`
 //!    test below.
 //! 4. **Atomic writes.** All local writes in this module go through
 //!    [`atomic_write`] (write-temp-then-rename), matching `credentials.rs`.
-//! 5. **Never refresh the active account's token.** Enforced by
-//!    `oauth::try_fetch_usage_for_account`'s `is_active` flag, not by this
-//!    module — but this module is the caller that must (and does) pass it
-//!    correctly.
+//! 5. **Serialize every refresh of one account.** Active and inactive paths
+//!    share the per-account refresh lease. Active refresh then takes the
+//!    cswap, Claude credential, and GUI vault locks in that order and re-reads
+//!    identity and credentials before consuming a grant.
 //! 6. **`.claude.json` lives at the home dir, not inside `.claude/`.** Always
 //!    resolved via [`crate::paths::global_config_path`], never hand-rolled.
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
 use serde_json::{Map, Value};
 
 use crate::credentials::{
-    self, merge_shared_credential_fields, shared_credential_fields, CredentialError,
-    CredentialStore, Platform as CredPlatform, StoreHost,
+    self, CredentialError, CredentialStore, Platform as CredPlatform, StoreHost,
 };
 use crate::model::{
     Account, EnvKind, EnvStatus, Environment, Snapshot, Usage, UsageStatus, UsageWindow,
 };
 use crate::oauth;
+use crate::oauth_quarantine::OAuthQuarantine;
+use crate::oauth_refresh::{
+    self, AccountIdentity, CompareAndStore, GenerationStore, RefreshCoordinator,
+    RefreshLeaseProvider, StoredGeneration, ValidatedCredential,
+};
 use crate::paths;
 
 // ---------------------------------------------------------------------------
@@ -130,7 +136,7 @@ fn credentials_dir() -> PathBuf {
 
 /// `<our backup_root>/.lock` — the lock guarding OUR vault. Only ever taken by
 /// this app; no other process has a reason to touch this specific file. See
-/// [`acquire_cswap_and_vault_locks`] for how this relates to the *other* lock
+/// `crate::switch_transaction` for how this relates to the live-state locks
 /// this module sometimes also takes.
 fn vault_lock_path() -> PathBuf {
     paths::backup_root().join(".lock")
@@ -154,7 +160,7 @@ fn account_config_path_at(root: &Path, account_num: &str, email: &str) -> PathBu
 /// vault, never the `cswap` CLI's. [`CswapStoreHost`] (below, near
 /// [`import_from_cswap`]) is the read-only counterpart pointed at the CLI's
 /// own credentials directory.
-struct GuiStoreHost;
+pub(crate) struct GuiStoreHost;
 
 impl StoreHost for GuiStoreHost {
     /// Under `cfg(test)` this is pinned to `Linux` — the file-only backend —
@@ -198,6 +204,12 @@ pub enum SwitchError {
     Locking(#[from] crate::locking::LockingError),
 
     #[error(transparent)]
+    LiveStateLock(#[from] crate::switch_transaction::LiveStateLockError),
+
+    #[error(transparent)]
+    Transaction(#[from] crate::switch_transaction::TransactionError),
+
+    #[error(transparent)]
     Credential(#[from] CredentialError),
 
     #[error("I/O error: {0}")]
@@ -205,6 +217,12 @@ pub enum SwitchError {
 
     #[error("JSON error: {0}")]
     Json(#[from] serde_json::Error),
+
+    #[error(transparent)]
+    Refresh(#[from] oauth_refresh::RefreshCoordinatorError),
+
+    #[error("account {0}'s credential changed while activation was being validated")]
+    TargetGenerationChanged(String),
 
     #[error("no accounts are managed yet")]
     NoAccountsManaged,
@@ -260,62 +278,9 @@ pub enum SwitchError {
 // ---------------------------------------------------------------------------
 
 fn atomic_write(target: &Path, contents: &[u8]) -> std::io::Result<()> {
-    let dir = target.parent().unwrap_or_else(|| Path::new("."));
-    std::fs::create_dir_all(dir)?;
-
-    let file_name = target
-        .file_name()
-        .and_then(|n| n.to_str())
-        .unwrap_or("switcher");
-    let tmp_path = dir.join(format!(
-        ".{file_name}.{}.{}.tmp",
-        std::process::id(),
-        next_tmp_suffix()
-    ));
-
-    let write_result = (|| -> std::io::Result<()> {
-        use std::io::Write;
-        let mut opts = std::fs::OpenOptions::new();
-        opts.write(true).create_new(true);
-        // 0600 at creation, not after the rename — see the twin of this
-        // function in `credentials.rs::atomic_write`.
-        #[cfg(not(windows))]
-        {
-            use std::os::unix::fs::OpenOptionsExt;
-            opts.mode(0o600);
-        }
-        let mut f = opts.open(&tmp_path)?;
-        f.write_all(contents)?;
-        f.sync_all()
-    })();
-
-    if let Err(e) = write_result {
-        let _ = std::fs::remove_file(&tmp_path);
-        return Err(e);
-    }
-
-    if let Err(e) = std::fs::rename(&tmp_path, target) {
-        let _ = std::fs::remove_file(&tmp_path);
-        return Err(e);
-    }
-
-    #[cfg(not(windows))]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        // Not `?`: the rename has committed, so a chmod failure must not
-        // report a completed switch as failed.
-        if let Err(e) = std::fs::set_permissions(target, std::fs::Permissions::from_mode(0o600)) {
-            log::warn!("could not tighten permissions on {}: {e}", target.display());
-        }
-    }
-
-    Ok(())
-}
-
-fn next_tmp_suffix() -> u64 {
-    use std::sync::atomic::{AtomicU64, Ordering};
-    static COUNTER: AtomicU64 = AtomicU64::new(0);
-    COUNTER.fetch_add(1, Ordering::Relaxed)
+    crate::durable_fs::stage_sibling(target, contents, Some(0o600))?
+        .commit()
+        .map_err(Into::into)
 }
 
 // ---------------------------------------------------------------------------
@@ -449,6 +414,11 @@ fn accounts_from_sequence(data: &Map<String, Value>) -> Vec<Account> {
             .and_then(Value::as_str)
             .unwrap_or_default()
             .to_string();
+        let uuid = record
+            .get("uuid")
+            .and_then(Value::as_str)
+            .filter(|value| !value.trim().is_empty())
+            .map(str::to_string);
         let org_uuid_raw = record
             .get("organizationUuid")
             .and_then(Value::as_str)
@@ -482,6 +452,7 @@ fn accounts_from_sequence(data: &Map<String, Value>) -> Vec<Account> {
         out.push(Account {
             number,
             email,
+            uuid,
             alias,
             organization_name,
             organization_uuid,
@@ -500,6 +471,629 @@ fn accounts_from_sequence(data: &Map<String, Value>) -> Vec<Account> {
     out
 }
 
+struct GuiGenerationStore {
+    timeout: Duration,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ProvenanceVerdict {
+    Owned,
+    Foreign,
+    Unresolved,
+}
+
+fn active_provenance_cache() -> &'static Mutex<HashMap<String, ProvenanceVerdict>> {
+    static VERDICTS: OnceLock<Mutex<HashMap<String, ProvenanceVerdict>>> = OnceLock::new();
+    VERDICTS.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn active_provenance_cache_key(account: &Account, credentials: &str) -> Option<String> {
+    let fingerprint = oauth::credential_fingerprint(credentials)?;
+    Some(format!(
+        "{}|{}|{}|{}|{}",
+        account.number,
+        account.email.trim().to_ascii_lowercase(),
+        account.organization_uuid.as_deref().unwrap_or_default(),
+        account.uuid.as_deref().unwrap_or_default(),
+        fingerprint
+    ))
+}
+
+fn cached_active_usage_provenance(
+    account: &Account,
+    credentials: &str,
+) -> Option<ProvenanceVerdict> {
+    let key = active_provenance_cache_key(account, credentials)?;
+    active_provenance_cache()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .get(&key)
+        .copied()
+}
+
+fn cache_active_usage_provenance(account: &Account, credentials: &str, verdict: ProvenanceVerdict) {
+    if verdict == ProvenanceVerdict::Unresolved {
+        return;
+    }
+    let Some(key) = active_provenance_cache_key(account, credentials) else {
+        return;
+    };
+    active_provenance_cache()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .insert(key, verdict);
+}
+
+/// Mirrors cswap's uuid-first, tri-state profile-oracle decision. A partial
+/// profile can prove ownership through UUID, but a UUID-less slot needs the
+/// complete `(email, organization)` pair before either affirmation or
+/// condemnation is safe.
+fn active_usage_provenance(account: &Account, resolved: &oauth::TokenAccount) -> ProvenanceVerdict {
+    let own_uuid = account.uuid.as_deref().unwrap_or_default().trim();
+    let own_org = account.organization_uuid.as_deref().unwrap_or_default();
+    let resolved_org = resolved.organization_uuid.as_deref();
+
+    if !own_uuid.is_empty() {
+        let compatible_org = match resolved_org {
+            None => true,
+            Some(org) => org.is_empty() || own_org.is_empty() || org == own_org,
+        };
+        return if resolved.uuid == own_uuid && compatible_org {
+            ProvenanceVerdict::Owned
+        } else {
+            ProvenanceVerdict::Foreign
+        };
+    }
+
+    match (resolved.email.as_deref(), resolved_org) {
+        (Some(email), Some(org))
+            if email.trim().eq_ignore_ascii_case(account.email.trim()) && org == own_org =>
+        {
+            ProvenanceVerdict::Owned
+        }
+        (Some(_), Some(_)) => ProvenanceVerdict::Foreign,
+        _ => ProvenanceVerdict::Unresolved,
+    }
+}
+
+async fn verify_active_usage_provenance(
+    account: &Account,
+    live: &str,
+    backup: &str,
+) -> ProvenanceVerdict {
+    if !backup.is_empty()
+        && (backup == live
+            || oauth::credential_fingerprint(backup) == oauth::credential_fingerprint(live))
+    {
+        return ProvenanceVerdict::Owned;
+    }
+    let Some(token) = oauth::extract_access_token(live) else {
+        return ProvenanceVerdict::Unresolved;
+    };
+    let Some(cache_key) = active_provenance_cache_key(account, live) else {
+        return ProvenanceVerdict::Unresolved;
+    };
+    let verdicts = active_provenance_cache();
+    if let Some(verdict) = verdicts
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .get(&cache_key)
+        .copied()
+    {
+        return verdict;
+    }
+
+    let verdict = oauth::fetch_oauth_profile(&token)
+        .await
+        .map_or(ProvenanceVerdict::Unresolved, |resolved| {
+            active_usage_provenance(account, &resolved)
+        });
+    // Exactly like cswap, only definitive verdicts are memoized. An endpoint
+    // failure or partial schema must be retried on a later collection pass.
+    if verdict != ProvenanceVerdict::Unresolved {
+        verdicts
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .insert(cache_key, verdict);
+    }
+    verdict
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ActiveUsageError {
+    Missing,
+    ForeignCredential,
+    ReloginRequired,
+    Unavailable,
+}
+
+fn complete_oauth(credentials: &str) -> bool {
+    let Some(oauth) = oauth::extract_oauth_data(credentials) else {
+        return false;
+    };
+    ["accessToken", "refreshToken"].into_iter().all(|field| {
+        oauth
+            .get(field)
+            .and_then(Value::as_str)
+            .is_some_and(|value| !value.is_empty())
+    })
+}
+
+fn oauth_expired(credentials: &str) -> bool {
+    match oauth::extract_oauth_data(credentials) {
+        Some(data) => oauth::is_oauth_token_expired(data.get("expiresAt").and_then(Value::as_f64)),
+        None => true,
+    }
+}
+
+fn same_oauth_lineage(left: &str, right: &str) -> bool {
+    !left.is_empty()
+        && !right.is_empty()
+        && oauth::credential_fingerprint(left) == oauth::credential_fingerprint(right)
+}
+
+async fn fetch_normalized_usage(
+    network: &dyn oauth::OAuthNetwork,
+    credentials: &str,
+) -> Result<oauth::UsageResult, oauth::UsageFetchError> {
+    let access =
+        oauth::extract_access_token(credentials).ok_or(oauth::UsageFetchError::BadResponse)?;
+    let value = network.fetch_usage(&access).await?;
+    oauth::normalize_usage_response(&value)
+        .ok()
+        .flatten()
+        .ok_or(oauth::UsageFetchError::BadResponse)
+}
+
+async fn resync_active_backup_if_current(
+    account: &Account,
+    expected_live: &str,
+    timeout: Duration,
+) -> Result<(), ActiveUsageError> {
+    let locks = tokio::task::spawn_blocking(move || {
+        crate::switch_transaction::acquire_active_refresh_locks(timeout)
+    })
+    .await
+    .map_err(|_| ActiveUsageError::Unavailable)?
+    .map_err(|_| ActiveUsageError::Unavailable)?;
+    let sequence = read_sequence_data().ok_or(ActiveUsageError::Unavailable)?;
+    if current_account_number(&sequence).as_deref() != Some(account.number.to_string().as_str()) {
+        return Err(ActiveUsageError::Unavailable);
+    }
+    let current = accounts_from_sequence(&sequence)
+        .into_iter()
+        .find(|current| {
+            current.number == account.number
+                && current.email == account.email
+                && current.stable_key() == account.stable_key()
+        })
+        .ok_or(ActiveUsageError::Unavailable)?;
+    {
+        let mut store = CredentialStore::new(GuiStoreHost);
+        if store.read_active_credentials().value.as_deref() != Some(expected_live) {
+            return Err(ActiveUsageError::Unavailable);
+        }
+        store
+            .write_account_credentials(&current.number.to_string(), &current.email, expected_live)
+            .map_err(|_| ActiveUsageError::Unavailable)?;
+    }
+    drop(locks);
+    Ok(())
+}
+
+/// Fetch active usage while preserving cswap/Claude refresh-token ownership.
+/// The refresh POST is the sole bounded network exception inside the narrow
+/// active-refresh lock set; the final usage request happens after release.
+async fn fetch_active_usage_with_network(
+    account: &Account,
+    observed_live: &str,
+    observed_backup: &str,
+    network: &dyn oauth::OAuthNetwork,
+    lock_timeout: Duration,
+) -> Result<oauth::UsageResult, ActiveUsageError> {
+    let observed_is_recoverable_wipe = observed_live.is_empty()
+        || (oauth::extract_oauth_data(observed_live).is_some() && !complete_oauth(observed_live));
+    if !complete_oauth(observed_live)
+        && (!observed_is_recoverable_wipe || !complete_oauth(observed_backup))
+    {
+        return Err(ActiveUsageError::Missing);
+    }
+    let mut force_refresh = false;
+    if complete_oauth(observed_live) {
+        let observed_fingerprint = oauth::credential_fingerprint(observed_live)
+            .unwrap_or_else(|| oauth_refresh::credential_generation(observed_live));
+        if OAuthQuarantine::new(paths::backup_root())
+            .is_rejected(&account.stable_key(), &observed_fingerprint)
+        {
+            return Err(ActiveUsageError::ReloginRequired);
+        }
+    }
+    if complete_oauth(observed_live) && !oauth_expired(observed_live) {
+        match fetch_normalized_usage(network, observed_live).await {
+            Ok(usage) => {
+                let verdict =
+                    verify_active_usage_provenance(account, observed_live, observed_backup).await;
+                if verdict == ProvenanceVerdict::Foreign {
+                    return Err(ActiveUsageError::ForeignCredential);
+                }
+                if verdict == ProvenanceVerdict::Owned
+                    && !same_oauth_lineage(observed_live, observed_backup)
+                {
+                    if let Err(error) =
+                        resync_active_backup_if_current(account, observed_live, lock_timeout).await
+                    {
+                        log::warn!(
+                            "active OAuth usage was attributable but its slot backup could not be resynced: {error:?}"
+                        );
+                    }
+                }
+                return Ok(usage);
+            }
+            Err(oauth::UsageFetchError::Http { status: 401, .. }) => {
+                force_refresh = true;
+            }
+            Err(_) => return Err(ActiveUsageError::Unavailable),
+        }
+    }
+
+    let cached = cached_active_usage_provenance(account, observed_live);
+    if !same_oauth_lineage(observed_live, observed_backup)
+        && !complete_oauth(observed_backup)
+        && cached != Some(ProvenanceVerdict::Owned)
+    {
+        return Err(if cached == Some(ProvenanceVerdict::Foreign) {
+            ActiveUsageError::ForeignCredential
+        } else {
+            ActiveUsageError::Unavailable
+        });
+    }
+
+    // Both active and inactive refresh paths take this per-account lease
+    // before any vault/Claude lock. A snapshot that classified this account
+    // as inactive can therefore finish and persist its successor before the
+    // active path re-reads live state, preventing duplicate grant use.
+    let refresh_leases = oauth_refresh::FileRefreshLeases::new(paths::backup_root(), lock_timeout);
+    let stable_key = account.stable_key();
+    let refresh_lease = refresh_leases
+        .acquire(&stable_key)
+        .await
+        .map_err(|_| ActiveUsageError::Unavailable)?;
+
+    let timeout = lock_timeout;
+    let locks = tokio::task::spawn_blocking(move || {
+        crate::switch_transaction::acquire_active_refresh_locks(timeout)
+    })
+    .await
+    .map_err(|_| ActiveUsageError::Unavailable)?
+    .map_err(|_| ActiveUsageError::Unavailable)?;
+
+    let sequence = read_sequence_data().ok_or(ActiveUsageError::Unavailable)?;
+    if current_account_number(&sequence).as_deref() != Some(account.number.to_string().as_str()) {
+        return Err(ActiveUsageError::Unavailable);
+    }
+    let current_account = accounts_from_sequence(&sequence)
+        .into_iter()
+        .find(|current| {
+            current.number == account.number
+                && current.email == account.email
+                && current.stable_key() == account.stable_key()
+        })
+        .ok_or(ActiveUsageError::Unavailable)?;
+    let (live, backup) = {
+        let mut store = CredentialStore::new(GuiStoreHost);
+        let active = store.read_active_credentials();
+        if active.keychain_unavailable && active.value.as_deref().unwrap_or_default().is_empty() {
+            return Err(ActiveUsageError::Unavailable);
+        }
+        let live = active.value.ok_or(ActiveUsageError::Unavailable)?;
+        (
+            live,
+            store.read_account_credentials(
+                &current_account.number.to_string(),
+                &current_account.email,
+            ),
+        )
+    };
+
+    let live_changed = live != observed_live;
+    if live_changed && complete_oauth(&live) && !oauth_expired(&live) {
+        let licensed = same_oauth_lineage(&live, &backup)
+            || cached_active_usage_provenance(&current_account, &live)
+                == Some(ProvenanceVerdict::Owned);
+        if !licensed {
+            return Err(
+                if cached_active_usage_provenance(&current_account, &live)
+                    == Some(ProvenanceVerdict::Foreign)
+                {
+                    ActiveUsageError::ForeignCredential
+                } else {
+                    ActiveUsageError::Unavailable
+                },
+            );
+        }
+        CredentialStore::new(GuiStoreHost)
+            .write_account_credentials(
+                &current_account.number.to_string(),
+                &current_account.email,
+                &live,
+            )
+            .map_err(|_| ActiveUsageError::Unavailable)?;
+        drop(locks);
+        drop(refresh_lease);
+        return fetch_normalized_usage(network, &live)
+            .await
+            .map_err(|_| ActiveUsageError::Unavailable);
+    }
+
+    if live_changed && !live.is_empty() {
+        let live_verdict = cached_active_usage_provenance(&current_account, &live);
+        let attributable = complete_oauth(&live)
+            && (same_oauth_lineage(&live, &backup)
+                || live_verdict == Some(ProvenanceVerdict::Owned));
+        if !attributable {
+            return Err(if live_verdict == Some(ProvenanceVerdict::Foreign) {
+                ActiveUsageError::ForeignCredential
+            } else {
+                ActiveUsageError::Unavailable
+            });
+        }
+    }
+
+    let (working, restore_live) = if complete_oauth(&backup) && !oauth_expired(&backup) {
+        let restore_live = live != backup;
+        (backup, restore_live)
+    } else if complete_oauth(&live)
+        && (same_oauth_lineage(&live, &backup)
+            || cached_active_usage_provenance(&current_account, &live)
+                == Some(ProvenanceVerdict::Owned))
+    {
+        (live, false)
+    } else if complete_oauth(&backup) {
+        (backup, false)
+    } else {
+        return Err(ActiveUsageError::Unavailable);
+    };
+
+    let working_fingerprint = oauth::credential_fingerprint(&working)
+        .unwrap_or_else(|| oauth_refresh::credential_generation(&working));
+    if OAuthQuarantine::new(paths::backup_root())
+        .is_rejected(&current_account.stable_key(), &working_fingerprint)
+    {
+        return Err(ActiveUsageError::ReloginRequired);
+    }
+    if restore_live {
+        CredentialStore::new(GuiStoreHost)
+            .write_refreshed_oauth_credentials(&working)
+            .map_err(|_| ActiveUsageError::Unavailable)?;
+    }
+
+    if !oauth_expired(&working) && !force_refresh {
+        drop(locks);
+        drop(refresh_lease);
+        return fetch_normalized_usage(network, &working)
+            .await
+            .map_err(|_| ActiveUsageError::Unavailable);
+    }
+
+    let refresh = network.refresh(&working).await;
+    let Some(successor) = refresh.credentials else {
+        if refresh.error == Some(oauth::RefreshError::InvalidGrant) {
+            let fingerprint = oauth::credential_fingerprint(&working)
+                .unwrap_or_else(|| oauth_refresh::credential_generation(&working));
+            OAuthQuarantine::new(paths::backup_root())
+                .reject(
+                    &current_account.stable_key(),
+                    &fingerprint,
+                    chrono::Utc::now(),
+                )
+                .map_err(|_| ActiveUsageError::Unavailable)?;
+            return Err(ActiveUsageError::ReloginRequired);
+        }
+        return Err(ActiveUsageError::Unavailable);
+    };
+    if !complete_oauth(&successor) {
+        return Err(ActiveUsageError::Unavailable);
+    }
+
+    let (backup_write, live_write) = {
+        let mut store = CredentialStore::new(GuiStoreHost);
+        let backup_write = store.write_account_credentials(
+            &current_account.number.to_string(),
+            &current_account.email,
+            &successor,
+        );
+        let live_write = store.write_refreshed_oauth_credentials(&successor);
+        (backup_write, live_write)
+    };
+    match (backup_write, live_write) {
+        (Err(backup_error), Ok(())) => log::warn!(
+            "active OAuth successor reached live storage but backup persistence failed: {backup_error}"
+        ),
+        (_, Err(_)) => return Err(ActiveUsageError::Unavailable),
+        (Ok(()), Ok(())) => {}
+    }
+    // This process consumed the predecessor grant, so the returned
+    // successor is definitively this slot's lineage. Keep that evidence even
+    // if the backup write failed; it licenses safe recovery at the next
+    // expiry, matching cswap's in-memory ownership memo.
+    cache_active_usage_provenance(&current_account, &successor, ProvenanceVerdict::Owned);
+    let successor_fingerprint = oauth::credential_fingerprint(&successor)
+        .unwrap_or_else(|| oauth_refresh::credential_generation(&successor));
+    if let Err(error) = OAuthQuarantine::new(paths::backup_root())
+        .clear_obsolete(&current_account.stable_key(), &successor_fingerprint)
+    {
+        log::warn!("could not clear obsolete OAuth quarantine after active refresh: {error}");
+    }
+    drop(locks);
+    drop(refresh_lease);
+    fetch_normalized_usage(network, &successor)
+        .await
+        .map_err(|_| ActiveUsageError::Unavailable)
+}
+
+async fn fetch_active_usage(
+    account: &Account,
+    observed_live: &str,
+    observed_backup: &str,
+) -> Result<oauth::UsageResult, ActiveUsageError> {
+    let network = oauth::ReqwestOAuthNetwork::with_refresh_timeout(Duration::from_secs(6));
+    fetch_active_usage_with_network(
+        account,
+        observed_live,
+        observed_backup,
+        &network,
+        Duration::from_secs(10),
+    )
+    .await
+}
+
+fn production_refresh_coordinator(timeout: Duration) -> RefreshCoordinator {
+    RefreshCoordinator::new(
+        Arc::new(oauth::ReqwestOAuthNetwork::default()),
+        Arc::new(GuiGenerationStore::new(timeout)),
+        Arc::new(oauth_refresh::FileRefreshLeases::new(
+            paths::backup_root(),
+            timeout,
+        )),
+        Arc::new(oauth_refresh::SystemClock),
+    )
+}
+
+impl GuiGenerationStore {
+    fn new(timeout: Duration) -> Self {
+        Self { timeout }
+    }
+
+    fn with_current<T>(
+        &self,
+        identity: &AccountIdentity,
+        operation: impl FnOnce(&mut CredentialStore<GuiStoreHost>, &Account) -> Result<T, String>,
+    ) -> Result<Option<T>, String> {
+        let _lock = crate::locking::acquire_or_err(vault_lock_path(), self.timeout)
+            .map_err(|error| error.to_string())?;
+        let account = read_accounts()
+            .map_err(|error| error.to_string())?
+            .into_iter()
+            .find(|account| {
+                account.number.to_string() == identity.number
+                    && account.email == identity.email
+                    && account.stable_key() == identity.stable_key
+            });
+        let Some(account) = account else {
+            return Ok(None);
+        };
+        let mut store = CredentialStore::new(GuiStoreHost);
+        operation(&mut store, &account).map(Some)
+    }
+}
+
+impl GenerationStore for GuiGenerationStore {
+    fn read(&self, identity: &AccountIdentity) -> Result<Option<StoredGeneration>, String> {
+        self.with_current(identity, |store, account| {
+            let credentials =
+                store.read_account_credentials(&account.number.to_string(), &account.email);
+            Ok((!credentials.is_empty()).then(|| StoredGeneration::new(credentials)))
+        })
+        .map(Option::flatten)
+    }
+
+    fn compare_and_store(
+        &self,
+        identity: &AccountIdentity,
+        expected_generation: &str,
+        successor: &str,
+    ) -> Result<CompareAndStore, String> {
+        self.with_current(identity, |store, account| {
+            let number = account.number.to_string();
+            let current = store.read_account_credentials(&number, &account.email);
+            if current.is_empty() {
+                return Ok(CompareAndStore::Missing);
+            }
+            let current = StoredGeneration::new(current);
+            let successor = StoredGeneration::new(successor.to_string());
+            if current.generation == successor.generation {
+                return Ok(CompareAndStore::AlreadyCurrent(current));
+            }
+            if current.generation != expected_generation {
+                return Ok(CompareAndStore::Superseded(current));
+            }
+            store
+                .write_account_credentials(&number, &account.email, &successor.credentials)
+                .map_err(|error| error.to_string())?;
+            OAuthQuarantine::new(paths::backup_root())
+                .clear_obsolete(
+                    &identity.stable_key,
+                    oauth::credential_fingerprint(&successor.credentials)
+                        .as_deref()
+                        .unwrap_or(&successor.generation),
+                )
+                .map_err(|error| error.to_string())?;
+            Ok(CompareAndStore::Persisted(successor))
+        })
+        .map(|result| result.unwrap_or(CompareAndStore::Missing))
+    }
+
+    fn is_rejected(&self, identity: &AccountIdentity, credentials: &str) -> Result<bool, String> {
+        let fingerprint = oauth::credential_fingerprint(credentials)
+            .unwrap_or_else(|| oauth_refresh::credential_generation(credentials));
+        self.with_current(identity, |_, _| {
+            Ok(OAuthQuarantine::new(paths::backup_root())
+                .is_rejected(&identity.stable_key, &fingerprint))
+        })
+        .map(|value| value.unwrap_or(false))
+    }
+
+    fn reject_if_current(
+        &self,
+        identity: &AccountIdentity,
+        expected_generation: &str,
+        credentials: &str,
+    ) -> Result<bool, String> {
+        self.with_current(identity, |store, account| {
+            let current =
+                store.read_account_credentials(&account.number.to_string(), &account.email);
+            if current.is_empty()
+                || oauth_refresh::credential_generation(&current) != expected_generation
+            {
+                return Ok(false);
+            }
+            let fingerprint = oauth::credential_fingerprint(credentials)
+                .unwrap_or_else(|| expected_generation.to_string());
+            OAuthQuarantine::new(paths::backup_root())
+                .reject(&identity.stable_key, &fingerprint, chrono::Utc::now())
+                .map_err(|error| error.to_string())?;
+            Ok(true)
+        })
+        .map(|value| value.unwrap_or(false))
+    }
+}
+
+/// Release a dead-token verdict only when a successful credential-ingress
+/// operation proved that the account now carries a different generation.
+///
+/// Current cswap performs the same recovery after add/re-login and also drops
+/// autoswitch quarantines when the stored credential fingerprint changes. A
+/// cleanup failure is deliberately non-fatal here: the credential and registry
+/// write have already committed, and the generation mismatch means the stale
+/// verdict no longer matches even if its file entry remains on disk.
+fn clear_replaced_quarantine(email: &str, organization_uuid: Option<&str>, credentials: &str) {
+    let identity = Account {
+        email: email.to_string(),
+        organization_uuid: organization_uuid.map(str::to_string),
+        ..Account::default()
+    }
+    .stable_key();
+    let fingerprint = oauth::credential_fingerprint(credentials)
+        .unwrap_or_else(|| oauth_refresh::credential_generation(credentials));
+    if let Err(error) =
+        OAuthQuarantine::new(paths::backup_root()).clear_obsolete(&identity, &fingerprint)
+    {
+        log::warn!(
+            "could not clear obsolete OAuth quarantine after credential replacement: {error}"
+        );
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Snapshot (accounts + freshly-fetched usage).
 // ---------------------------------------------------------------------------
@@ -508,8 +1102,9 @@ fn accounts_from_sequence(data: &Map<String, Value>) -> Vec<Account> {
 /// [`Environment`] this port produces (WSL/profile environments are out of
 /// scope here; see `crate::wsl`).
 ///
-/// No lock is held anywhere in this function — rule 2 (never hold the
-/// credential/config lock across a network call). A per-account usage-fetch
+/// No credential store is carried across an await. Profile and final usage
+/// requests run unlocked; the active refresh grant uses the bounded lease and
+/// credential-lock exception documented above. A per-account usage-fetch
 /// failure degrades that account to [`UsageStatus::Stale`] rather than
 /// failing the whole snapshot; a disabled account's status is left alone
 /// either way. (This port has no persistent usage cache — `oauth.rs` and
@@ -518,6 +1113,7 @@ fn accounts_from_sequence(data: &Map<String, Value>) -> Vec<Account> {
 /// cached prior measurement; see the port report.)
 pub async fn read_snapshot() -> Result<Snapshot, SwitchError> {
     let accounts = read_accounts()?;
+    let coordinator = production_refresh_coordinator(Duration::from_secs(10));
 
     // Phase 1 — read every credential up front, then DROP the store before any
     // network call happens.
@@ -526,51 +1122,90 @@ pub async fn read_snapshot() -> Result<Snapshot, SwitchError> {
     // from upstream that no store or lock may be held across I/O. And
     // `CredentialStore` is not `Send`, so holding it across an `.await` makes
     // this future non-`Send`, which Tauri rejects outright for async commands.
-    let mut pending: Vec<(Account, String)> = Vec::with_capacity(accounts.len());
+    let mut pending: Vec<(Account, Option<credentials::ActiveCredentials>, String)> =
+        Vec::with_capacity(accounts.len());
     {
         let mut store = CredentialStore::new(GuiStoreHost);
         for account in accounts {
-            let num = account.number.to_string();
-            // Never refresh the active account's token (rule 5): the
-            // credential for the active slot comes from the *active* store,
-            // and `try_fetch_usage_for_account`'s `is_active` flag (passed
-            // below) is what keeps refresh/retry off it.
-            let creds = if account.active {
-                store.read_active_credentials().value.unwrap_or_default()
+            let (creds, backup) = if account.active {
+                (
+                    Some(store.read_active_credentials()),
+                    store.read_account_credentials(&account.number.to_string(), &account.email),
+                )
             } else {
-                store.read_account_credentials(&num, &account.email)
+                (None, String::new())
             };
-            pending.push((account, creds));
+            pending.push((account, creds, backup));
         }
     }
 
     // Phase 2 — network work, with no credential store held.
     let mut measured = Vec::with_capacity(pending.len());
-    for (mut account, creds) in pending {
+    for (mut account, creds, backup) in pending {
         let num = account.number.to_string();
 
-        if !creds.is_empty() {
-            let outcome = oauth::try_fetch_usage_for_account(
-                &num,
-                &account.email,
-                &creds,
-                account.active,
-                None,
-            )
-            .await;
-            match outcome.usage {
-                Some(result) => {
-                    account.usage = Some(to_model_usage(&result));
-                    account.usage_fetched_at = Some(chrono::Utc::now().to_rfc3339());
-                    account.usage_age_seconds = Some(0.0);
-                    if account.usage_status != UsageStatus::Disabled {
-                        account.usage_status = UsageStatus::Ok;
+        let result = if account.active {
+            match creds {
+                None => Some(Err(oauth_refresh::RefreshCoordinatorError::RefreshFailed(
+                    None,
+                ))),
+                Some(active)
+                    if active.value.is_none()
+                        || (active.keychain_unavailable
+                            && active.value.as_deref().unwrap_or_default().is_empty()) =>
+                {
+                    Some(Err(oauth_refresh::RefreshCoordinatorError::RefreshFailed(
+                        None,
+                    )))
+                }
+                Some(active) => {
+                    let creds = active.value.unwrap_or_default();
+                    match fetch_active_usage(&account, &creds, &backup).await {
+                        Err(ActiveUsageError::ForeignCredential) => {
+                            account.usage_status = UsageStatus::ForeignCredential;
+                            log::warn!(
+                            "active credential resolves to a different account than slot {num}; usage attribution suppressed"
+                        );
+                            None
+                        }
+                        Ok(usage) => Some(Ok(usage)),
+                        Err(ActiveUsageError::Missing) => None,
+                        Err(ActiveUsageError::ReloginRequired) => {
+                            Some(Err(oauth_refresh::RefreshCoordinatorError::ReloginRequired))
+                        }
+                        Err(ActiveUsageError::Unavailable) => Some(Err(
+                            oauth_refresh::RefreshCoordinatorError::RefreshFailed(None),
+                        )),
                     }
                 }
-                None => {
-                    if account.usage_status != UsageStatus::Disabled {
-                        account.usage_status = UsageStatus::Stale;
-                    }
+            }
+        } else {
+            let identity = AccountIdentity {
+                number: num,
+                email: account.email.clone(),
+                stable_key: account.stable_key(),
+            };
+            Some(coordinator.fetch_inactive_usage(&identity).await)
+        };
+
+        match result {
+            Some(Ok(result)) => {
+                account.usage = Some(to_model_usage(&result));
+                account.usage_fetched_at = Some(chrono::Utc::now().to_rfc3339());
+                account.usage_age_seconds = Some(0.0);
+                if account.usage_status != UsageStatus::Disabled {
+                    account.usage_status = UsageStatus::Ok;
+                }
+            }
+            Some(Err(oauth_refresh::RefreshCoordinatorError::ReloginRequired)) => {
+                if account.usage_status != UsageStatus::Disabled {
+                    account.usage_status = UsageStatus::ReloginRequired;
+                }
+            }
+            Some(Err(oauth_refresh::RefreshCoordinatorError::Missing)) | None => {}
+            Some(Err(_)) => {
+                if account.usage_status != UsageStatus::Disabled {
+                    account.usage_status = UsageStatus::Unavailable;
                 }
             }
         }
@@ -648,12 +1283,9 @@ fn to_model_usage(u: &oauth::UsageResult) -> Usage {
 //   exact same OS primitive, which is the entire interop contract).
 //
 // So any function that writes the official files — today, only [`switch_to`]
-// — must hold BOTH locks for the whole mutation, and every such caller must
-// acquire them in the SAME order, or two processes taking the two locks in
-// opposite orders could deadlock each other. [`acquire_cswap_and_vault_locks`]
-// is that one order, enforced structurally by being the only way any function
-// in this module acquires both: cswap-compat lock first, our vault lock
-// second. A function that only ever touches our own vault (`add_current_account`,
+// — holds the complete lock set from `crate::switch_transaction`: cswap's
+// account lock, Claude's primary + legacy credential locks, Claude's config
+// lock, then our vault lock. A function that only ever touches our own vault (`add_current_account`,
 // `add_token`, `set_account_enabled`) has no reason to take the cswap lock at
 // all — there is nothing there for another process to race it on — so those
 // take [`vault_lock_path`] alone.
@@ -668,12 +1300,10 @@ fn to_model_usage(u: &oauth::UsageResult) -> Usage {
 // this app otherwise never touches — see [`import_from_cswap`]'s doc for the
 // read side of that same directory.
 
-/// Acquire, in order, the `cswap`-compatible lock (only if that CLI's store
-/// directory already exists) and then our own vault lock. See the module
-/// section above this function for the full reasoning; this is the single
-/// choke point every caller that needs both locks must go through, so the
-/// acquisition order can never drift out of sync between call sites.
-fn acquire_cswap_and_vault_locks(
+/// Import-only coordination: lock cswap's source store before this GUI's
+/// destination vault. Imports never touch Claude's live credential/config,
+/// so the Claude directory locks deliberately are not part of this helper.
+fn acquire_import_locks(
     timeout: Duration,
 ) -> Result<(Option<crate::locking::FileLock>, crate::locking::FileLock), SwitchError> {
     let cswap_root = paths::cswap_store_root();
@@ -695,54 +1325,266 @@ fn acquire_cswap_and_vault_locks(
 
 /// Switch the live login to `target`'s stored credential.
 ///
-/// Holds BOTH the `cswap`-compat lock (when that CLI's store exists) and our
-/// own vault lock for the whole mutation — see
-/// [`acquire_cswap_and_vault_locks`] for why two locks and why this order.
-/// No network call is made anywhere in this function (rules 2 and 5 fall out
-/// for free). Order of operations, matching upstream's `_perform_switch`:
+/// Holds the complete cswap/Claude/vault lock set for the whole mutation —
+/// see `crate::switch_transaction` for the canonical order.
+/// OAuth freshening is the only network phase and completes before those
+/// mutation locks are acquired. Order of operations:
 ///
-/// 1. Read the active credential (local I/O only).
-/// 2. **Back up the outgoing login** — the account currently live (resolved
+/// 1. Re-resolve the target and freshen its latest stored generation.
+/// 2. Acquire mutation locks, re-resolve the target, and require the exact
+///    validated full-content generation plus a valid config backup.
+/// 3. Read and **back up the outgoing login** — the account currently live (resolved
 ///    from `~/.claude.json`'s `oauthAccount`, not from a possibly-stale
 ///    `activeAccountNumber`) has its credential and config snapshot written
-///    to its backup slot *before* anything about the target is written or
-///    even validated. An unmanaged/unattributable live credential (no
+///    to its backup slot before anything about the target is installed. An unmanaged/unattributable live credential (no
 ///    resolvable slot) is preserved via
 ///    [`CredentialStore::write_unclaimed_credential`] instead of a normal
 ///    slot backup, so a fresh-machine or drifted-login switch still never
 ///    silently destroys it.
-/// 3. Validate and read the target's stored credential + config backup.
 /// 4. **Install** the target credential (composed with the machine's live
 ///    shared OAuth fields, mirroring `_prepare_credentials_for_activation`)
 ///    and splice its `oauthAccount` block into the global config.
 /// 5. Update `sequence.json`'s `activeAccountNumber`.
 ///
-/// A failure at step 3 or 4 leaves step 2's backup in place and never reaches
-/// the write in step 4, so a switch that can't complete fails without ever
-/// touching the live login — see the
-/// `backup_happens_before_target_validation…` test.
-///
-/// Not reproduced from upstream: cross-file transactional rollback (Python's
-/// `SwitchTransaction`), self-switch no-op short-circuiting, `--force`
-/// direct-activation, and foreign-credential provenance classification
-/// (network-based ownership resolution before backing up divergent live
-/// bytes). See the port report.
-pub fn switch_to(target: &Account) -> Result<(), SwitchError> {
-    switch_to_with_timeout(target, crate::locking::DEFAULT_TIMEOUT)
+/// CLI-only self-switch and `--force` modes are not reproduced. The normal GUI
+/// path does reproduce upstream's foreign-credential classification and adds a
+/// durable cross-file journal through [`crate::switch_transaction`].
+pub async fn switch_to(target: &Account) -> Result<(), SwitchError> {
+    let timeout = crate::locking::DEFAULT_TIMEOUT;
+    let coordinator = production_refresh_coordinator(timeout);
+    switch_to_with_coordinator(target, &coordinator, timeout).await
 }
 
-fn switch_to_with_timeout(target: &Account, timeout: Duration) -> Result<(), SwitchError> {
+async fn switch_to_with_coordinator(
+    target: &Account,
+    coordinator: &RefreshCoordinator,
+    timeout: Duration,
+) -> Result<(), SwitchError> {
+    // A refresh winner may land between network validation and acquisition of
+    // the complete mutation lock set. Re-resolve and retry from that winner;
+    // never activate the stale callback's bytes.
+    for _ in 0..3 {
+        let identity = target_identity_with_timeout(target.number, timeout)?;
+        let validated = coordinator.freshen_for_activation(&identity).await?;
+        let provenance = prefetch_live_provenance().await;
+        match switch_to_validated_with_timeout(target, &validated, &provenance, timeout) {
+            Err(SwitchError::TargetGenerationChanged(_)) => continue,
+            result => return result,
+        }
+    }
+    Err(SwitchError::TargetGenerationChanged(
+        target.number.to_string(),
+    ))
+}
+
+#[derive(Debug, Clone, Default)]
+struct LiveProvenance {
+    live: String,
+    resolved: Option<oauth::TokenAccount>,
+}
+
+async fn prefetch_live_provenance() -> LiveProvenance {
+    let mut store = CredentialStore::new(GuiStoreHost);
+    let live = store.read_active_credentials().value.unwrap_or_default();
+    let resolved = match oauth::extract_access_token(&live) {
+        Some(token) => oauth::fetch_oauth_profile(&token).await,
+        None => None,
+    };
+    LiveProvenance { live, resolved }
+}
+
+fn classify_outgoing_destination(
+    store: &mut CredentialStore<GuiStoreHost>,
+    data: &mut Map<String, Value>,
+    current_num: &str,
+    current_email: &str,
+    live: &str,
+    provenance: &LiveProvenance,
+) -> crate::switch_transaction::OutgoingDestination {
+    let own_backup = store.read_account_credentials(current_num, current_email);
+    if !own_backup.is_empty()
+        && (own_backup == live
+            || oauth::credential_fingerprint(&own_backup) == oauth::credential_fingerprint(live))
+    {
+        return crate::switch_transaction::OutgoingDestination::Managed {
+            number: current_num.to_string(),
+            email: current_email.to_string(),
+            config_backup_path: account_config_path(current_num, current_email),
+        };
+    }
+
+    let tokens_wiped = oauth::extract_oauth_data(live).is_some_and(|oauth| {
+        !oauth
+            .get("accessToken")
+            .and_then(Value::as_str)
+            .is_some_and(|token| !token.is_empty())
+            && !oauth
+                .get("refreshToken")
+                .and_then(Value::as_str)
+                .is_some_and(|token| !token.is_empty())
+    });
+    if tokens_wiped {
+        log::warn!(
+            "live credential tokens are wiped; preserving them outside account {current_num}"
+        );
+        return crate::switch_transaction::OutgoingDestination::Unclaimed;
+    }
+
+    let Some(resolved) = provenance
+        .resolved
+        .as_ref()
+        .filter(|_| provenance.live == live)
+    else {
+        // Same fail-open rule as current cswap: an unavailable/advisory
+        // identity oracle must not discard a legitimate local rotation.
+        return crate::switch_transaction::OutgoingDestination::Managed {
+            number: current_num.to_string(),
+            email: current_email.to_string(),
+            config_backup_path: account_config_path(current_num, current_email),
+        };
+    };
+
+    let accounts = data.get("accounts").and_then(Value::as_object);
+    let own = accounts.and_then(|accounts| accounts.get(current_num));
+    let own_uuid = own
+        .and_then(|record| record.get("uuid"))
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    let own_org = own
+        .and_then(|record| record.get("organizationUuid"))
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    let resolved_org = resolved.organization_uuid.as_deref().unwrap_or_default();
+    if !own_uuid.is_empty()
+        && resolved.uuid == own_uuid
+        && (resolved_org.is_empty() || own_org.is_empty() || resolved_org == own_org)
+    {
+        return crate::switch_transaction::OutgoingDestination::Managed {
+            number: current_num.to_string(),
+            email: current_email.to_string(),
+            config_backup_path: account_config_path(current_num, current_email),
+        };
+    }
+
+    let mut matched_slot = accounts.and_then(|accounts| {
+        resolved.email.as_deref().and_then(|resolved_email| {
+            accounts.iter().find_map(|(number, record)| {
+                let email = record.get("email")?.as_str()?;
+                let org = record
+                    .get("organizationUuid")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default();
+                (email.trim().eq_ignore_ascii_case(resolved_email.trim()) && org == resolved_org)
+                    .then(|| number.clone())
+            })
+        })
+    });
+    if !resolved.uuid.is_empty() {
+        if let Some(stored_uuid) = matched_slot.as_deref().and_then(|slot| {
+            accounts
+                .and_then(|accounts| accounts.get(slot))
+                .and_then(|record| record.get("uuid"))
+                .and_then(Value::as_str)
+                .filter(|uuid| !uuid.is_empty())
+        }) {
+            if stored_uuid != resolved.uuid {
+                // Same email/org with a conflicting account UUID is a
+                // recycled identity, never ownership of that slot.
+                matched_slot = None;
+            }
+        }
+    }
+    if matched_slot.is_none() && !resolved.uuid.is_empty() {
+        matched_slot = accounts.and_then(|accounts| {
+            accounts.iter().find_map(|(number, record)| {
+                let uuid = record.get("uuid")?.as_str()?;
+                let org = record
+                    .get("organizationUuid")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default();
+                (uuid == resolved.uuid && org == resolved_org).then(|| number.clone())
+            })
+        });
+    }
+
+    if matched_slot.as_deref() == Some(current_num) {
+        if own_uuid.is_empty() && !resolved.uuid.is_empty() {
+            if let Some(record) = data
+                .get_mut("accounts")
+                .and_then(Value::as_object_mut)
+                .and_then(|accounts| accounts.get_mut(current_num))
+                .and_then(Value::as_object_mut)
+            {
+                record.insert("uuid".to_string(), Value::String(resolved.uuid.clone()));
+            }
+        }
+        return crate::switch_transaction::OutgoingDestination::Managed {
+            number: current_num.to_string(),
+            email: current_email.to_string(),
+            config_backup_path: account_config_path(current_num, current_email),
+        };
+    }
+
+    let structurally_complete = resolved.email.is_some() && resolved.organization_uuid.is_some();
+    let foreign_uuid_confirmed = matched_slot.as_deref().is_some_and(|slot| {
+        accounts
+            .and_then(|accounts| accounts.get(slot))
+            .and_then(|record| record.get("uuid"))
+            .and_then(Value::as_str)
+            .is_some_and(|uuid| !uuid.is_empty() && uuid == resolved.uuid)
+    });
+    if foreign_uuid_confirmed || structurally_complete {
+        log::warn!(
+            "live credential identity does not belong to configured account {current_num}; \
+             preserving it in the unclaimed safety store"
+        );
+        crate::switch_transaction::OutgoingDestination::Unclaimed
+    } else {
+        crate::switch_transaction::OutgoingDestination::Managed {
+            number: current_num.to_string(),
+            email: current_email.to_string(),
+            config_backup_path: account_config_path(current_num, current_email),
+        }
+    }
+}
+
+fn target_identity_with_timeout(
+    target_number: u32,
+    timeout: Duration,
+) -> Result<AccountIdentity, SwitchError> {
+    let _lock = crate::locking::acquire_or_err(vault_lock_path(), timeout)?;
+    let account = read_accounts()?
+        .into_iter()
+        .find(|account| account.number == target_number)
+        .ok_or_else(|| SwitchError::UnknownAccount(target_number.to_string()))?;
+    Ok(AccountIdentity {
+        number: target_number.to_string(),
+        email: account.email.clone(),
+        stable_key: account.stable_key(),
+    })
+}
+
+fn switch_to_validated_with_timeout(
+    target: &Account,
+    validated: &ValidatedCredential,
+    provenance: &LiveProvenance,
+    timeout: Duration,
+) -> Result<(), SwitchError> {
     let num = target.number.to_string();
 
     // Rule 1: lock before touching anything, for the whole mutation. This
     // function writes Claude Code's official files (step 4 below), so it
-    // needs both locks — see `acquire_cswap_and_vault_locks`.
-    let (_cswap_lock, _lock) = acquire_cswap_and_vault_locks(timeout)?;
+    // needs the complete cross-process lock set.
+    let _locks = crate::switch_transaction::acquire_live_state_locks(timeout)?;
 
     let mut data = read_sequence_data().ok_or(SwitchError::NoAccountsManaged)?;
 
     // Source of truth for the target's email is the registry, not whatever
     // the caller's (possibly stale) `Account` says.
+    let target_account = accounts_from_sequence(&data)
+        .into_iter()
+        .find(|account| account.number == target.number)
+        .ok_or_else(|| SwitchError::UnknownAccount(num.clone()))?;
     let email = data
         .get("accounts")
         .and_then(Value::as_object)
@@ -754,55 +1596,23 @@ fn switch_to_with_timeout(target: &Account, timeout: Duration) -> Result<(), Swi
 
     let mut store = CredentialStore::new(GuiStoreHost);
 
-    let active = store.read_active_credentials();
-    let original_creds = active.value.ok_or(SwitchError::CredentialRead)?;
-
-    let current_num = current_account_number(&data);
-
-    // Step 2: back up the outgoing login BEFORE anything about the target is
-    // written (rule 3).
-    match &current_num {
-        Some(cur_num) => {
-            if original_creds.is_empty() {
-                // An empty read (e.g. a settling Keychain) must never be
-                // written over the departing account's backup.
-                return Err(SwitchError::EmptyActiveCredential(cur_num.clone()));
-            }
-            let cur_email = data
-                .get("accounts")
-                .and_then(Value::as_object)
-                .and_then(|accounts| accounts.get(cur_num))
-                .and_then(|record| record.get("email"))
-                .and_then(Value::as_str)
-                .unwrap_or_default()
-                .to_string();
-
-            let config_text = std::fs::read_to_string(paths::global_config_path())?;
-
-            store.write_account_credentials(cur_num, &cur_email, &original_creds)?;
-            write_account_config(cur_num, &cur_email, &config_text)?;
-        }
-        None => {
-            if !original_creds.is_empty() {
-                // Live credential with no resolvable managed slot (fresh
-                // machine, or a login that drifted out from under cswap's
-                // records). Preserve it rather than silently overwrite it.
-                let mut context = Map::new();
-                context.insert(
-                    "reason".to_string(),
-                    Value::String("displaced-live-login".to_string()),
-                );
-                store
-                    .write_unclaimed_credential(&original_creds, context)
-                    .map_err(|e| SwitchError::Stash(e.to_string()))?;
-            }
-        }
+    // Validate every target artifact, including the exact credential
+    // generation returned by the network phase, before reading or backing up
+    // the outgoing login. This is the mutation boundary's core invariant.
+    if validated.identity.number != num
+        || validated.identity.email != email
+        || validated.identity.stable_key != target_account.stable_key()
+    {
+        return Err(SwitchError::TargetGenerationChanged(num));
     }
-
-    // Step 3: validate and read the target's stored backups.
     let target_creds = store.read_account_credentials(&num, &email);
     if target_creds.is_empty() {
         return Err(SwitchError::NoStoredCredentials(num));
+    }
+    if oauth_refresh::credential_generation(&target_creds) != validated.generation
+        || target_creds != validated.credentials
+    {
+        return Err(SwitchError::TargetGenerationChanged(num));
     }
     let target_config_text = read_account_config(&num, &email)
         .ok_or_else(|| SwitchError::NoStoredConfig(num.clone()))?;
@@ -812,45 +1622,70 @@ fn switch_to_with_timeout(target: &Account, timeout: Duration) -> Result<(), Swi
         .cloned()
         .ok_or_else(|| SwitchError::InvalidBackupConfig(num.clone()))?;
 
-    // Step 4: install. Compose the target's stored login with the machine's
-    // live shared OAuth fields (mcpOAuth, pluginSecrets, ...) so activation
-    // doesn't regress those to the target's last-seen generation.
-    let shared = shared_credential_fields(Some(&original_creds)).unwrap_or_default();
-    let prepared = merge_shared_credential_fields(&target_creds, &shared);
-    store.write_credentials(&prepared)?;
-    write_oauth_account(&target_oauth)?;
+    let current_num = current_account_number(&data);
+    let outgoing = match &current_num {
+        Some(cur_num) => {
+            let cur_email = data
+                .get("accounts")
+                .and_then(Value::as_object)
+                .and_then(|accounts| accounts.get(cur_num))
+                .and_then(|record| record.get("email"))
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_string();
+            let live = store
+                .read_active_credentials()
+                .value
+                .ok_or(SwitchError::CredentialRead)?;
+            classify_outgoing_destination(
+                &mut store, &mut data, cur_num, &cur_email, &live, provenance,
+            )
+        }
+        None => crate::switch_transaction::OutgoingDestination::Unclaimed,
+    };
 
-    // Step 5: record the new active slot.
-    data.insert(
-        "activeAccountNumber".to_string(),
-        Value::from(target.number),
-    );
-    data.insert(
-        "lastUpdated".to_string(),
-        Value::String(chrono::Utc::now().to_rfc3339()),
-    );
-    write_sequence_data(&data)?;
-
+    crate::switch_transaction::execute_locked(
+        &mut store,
+        crate::switch_transaction::SwitchPlan {
+            target: crate::switch_journal::JournalTarget {
+                number: num,
+                email,
+                stable_key: target_account.stable_key(),
+                credential_generation: validated.generation.clone(),
+            },
+            target_credentials: validated.credentials.clone(),
+            target_oauth,
+            sequence: data,
+            sequence_path: accounts_file(),
+            global_config_path: paths::global_config_path(),
+            outgoing,
+        },
+        &crate::switch_transaction::NoFaults,
+    )?;
     Ok(())
 }
 
-/// Splice `oauth_account` into `~/.claude.json`'s `oauthAccount` key,
-/// preserving every other key untouched (rule 6: the path itself comes from
-/// `paths::global_config_path`, never hand-rolled).
-fn write_oauth_account(oauth_account: &Value) -> Result<(), SwitchError> {
-    let path = paths::global_config_path();
-    let mut config: Map<String, Value> = if path.exists() {
-        match serde_json::from_str::<Value>(&std::fs::read_to_string(&path)?)? {
-            Value::Object(map) => map,
-            _ => Map::new(),
-        }
-    } else {
-        Map::new()
+#[cfg(test)]
+fn switch_to_with_timeout(target: &Account, timeout: Duration) -> Result<(), SwitchError> {
+    let identity = target_identity_with_timeout(target.number, timeout)?;
+    let stored = GuiGenerationStore::new(timeout)
+        .read(&identity)
+        .map_err(oauth_refresh::RefreshCoordinatorError::PersistenceFailed)?
+        .ok_or(oauth_refresh::RefreshCoordinatorError::Missing)?;
+    let validated = ValidatedCredential {
+        identity,
+        credentials: stored.credentials,
+        generation: stored.generation,
     };
-    config.insert("oauthAccount".to_string(), oauth_account.clone());
-    let body = serde_json::to_string_pretty(&Value::Object(config))?;
-    atomic_write(&path, body.as_bytes())?;
-    Ok(())
+    let mut active_store = CredentialStore::new(GuiStoreHost);
+    let provenance = LiveProvenance {
+        live: active_store
+            .read_active_credentials()
+            .value
+            .unwrap_or_default(),
+        resolved: None,
+    };
+    switch_to_validated_with_timeout(target, &validated, &provenance, timeout)
 }
 
 // ---------------------------------------------------------------------------
@@ -868,6 +1703,14 @@ fn write_oauth_account(oauth_account: &Value) -> Result<(), SwitchError> {
 fn ensure_accounts_object(data: &mut Map<String, Value>) {
     if !matches!(data.get("accounts"), Some(Value::Object(_))) {
         data.insert("accounts".to_string(), Value::Object(Map::new()));
+    }
+}
+
+fn refuse_pending_recovery() -> Result<(), SwitchError> {
+    if crate::switch_transaction::recovery_requirement().is_some() {
+        Err(crate::switch_transaction::TransactionError::RecoveryRequired.into())
+    } else {
+        Ok(())
     }
 }
 
@@ -1184,8 +2027,9 @@ fn add_current_account_with_timeout(
 
     // Only our own vault is written here (the live login is read, never
     // written) — no cswap-compat lock needed, see the module-level locking
-    // section above `acquire_cswap_and_vault_locks`.
+    // locking section above.
     let _lock = crate::locking::acquire_or_err(vault_lock_path(), timeout)?;
+    refuse_pending_recovery()?;
 
     let mut data = read_sequence_data().unwrap_or_default();
     ensure_accounts_object(&mut data);
@@ -1249,10 +2093,10 @@ fn add_current_account_with_timeout(
     write_account_config(&num, &email, &config_text)?;
 
     let mut record = Map::new();
-    record.insert("email".to_string(), Value::String(email));
+    record.insert("email".to_string(), Value::String(email.clone()));
     record.insert(
         "organizationUuid".to_string(),
-        Value::String(organization_uuid),
+        Value::String(organization_uuid.clone()),
     );
     record.insert(
         "organizationName".to_string(),
@@ -1287,6 +2131,7 @@ fn add_current_account_with_timeout(
         Value::String(chrono::Utc::now().to_rfc3339()),
     );
     write_sequence_data(&data)?;
+    clear_replaced_quarantine(&email, Some(&organization_uuid), &live_creds);
 
     Ok(slot)
 }
@@ -1407,6 +2252,7 @@ fn add_token_with_timeout(
     // Vault-only write (never touches the official files) — vault lock alone
     // suffices, same reasoning as `add_current_account_with_timeout`.
     let _lock = crate::locking::acquire_or_err(vault_lock_path(), timeout)?;
+    refuse_pending_recovery()?;
 
     let mut data = read_sequence_data().unwrap_or_default();
     ensure_accounts_object(&mut data);
@@ -1460,7 +2306,7 @@ fn add_token_with_timeout(
     write_account_config(&num, &resolved_email, &config_payload)?;
 
     let mut record = Map::new();
-    record.insert("email".to_string(), Value::String(resolved_email));
+    record.insert("email".to_string(), Value::String(resolved_email.clone()));
     record.insert(
         "organizationUuid".to_string(),
         Value::String(new_identity.organization_uuid.clone().unwrap_or_default()),
@@ -1494,6 +2340,11 @@ fn add_token_with_timeout(
         Value::String(chrono::Utc::now().to_rfc3339()),
     );
     write_sequence_data(&data)?;
+    clear_replaced_quarantine(
+        &resolved_email,
+        new_identity.organization_uuid.as_deref(),
+        &credentials_payload,
+    );
 
     Ok(slot)
 }
@@ -1559,6 +2410,133 @@ pub fn add_oauth_credential(
     )
 }
 
+/// Replace one existing slot's OAuth credential after an isolated re-login.
+///
+/// This mirrors cswap's add-existing-account behavior: keep the slot and all
+/// registry metadata, replace only its credential generation, and clear the
+/// obsolete dead-token verdict after the writes commit. Replacement is stricter
+/// than a new add: an unresolved or mismatched identity fails closed because a
+/// credential must never be written into a user-selected slot on guesswork.
+pub fn replace_oauth_credential(
+    account_number: u32,
+    credentials_json: &str,
+    uuid: Option<&str>,
+    email: Option<&str>,
+    organization_uuid: Option<&str>,
+) -> Result<(), SwitchError> {
+    replace_oauth_credential_with_timeout(
+        account_number,
+        credentials_json,
+        uuid,
+        email,
+        organization_uuid,
+        crate::locking::DEFAULT_TIMEOUT,
+    )
+}
+
+fn replace_oauth_credential_with_timeout(
+    account_number: u32,
+    credentials_json: &str,
+    uuid: Option<&str>,
+    email: Option<&str>,
+    organization_uuid: Option<&str>,
+    timeout: Duration,
+) -> Result<(), SwitchError> {
+    let trimmed = credentials_json.trim();
+    let oauth = oauth::extract_oauth_data(trimmed).ok_or_else(|| {
+        SwitchError::InvalidCredential("credential is not valid OAuth JSON".to_string())
+    })?;
+    let has_token_pair = ["accessToken", "refreshToken"].into_iter().all(|field| {
+        oauth
+            .get(field)
+            .and_then(Value::as_str)
+            .is_some_and(|value| !value.is_empty())
+    });
+    if !has_token_pair {
+        return Err(SwitchError::InvalidCredential(
+            "credential lacks a complete OAuth token pair".to_string(),
+        ));
+    }
+
+    let replacement_identity = ResolvedIdentity {
+        uuid: uuid.filter(|value| !value.is_empty()).map(str::to_string),
+        organization_uuid: organization_uuid
+            .filter(|value| !value.is_empty())
+            .map(str::to_string),
+        email: email.filter(|value| !value.is_empty()).map(str::to_string),
+    };
+    if replacement_identity.uuid.is_none()
+        && (replacement_identity.organization_uuid.is_none()
+            || replacement_identity.email.is_none())
+    {
+        return Err(SwitchError::InvalidCredential(
+            "the signed-in account identity could not be verified; try again while online"
+                .to_string(),
+        ));
+    }
+
+    // This may update both the vault and Claude Code's active credential, so
+    // use the complete canonical lock set even for an inactive target.
+    let _locks = crate::switch_transaction::acquire_live_state_locks(timeout)?;
+    if crate::switch_transaction::recovery_requirement().is_some() {
+        return Err(crate::switch_transaction::TransactionError::RecoveryRequired.into());
+    }
+
+    let data = read_sequence_data().ok_or(SwitchError::NoAccountsManaged)?;
+    let number = account_number.to_string();
+    let record = data
+        .get("accounts")
+        .and_then(Value::as_object)
+        .and_then(|accounts| accounts.get(&number))
+        .and_then(Value::as_object)
+        .ok_or_else(|| SwitchError::UnknownAccount(number.clone()))?;
+    let existing_identity = identity_from_record(record);
+    if !identity_matches(&replacement_identity, &existing_identity) {
+        return Err(SwitchError::InvalidCredential(format!(
+            "the signed-in account does not match account {number}"
+        )));
+    }
+    let stored_email = record
+        .get("email")
+        .and_then(Value::as_str)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| SwitchError::InvalidCredential("stored account has no email".into()))?
+        .to_string();
+    let stable_key = accounts_from_sequence(&data)
+        .into_iter()
+        .find(|account| account.number == account_number)
+        .ok_or_else(|| SwitchError::UnknownAccount(number.clone()))?
+        .stable_key();
+
+    let mut store = CredentialStore::new(GuiStoreHost);
+    let previous = store.read_account_credentials(&number, &stored_email);
+    store.write_account_credentials(&number, &stored_email, trimmed)?;
+
+    if current_account_number(&data).as_deref() == Some(number.as_str()) {
+        if let Err(error) = store.write_refreshed_oauth_credentials(trimmed) {
+            if !previous.is_empty() {
+                if let Err(restore_error) =
+                    store.write_account_credentials(&number, &stored_email, &previous)
+                {
+                    return Err(SwitchError::Credential(CredentialError::Write(format!(
+                        "active re-login failed and the previous slot backup could not be restored: {restore_error}"
+                    ))));
+                }
+            }
+            return Err(error.into());
+        }
+    }
+
+    let fingerprint = oauth::credential_fingerprint(trimmed)
+        .unwrap_or_else(|| oauth_refresh::credential_generation(trimmed));
+    if let Err(error) =
+        OAuthQuarantine::new(paths::backup_root()).clear_obsolete(&stable_key, &fingerprint)
+    {
+        log::warn!("could not clear obsolete OAuth quarantine after re-login: {error}");
+    }
+    Ok(())
+}
+
 fn add_oauth_credential_with_timeout(
     credentials_json: &str,
     email: Option<&str>,
@@ -1603,6 +2581,7 @@ fn add_oauth_credential_with_timeout(
     // vault lock alone suffices, same reasoning as
     // `add_current_account_with_timeout`.
     let _lock = crate::locking::acquire_or_err(vault_lock_path(), timeout)?;
+    refuse_pending_recovery()?;
 
     let mut data = read_sequence_data().unwrap_or_default();
     ensure_accounts_object(&mut data);
@@ -1663,7 +2642,7 @@ fn add_oauth_credential_with_timeout(
     write_account_config(&num, &resolved_email, &config_payload)?;
 
     let mut record = Map::new();
-    record.insert("email".to_string(), Value::String(resolved_email));
+    record.insert("email".to_string(), Value::String(resolved_email.clone()));
     record.insert(
         "organizationUuid".to_string(),
         Value::String(new_identity.organization_uuid.clone().unwrap_or_default()),
@@ -1695,6 +2674,11 @@ fn add_oauth_credential_with_timeout(
         Value::String(chrono::Utc::now().to_rfc3339()),
     );
     write_sequence_data(&data)?;
+    clear_replaced_quarantine(
+        &resolved_email,
+        new_identity.organization_uuid.as_deref(),
+        trimmed,
+    );
 
     Ok(slot)
 }
@@ -1723,6 +2707,7 @@ fn set_account_enabled_with_timeout(
     // `disabled` lives only in our own sequence.json — vault-only, same
     // reasoning as `add_current_account_with_timeout`.
     let _lock = crate::locking::acquire_or_err(vault_lock_path(), timeout)?;
+    refuse_pending_recovery()?;
 
     let mut data = read_sequence_data().ok_or(SwitchError::NoAccountsManaged)?;
     let num = number.to_string();
@@ -1813,7 +2798,7 @@ pub struct ImportOutcome {
 /// If `<cswap_store_root>` does not exist at all, this returns
 /// `Ok(ImportOutcome::default())` without taking any lock and without
 /// touching the filesystem — same reasoning as
-/// `acquire_cswap_and_vault_locks`: no directory means no `cswap` install to
+/// `acquire_import_locks`: no directory means no `cswap` install to
 /// import from, and we must not go looking for one by creating it.
 ///
 /// # Locking
@@ -1821,7 +2806,7 @@ pub struct ImportOutcome {
 /// When the source directory does exist, this acquires the cswap-compat lock
 /// (for a consistent read of a registry the CLI might be concurrently
 /// mutating) and then our own vault lock (we are about to write into it) —
-/// via [`acquire_cswap_and_vault_locks`], the same order [`switch_to`] uses.
+/// via `acquire_import_locks`: source first, then destination.
 ///
 /// # Duplicate detection
 ///
@@ -1846,7 +2831,8 @@ fn import_from_cswap_with_timeout(timeout: Duration) -> Result<ImportOutcome, Sw
         return Ok(ImportOutcome::default());
     }
 
-    let (_cswap_lock, _lock) = acquire_cswap_and_vault_locks(timeout)?;
+    let (_cswap_lock, _lock) = acquire_import_locks(timeout)?;
+    refuse_pending_recovery()?;
 
     let Some(source_data) = read_sequence_data_at(&cswap_root) else {
         return Ok(ImportOutcome::default());
@@ -1874,6 +2860,7 @@ fn import_from_cswap_with_timeout(timeout: Duration) -> Result<ImportOutcome, Sw
 
     let mut imported = 0u32;
     let mut skipped = 0u32;
+    let mut replaced_generations = Vec::new();
 
     for source_num in nums {
         let Some(record) = source_accounts.get(&source_num).and_then(Value::as_object) else {
@@ -1928,6 +2915,11 @@ fn import_from_cswap_with_timeout(timeout: Duration) -> Result<ImportOutcome, Sw
             .expect("ensure_accounts_object guarantees this")
             .insert(dest_num, Value::Object(new_record));
         add_to_sequence(&mut dest_data, slot);
+        let organization_uuid = record
+            .get("organizationUuid")
+            .and_then(Value::as_str)
+            .map(str::to_string);
+        replaced_generations.push((email, organization_uuid, credential));
 
         imported += 1;
     }
@@ -1938,6 +2930,9 @@ fn import_from_cswap_with_timeout(timeout: Duration) -> Result<ImportOutcome, Sw
             Value::String(chrono::Utc::now().to_rfc3339()),
         );
         write_sequence_data(&dest_data)?;
+        for (email, organization_uuid, credential) in replaced_generations {
+            clear_replaced_quarantine(&email, organization_uuid.as_deref(), &credential);
+        }
     }
 
     Ok(ImportOutcome { imported, skipped })
@@ -1972,11 +2967,10 @@ pub enum Strategy {
 /// `MostHeadroom` doesn't require beating a specific current account, only
 /// that some switchable candidate provably has real headroom, and
 /// `NextAvailable` scans from the front of `accounts` rather than from just
-/// after wherever "current" is. `Account::is_switchable` already excludes the
-/// active account itself, disabled slots, and expired logins, so none of
-/// those are ever returned. An account with `UNKNOWN` usage
-/// (`Account::headroom() == None`) is never treated as ineligible by
-/// `is_switchable` — see each strategy's handling of that case below.
+/// after wherever "current" is. `Account::is_automatic_target` excludes the
+/// active account, disabled/dead slots, stale or unavailable measurements,
+/// unknown headroom, and exhausted accounts. Manual switching retains a
+/// separate, more permissive validation path.
 pub fn pick_target(accounts: &[Account], strategy: Strategy) -> Option<&Account> {
     match strategy {
         Strategy::MostHeadroom => pick_most_headroom(accounts),
@@ -1995,7 +2989,7 @@ pub fn pick_target(accounts: &[Account], strategy: Strategy) -> Option<&Account>
 fn pick_most_headroom(accounts: &[Account]) -> Option<&Account> {
     let mut best: Option<(&Account, f64)> = None;
     for account in accounts {
-        if !account.is_switchable() {
+        if !account.is_automatic_target() {
             continue;
         }
         if let Some(headroom) = account.headroom() {
@@ -2019,13 +3013,10 @@ fn pick_most_headroom(accounts: &[Account]) -> Option<&Account> {
 /// be exhausted, or there are no switchable accounts at all.
 fn pick_next_available(accounts: &[Account]) -> Option<&Account> {
     for account in accounts {
-        if !account.is_switchable() {
+        if !account.is_automatic_target() {
             continue;
         }
-        match account.headroom() {
-            Some(headroom) if headroom <= 0.0 => continue, // known-exhausted: skip
-            _ => return Some(account),                     // unknown or real headroom: take it
-        }
+        return Some(account);
     }
     None
 }
@@ -2039,7 +3030,7 @@ fn pick_next_available(accounts: &[Account]) -> Option<&Account> {
 fn pick_consume_first(accounts: &[Account]) -> Option<&Account> {
     let mut candidates: Vec<(f64, f64, &Account)> = Vec::new();
     for account in accounts {
-        if !account.is_switchable() {
+        if !account.is_automatic_target() {
             continue;
         }
         let Some(headroom) = account.headroom() else {
@@ -2090,8 +3081,94 @@ fn seven_day_reset_ts(account: &Account) -> Option<f64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::oauth::{OAuthFuture, OAuthNetwork, RefreshError, RefreshOutcome, UsageFetchError};
+    use crate::oauth_refresh::{Clock, LeaseGuard, RefreshLeaseProvider};
     use crate::test_support::{env_lock, EnvGuard, StoreRootGuard};
+    use std::collections::VecDeque;
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use tempfile::TempDir;
+
+    struct ActivationNetwork {
+        successor: String,
+        refresh_calls: AtomicUsize,
+    }
+
+    struct ActiveUsageNetwork {
+        refreshes: Mutex<VecDeque<RefreshOutcome>>,
+        usages: Mutex<VecDeque<Result<Value, UsageFetchError>>>,
+        calls: Mutex<Vec<String>>,
+    }
+
+    impl OAuthNetwork for ActiveUsageNetwork {
+        fn refresh<'a>(&'a self, credentials: &'a str) -> OAuthFuture<'a, RefreshOutcome> {
+            let refresh = oauth::extract_oauth_data(credentials)
+                .and_then(|data| {
+                    data.get("refreshToken")
+                        .and_then(Value::as_str)
+                        .map(str::to_owned)
+                })
+                .unwrap_or_default();
+            Box::pin(async move {
+                self.calls
+                    .lock()
+                    .unwrap()
+                    .push(format!("refresh:{refresh}"));
+                self.refreshes.lock().unwrap().pop_front().unwrap()
+            })
+        }
+
+        fn fetch_usage<'a>(
+            &'a self,
+            access_token: &'a str,
+        ) -> OAuthFuture<'a, Result<Value, UsageFetchError>> {
+            let access_token = access_token.to_string();
+            Box::pin(async move {
+                self.calls
+                    .lock()
+                    .unwrap()
+                    .push(format!("usage:{access_token}"));
+                self.usages.lock().unwrap().pop_front().unwrap()
+            })
+        }
+    }
+
+    impl OAuthNetwork for ActivationNetwork {
+        fn refresh<'a>(&'a self, _: &'a str) -> OAuthFuture<'a, RefreshOutcome> {
+            Box::pin(async move {
+                self.refresh_calls.fetch_add(1, Ordering::SeqCst);
+                RefreshOutcome {
+                    credentials: Some(self.successor.clone()),
+                    error: None,
+                    token_account: None,
+                }
+            })
+        }
+
+        fn fetch_usage<'a>(
+            &'a self,
+            _: &'a str,
+        ) -> OAuthFuture<'a, Result<Value, UsageFetchError>> {
+            Box::pin(async { panic!("activation validation must not fetch usage") })
+        }
+    }
+
+    struct ImmediateLease;
+    struct ImmediateLeaseGuard;
+    impl RefreshLeaseProvider for ImmediateLease {
+        fn acquire<'a>(
+            &'a self,
+            _: &'a str,
+        ) -> OAuthFuture<'a, Result<Box<dyn LeaseGuard>, String>> {
+            Box::pin(async { Ok(Box::new(ImmediateLeaseGuard) as Box<dyn LeaseGuard>) })
+        }
+    }
+
+    struct ActivationClock(f64);
+    impl Clock for ActivationClock {
+        fn now_ms(&self) -> f64 {
+            self.0
+        }
+    }
 
     // -- pick_target ----------------------------------------------------------
 
@@ -2126,6 +3203,59 @@ mod tests {
             usage_status: UsageStatus::Ok,
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn active_usage_provenance_rejects_a_conflicting_uuid() {
+        let account = Account {
+            uuid: Some("slot-uuid".into()),
+            organization_uuid: Some("org-1".into()),
+            ..active_account(1)
+        };
+        let resolved = oauth::TokenAccount {
+            uuid: "foreign-uuid".into(),
+            email: Some(account.email.clone()),
+            organization_uuid: Some("org-1".into()),
+        };
+
+        assert_eq!(
+            active_usage_provenance(&account, &resolved),
+            ProvenanceVerdict::Foreign
+        );
+    }
+
+    #[test]
+    fn active_usage_provenance_accepts_uuid_with_a_partial_profile() {
+        let account = Account {
+            uuid: Some("slot-uuid".into()),
+            organization_uuid: Some("org-1".into()),
+            ..active_account(1)
+        };
+        let resolved = oauth::TokenAccount {
+            uuid: "slot-uuid".into(),
+            email: None,
+            organization_uuid: None,
+        };
+
+        assert_eq!(
+            active_usage_provenance(&account, &resolved),
+            ProvenanceVerdict::Owned
+        );
+    }
+
+    #[test]
+    fn active_usage_provenance_is_unresolved_without_uuid_or_complete_identity() {
+        let account = active_account(1);
+        let resolved = oauth::TokenAccount {
+            uuid: "resolved-uuid".into(),
+            email: Some(account.email.clone()),
+            organization_uuid: None,
+        };
+
+        assert_eq!(
+            active_usage_provenance(&account, &resolved),
+            ProvenanceVerdict::Unresolved
+        );
     }
 
     fn disabled_account(number: u32, pct: f64) -> Account {
@@ -2190,18 +3320,46 @@ mod tests {
     }
 
     #[test]
-    fn next_available_does_not_skip_unknown_usage_but_does_skip_known_exhaustion() {
+    fn next_available_requires_fresh_known_positive_headroom() {
         let accounts = vec![
             switchable_account(1, Some(100.0)), // known-exhausted: skip
-            switchable_account(2, None),        // unknown: must NOT be auto-skipped
+            switchable_account(2, None),        // unknown: untrusted for automation
             switchable_account(3, Some(10.0)),
         ];
         assert_eq!(
             pick_target(&accounts, Strategy::NextAvailable)
                 .unwrap()
                 .number,
-            2
+            3
         );
+    }
+
+    #[test]
+    fn every_strategy_excludes_non_ok_automatic_targets() {
+        for strategy in [
+            Strategy::MostHeadroom,
+            Strategy::NextAvailable,
+            Strategy::ConsumeFirst,
+        ] {
+            for status in [
+                UsageStatus::Stale,
+                UsageStatus::Unknown,
+                UsageStatus::Unavailable,
+                UsageStatus::ForeignCredential,
+                UsageStatus::Error,
+                UsageStatus::ReloginRequired,
+                UsageStatus::Disabled,
+            ] {
+                let mut untrusted = switchable_account(1, Some(0.0));
+                untrusted.usage_status = status;
+                let healthy = switchable_account(2, Some(20.0));
+                assert_eq!(
+                    pick_target(&[untrusted, healthy], strategy).unwrap().number,
+                    2,
+                    "status {status:?} must not be selected by {strategy:?}"
+                );
+            }
+        }
     }
 
     #[test]
@@ -2317,7 +3475,7 @@ mod tests {
     /// too — *provided* `XDG_DATA_HOME` is unset. On Linux that variable is
     /// consulted first, and CI runners set it, so leaving it alone let a real
     /// `$XDG_DATA_HOME/claude-swap` escape the sandbox: `guard_real_store`
-    /// would panic, and `acquire_cswap_and_vault_locks` could create a `.lock`
+    /// would panic, and an import/live lock helper could create a `.lock`
     /// in the user's actual directory. `WSL_DISTRO_NAME` is pinned for the
     /// same reason — it flips `Platform::detect()`.
     ///
@@ -2406,6 +3564,62 @@ mod tests {
         }
     }
 
+    fn bravo_identity() -> AccountIdentity {
+        let account = read_accounts()
+            .unwrap()
+            .into_iter()
+            .find(|account| account.number == 2)
+            .unwrap();
+        AccountIdentity {
+            number: "2".to_string(),
+            email: account.email.clone(),
+            stable_key: account.stable_key(),
+        }
+    }
+
+    #[test]
+    fn generation_store_compare_and_store_never_overwrites_a_newer_winner() {
+        let _env = setup_env();
+        seed_two_accounts();
+        let store = GuiGenerationStore::new(Duration::from_secs(5));
+        let identity = bravo_identity();
+        let first = store.read(&identity).unwrap().unwrap();
+
+        let persisted = store
+            .compare_and_store(&identity, &first.generation, "successor-creds")
+            .unwrap();
+        assert!(matches!(persisted, CompareAndStore::Persisted(_)));
+
+        let stale = store
+            .compare_and_store(&identity, &first.generation, "stale-callback-creds")
+            .unwrap();
+        let CompareAndStore::Superseded(winner) = stale else {
+            panic!("stale callback must observe the winner");
+        };
+        assert_eq!(winner.credentials, "successor-creds");
+        assert_eq!(
+            store.read(&identity).unwrap().unwrap().credentials,
+            "successor-creds"
+        );
+    }
+
+    #[test]
+    fn generation_store_quarantines_only_the_exact_current_generation() {
+        let _env = setup_env();
+        seed_two_accounts();
+        let store = GuiGenerationStore::new(Duration::from_secs(5));
+        let identity = bravo_identity();
+        let first = store.read(&identity).unwrap().unwrap();
+
+        assert!(store
+            .reject_if_current(&identity, &first.generation, &first.credentials)
+            .unwrap());
+        assert!(store.is_rejected(&identity, &first.credentials).unwrap());
+        assert!(!store
+            .reject_if_current(&identity, "sha256-full:stale", &first.credentials)
+            .unwrap());
+    }
+
     #[test]
     fn switch_to_installs_the_target_and_backs_up_the_outgoing_account() {
         let _env = setup_env();
@@ -2437,14 +3651,8 @@ mod tests {
         assert_eq!(seq["activeAccountNumber"], 2);
     }
 
-    /// The backup-before-install ordering rule (rule 3), proven by making the
-    /// target invalid: if the outgoing account were only backed up *after*
-    /// validating/installing the target, this failure would leave Account-1's
-    /// login without a fresh backup. Instead the backup must already be there,
-    /// and the live login must be untouched.
     #[test]
-    fn backup_happens_before_target_validation_so_a_failed_switch_still_preserves_the_outgoing_login(
-    ) {
+    fn target_validation_failure_is_a_strict_no_op_before_outgoing_backup() {
         let _env = setup_env();
         seed_two_accounts();
         std::fs::remove_file(account_config_path("2", "bravo@example.com")).unwrap();
@@ -2455,8 +3663,8 @@ mod tests {
         let mut store = CredentialStore::new(GuiStoreHost);
         assert_eq!(
             store.read_account_credentials("1", "alpha@example.com"),
-            "original-active-creds-for-account-1",
-            "outgoing account must be backed up even though the switch ultimately failed"
+            "",
+            "an invalid target must abort before mutating the outgoing backup"
         );
 
         assert_eq!(
@@ -2470,11 +3678,270 @@ mod tests {
     }
 
     #[test]
+    fn generation_change_after_freshening_aborts_before_outgoing_backup() {
+        let _env = setup_env();
+        seed_two_accounts();
+        let identity = bravo_identity();
+        let mut store = CredentialStore::new(GuiStoreHost);
+        let stale_credentials = store.read_account_credentials(&identity.number, &identity.email);
+        let validated = ValidatedCredential {
+            identity,
+            generation: oauth_refresh::credential_generation(&stale_credentials),
+            credentials: stale_credentials,
+        };
+        store
+            .write_account_credentials("2", "bravo@example.com", "newer-winner")
+            .unwrap();
+
+        let error = switch_to_validated_with_timeout(
+            &bravo_target(),
+            &validated,
+            &LiveProvenance::default(),
+            Duration::from_secs(5),
+        )
+        .unwrap_err();
+        assert!(matches!(error, SwitchError::TargetGenerationChanged(ref n) if n == "2"));
+        assert_eq!(
+            store.read_account_credentials("1", "alpha@example.com"),
+            "",
+            "a stale validation must never back up or otherwise mutate the outgoing slot"
+        );
+        assert_eq!(
+            std::fs::read_to_string(paths::credentials_path()).unwrap(),
+            "original-active-creds-for-account-1"
+        );
+    }
+
+    #[test]
+    fn proven_foreign_live_credential_is_never_routed_into_the_configured_slot() {
+        let _env = setup_env();
+        seed_two_accounts();
+        let mut data = read_sequence_data().unwrap();
+        data.get_mut("accounts")
+            .and_then(Value::as_object_mut)
+            .and_then(|accounts| accounts.get_mut("2"))
+            .and_then(Value::as_object_mut)
+            .unwrap()
+            .insert("uuid".to_string(), Value::String("uuid-bravo".to_string()));
+        let mut store = CredentialStore::new(GuiStoreHost);
+        let live = store.read_active_credentials().value.unwrap();
+        let provenance = LiveProvenance {
+            live: live.clone(),
+            resolved: Some(oauth::TokenAccount {
+                uuid: "uuid-bravo".to_string(),
+                email: Some("bravo@example.com".to_string()),
+                organization_uuid: Some("org-2".to_string()),
+            }),
+        };
+
+        assert!(matches!(
+            classify_outgoing_destination(
+                &mut store,
+                &mut data,
+                "1",
+                "alpha@example.com",
+                &live,
+                &provenance,
+            ),
+            crate::switch_transaction::OutgoingDestination::Unclaimed
+        ));
+    }
+
+    #[test]
+    fn switch_stashes_proven_foreign_live_bytes_without_poisoning_any_slot() {
+        let _env = setup_env();
+        seed_two_accounts();
+        let mut data = read_sequence_data().unwrap();
+        data.get_mut("accounts")
+            .and_then(Value::as_object_mut)
+            .and_then(|accounts| accounts.get_mut("2"))
+            .and_then(Value::as_object_mut)
+            .unwrap()
+            .insert("uuid".to_string(), Value::String("uuid-bravo".to_string()));
+        write_sequence_data(&data).unwrap();
+        let identity = bravo_identity();
+        let mut store = CredentialStore::new(GuiStoreHost);
+        let target = store.read_account_credentials("2", "bravo@example.com");
+        let validated = ValidatedCredential {
+            identity,
+            generation: oauth_refresh::credential_generation(&target),
+            credentials: target,
+        };
+        let live = store.read_active_credentials().value.unwrap();
+        let provenance = LiveProvenance {
+            live: live.clone(),
+            resolved: Some(oauth::TokenAccount {
+                uuid: "uuid-bravo".to_string(),
+                email: Some("bravo@example.com".to_string()),
+                organization_uuid: Some("org-2".to_string()),
+            }),
+        };
+
+        switch_to_validated_with_timeout(
+            &bravo_target(),
+            &validated,
+            &provenance,
+            Duration::from_secs(5),
+        )
+        .unwrap();
+
+        assert_eq!(
+            store.read_account_credentials("1", "alpha@example.com"),
+            "",
+            "foreign live bytes must never overwrite the configured outgoing slot"
+        );
+        assert_eq!(store.list_unclaimed_credentials().len(), 1);
+        assert!(!account_config_path("1", "alpha@example.com").exists());
+        assert_eq!(
+            std::fs::read_to_string(paths::credentials_path()).unwrap(),
+            "target-creds-2"
+        );
+    }
+
+    #[test]
+    fn unresolved_or_moved_live_credential_keeps_cswaps_fail_open_backup_rule() {
+        let _env = setup_env();
+        seed_two_accounts();
+        let mut data = read_sequence_data().unwrap();
+        let mut store = CredentialStore::new(GuiStoreHost);
+        let live = store.read_active_credentials().value.unwrap();
+        for provenance in [
+            LiveProvenance::default(),
+            LiveProvenance {
+                live: "older-prefetch-generation".to_string(),
+                resolved: Some(oauth::TokenAccount {
+                    uuid: "foreign".to_string(),
+                    email: Some("foreign@example.com".to_string()),
+                    organization_uuid: Some("foreign-org".to_string()),
+                }),
+            },
+        ] {
+            assert!(matches!(
+                classify_outgoing_destination(
+                    &mut store,
+                    &mut data,
+                    "1",
+                    "alpha@example.com",
+                    &live,
+                    &provenance,
+                ),
+                crate::switch_transaction::OutgoingDestination::Managed { .. }
+            ));
+        }
+    }
+
+    #[test]
+    fn recycled_email_with_conflicting_uuid_is_treated_as_alien_not_own() {
+        let _env = setup_env();
+        seed_two_accounts();
+        let mut data = read_sequence_data().unwrap();
+        data.get_mut("accounts")
+            .and_then(Value::as_object_mut)
+            .and_then(|accounts| accounts.get_mut("1"))
+            .and_then(Value::as_object_mut)
+            .unwrap()
+            .insert(
+                "uuid".to_string(),
+                Value::String("uuid-original".to_string()),
+            );
+        let mut store = CredentialStore::new(GuiStoreHost);
+        let live = store.read_active_credentials().value.unwrap();
+        let provenance = LiveProvenance {
+            live: live.clone(),
+            resolved: Some(oauth::TokenAccount {
+                uuid: "uuid-recycled".to_string(),
+                email: Some("alpha@example.com".to_string()),
+                organization_uuid: Some("org-1".to_string()),
+            }),
+        };
+        assert!(matches!(
+            classify_outgoing_destination(
+                &mut store,
+                &mut data,
+                "1",
+                "alpha@example.com",
+                &live,
+                &provenance,
+            ),
+            crate::switch_transaction::OutgoingDestination::Unclaimed
+        ));
+    }
+
+    #[test]
+    fn wiped_live_tokens_are_not_allowed_to_replace_a_slot_backup() {
+        let _env = setup_env();
+        seed_two_accounts();
+        let wiped = serde_json::json!({"claudeAiOauth": {
+            "accessToken": "",
+            "refreshToken": "",
+            "expiresAt": 1
+        }})
+        .to_string();
+        let mut data = read_sequence_data().unwrap();
+        let mut store = CredentialStore::new(GuiStoreHost);
+        assert!(matches!(
+            classify_outgoing_destination(
+                &mut store,
+                &mut data,
+                "1",
+                "alpha@example.com",
+                &wiped,
+                &LiveProvenance::default(),
+            ),
+            crate::switch_transaction::OutgoingDestination::Unclaimed
+        ));
+    }
+
+    #[tokio::test]
+    async fn switch_to_refreshes_an_expired_target_before_installing_it() {
+        let _env = setup_env();
+        seed_two_accounts();
+        let expired = oauth_creds_json("old-refresh", "old-access");
+        let mut expired_value: Value = serde_json::from_str(&expired).unwrap();
+        expired_value["claudeAiOauth"]["expiresAt"] = Value::from(1);
+        let expired = expired_value.to_string();
+        let successor = serde_json::json!({"claudeAiOauth": {
+            "accessToken": "fresh-access",
+            "refreshToken": "fresh-refresh",
+            "expiresAt": 9_999_999_999_999_f64
+        }})
+        .to_string();
+        let mut store = CredentialStore::new(GuiStoreHost);
+        store
+            .write_account_credentials("2", "bravo@example.com", &expired)
+            .unwrap();
+        let network = Arc::new(ActivationNetwork {
+            successor: successor.clone(),
+            refresh_calls: AtomicUsize::new(0),
+        });
+        let coordinator = RefreshCoordinator::new(
+            network.clone(),
+            Arc::new(GuiGenerationStore::new(Duration::from_secs(5))),
+            Arc::new(ImmediateLease),
+            Arc::new(ActivationClock(10_000.0)),
+        );
+
+        switch_to_with_coordinator(&bravo_target(), &coordinator, Duration::from_secs(5))
+            .await
+            .unwrap();
+
+        assert_eq!(network.refresh_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            store.read_account_credentials("2", "bravo@example.com"),
+            successor,
+            "the consumed refresh generation must be persisted before activation"
+        );
+        assert!(std::fs::read_to_string(paths::credentials_path())
+            .unwrap()
+            .contains("fresh-access"));
+    }
+
+    #[test]
     fn switch_fails_cleanly_rather_than_half_applying_when_the_vault_lock_cannot_be_acquired() {
         let _env = setup_env();
         seed_two_accounts();
-        // No cswap store exists in this test, so switch_to skips that lock
-        // entirely and its only contention point is our own vault lock.
+        // The pre-network target-identity read uses only our vault lock and
+        // therefore fails before the complete mutation lock set is entered.
         assert!(!paths::cswap_store_root().exists());
 
         let _held =
@@ -2512,10 +3979,10 @@ mod tests {
                 .unwrap();
 
         let err = switch_to_with_timeout(&bravo_target(), Duration::from_millis(200)).unwrap_err();
-        assert!(matches!(err, SwitchError::Locking(_)));
+        assert!(matches!(err, SwitchError::LiveStateLock(_)));
 
         // The cswap-compat lock is acquired FIRST (see
-        // `acquire_cswap_and_vault_locks`), so failing to get it must
+        // the full live-state coordinator), so failing to get it must
         // short-circuit before any effect on OUR vault or the live login —
         // proving the ordering, not just that both locks exist.
         assert_eq!(
@@ -2627,6 +4094,571 @@ mod tests {
             }
         })
         .to_string()
+    }
+
+    fn expiring_oauth_creds_json(
+        refresh_token: &str,
+        access_token: &str,
+        expires_at: f64,
+    ) -> String {
+        serde_json::json!({
+            "claudeAiOauth": {
+                "accessToken": access_token,
+                "refreshToken": refresh_token,
+                "expiresAt": expires_at,
+                "scopes": ["user:inference"],
+            }
+        })
+        .to_string()
+    }
+
+    #[tokio::test]
+    async fn active_expired_owned_lineage_refreshes_and_persists_both_stores() {
+        let _env = setup_env();
+        let original = expiring_oauth_creds_json("old-refresh", "old-access", 1.0);
+        let successor =
+            expiring_oauth_creds_json("new-refresh", "new-access", 9_999_999_999_999_f64);
+        write_json_file(
+            &accounts_file(),
+            &serde_json::json!({
+                "sequence": [1],
+                "accounts": {"1": {"email": "alpha@example.com", "organizationUuid": "org-1"}}
+            }),
+        );
+        write_json_file(
+            &paths::global_config_path(),
+            &serde_json::json!({"oauthAccount": {"emailAddress": "alpha@example.com", "organizationUuid": "org-1"}}),
+        );
+        let mut store = CredentialStore::new(GuiStoreHost);
+        store.write_refreshed_oauth_credentials(&original).unwrap();
+        store
+            .write_account_credentials("1", "alpha@example.com", &original)
+            .unwrap();
+        let account = read_accounts().unwrap().remove(0);
+        let network = ActiveUsageNetwork {
+            refreshes: Mutex::new(VecDeque::from([RefreshOutcome {
+                credentials: Some(successor.clone()),
+                error: None,
+                token_account: None,
+            }])),
+            usages: Mutex::new(VecDeque::from([Ok(
+                serde_json::json!({"five_hour":{"utilization":17.0}}),
+            )])),
+            calls: Mutex::new(Vec::new()),
+        };
+
+        let usage = fetch_active_usage_with_network(
+            &account,
+            &original,
+            &original,
+            &network,
+            Duration::from_secs(1),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(usage.five_hour.unwrap().pct, 17.0);
+        let mut store = CredentialStore::new(GuiStoreHost);
+        assert_eq!(store.read_active_credentials().value.unwrap(), successor);
+        assert_eq!(
+            store.read_account_credentials("1", "alpha@example.com"),
+            successor
+        );
+        assert_eq!(
+            *network.calls.lock().unwrap(),
+            vec!["refresh:old-refresh", "usage:new-access"]
+        );
+        assert_eq!(
+            cached_active_usage_provenance(&account, &successor),
+            Some(ProvenanceVerdict::Owned)
+        );
+    }
+
+    #[tokio::test]
+    async fn active_wiped_live_credentials_restore_a_usable_slot_backup() {
+        let _env = setup_env();
+        let backup =
+            expiring_oauth_creds_json("backup-refresh", "backup-access", 9_999_999_999_999_f64);
+        write_json_file(
+            &accounts_file(),
+            &serde_json::json!({"sequence":[1],"accounts":{"1":{"email":"alpha@example.com","organizationUuid":"org-1"}}}),
+        );
+        write_json_file(
+            &paths::global_config_path(),
+            &serde_json::json!({"oauthAccount":{"emailAddress":"alpha@example.com","organizationUuid":"org-1"}}),
+        );
+        let mut store = CredentialStore::new(GuiStoreHost);
+        store
+            .write_account_credentials("1", "alpha@example.com", &backup)
+            .unwrap();
+        let account = read_accounts().unwrap().remove(0);
+        let network = ActiveUsageNetwork {
+            refreshes: Mutex::new(VecDeque::new()),
+            usages: Mutex::new(VecDeque::from([Ok(
+                serde_json::json!({"five_hour":{"utilization":13.0}}),
+            )])),
+            calls: Mutex::new(Vec::new()),
+        };
+
+        let usage = fetch_active_usage_with_network(
+            &account,
+            "",
+            &backup,
+            &network,
+            Duration::from_secs(1),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(usage.five_hour.unwrap().pct, 13.0);
+        assert_eq!(*network.calls.lock().unwrap(), vec!["usage:backup-access"]);
+        assert_eq!(
+            CredentialStore::new(GuiStoreHost)
+                .read_active_credentials()
+                .value
+                .unwrap(),
+            backup
+        );
+    }
+
+    #[tokio::test]
+    async fn active_non_oauth_live_value_is_never_replaced_from_an_oauth_backup() {
+        let _env = setup_env();
+        let account = active_account(1);
+        let backup =
+            expiring_oauth_creds_json("backup-refresh", "backup-access", 9_999_999_999_999_f64);
+        let network = ActiveUsageNetwork {
+            refreshes: Mutex::new(VecDeque::new()),
+            usages: Mutex::new(VecDeque::new()),
+            calls: Mutex::new(Vec::new()),
+        };
+
+        assert_eq!(
+            fetch_active_usage_with_network(
+                &account,
+                "sk-ant-api03-managed",
+                &backup,
+                &network,
+                Duration::from_secs(1),
+            )
+            .await,
+            Err(ActiveUsageError::Missing)
+        );
+        assert!(network.calls.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn active_refresh_never_overwrites_a_managed_key_that_landed_while_waiting() {
+        let _env = setup_env();
+        let observed = expiring_oauth_creds_json("old-refresh", "old-access", 1.0);
+        write_json_file(
+            &accounts_file(),
+            &serde_json::json!({"sequence":[1],"accounts":{"1":{"email":"alpha@example.com","organizationUuid":"org-1"}}}),
+        );
+        write_json_file(
+            &paths::global_config_path(),
+            &serde_json::json!({"oauthAccount":{"emailAddress":"alpha@example.com","organizationUuid":"org-1"}}),
+        );
+        let mut store = CredentialStore::new(GuiStoreHost);
+        store
+            .write_account_credentials("1", "alpha@example.com", &observed)
+            .unwrap();
+        std::fs::create_dir_all(paths::credentials_path().parent().unwrap()).unwrap();
+        std::fs::write(paths::credentials_path(), "sk-ant-api03-concurrent").unwrap();
+        let account = read_accounts().unwrap().remove(0);
+        let network = ActiveUsageNetwork {
+            refreshes: Mutex::new(VecDeque::new()),
+            usages: Mutex::new(VecDeque::new()),
+            calls: Mutex::new(Vec::new()),
+        };
+
+        assert_eq!(
+            fetch_active_usage_with_network(
+                &account,
+                &observed,
+                &observed,
+                &network,
+                Duration::from_secs(1),
+            )
+            .await,
+            Err(ActiveUsageError::Unavailable)
+        );
+        assert!(network.calls.lock().unwrap().is_empty());
+        assert_eq!(
+            CredentialStore::new(GuiStoreHost)
+                .read_active_credentials()
+                .value,
+            Some("sk-ant-api03-concurrent".into())
+        );
+    }
+
+    #[tokio::test]
+    async fn active_wipe_never_restores_a_quarantined_backup_generation() {
+        let _env = setup_env();
+        let backup =
+            expiring_oauth_creds_json("dead-refresh", "backup-access", 9_999_999_999_999_f64);
+        write_json_file(
+            &accounts_file(),
+            &serde_json::json!({"sequence":[1],"accounts":{"1":{"email":"alpha@example.com","organizationUuid":"org-1"}}}),
+        );
+        write_json_file(
+            &paths::global_config_path(),
+            &serde_json::json!({"oauthAccount":{"emailAddress":"alpha@example.com","organizationUuid":"org-1"}}),
+        );
+        let mut store = CredentialStore::new(GuiStoreHost);
+        store
+            .write_account_credentials("1", "alpha@example.com", &backup)
+            .unwrap();
+        let account = read_accounts().unwrap().remove(0);
+        OAuthQuarantine::new(paths::backup_root())
+            .reject(
+                &account.stable_key(),
+                &oauth::credential_fingerprint(&backup).unwrap(),
+                chrono::Utc::now(),
+            )
+            .unwrap();
+        let network = ActiveUsageNetwork {
+            refreshes: Mutex::new(VecDeque::new()),
+            usages: Mutex::new(VecDeque::new()),
+            calls: Mutex::new(Vec::new()),
+        };
+
+        assert_eq!(
+            fetch_active_usage_with_network(
+                &account,
+                "",
+                &backup,
+                &network,
+                Duration::from_secs(1),
+            )
+            .await,
+            Err(ActiveUsageError::ReloginRequired)
+        );
+        assert!(network.calls.lock().unwrap().is_empty());
+        assert_eq!(
+            CredentialStore::new(GuiStoreHost)
+                .read_active_credentials()
+                .value,
+            Some(String::new())
+        );
+    }
+
+    #[tokio::test]
+    async fn active_refresh_waits_for_the_same_per_account_lease_as_inactive_refresh() {
+        let _env = setup_env();
+        let original = expiring_oauth_creds_json("old-refresh", "old-access", 1.0);
+        let successor =
+            expiring_oauth_creds_json("new-refresh", "new-access", 9_999_999_999_999_f64);
+        write_json_file(
+            &accounts_file(),
+            &serde_json::json!({"sequence":[1],"accounts":{"1":{"email":"alpha@example.com","organizationUuid":"org-1"}}}),
+        );
+        write_json_file(
+            &paths::global_config_path(),
+            &serde_json::json!({"oauthAccount":{"emailAddress":"alpha@example.com","organizationUuid":"org-1"}}),
+        );
+        let mut store = CredentialStore::new(GuiStoreHost);
+        store.write_refreshed_oauth_credentials(&original).unwrap();
+        store
+            .write_account_credentials("1", "alpha@example.com", &original)
+            .unwrap();
+        let account = read_accounts().unwrap().remove(0);
+        let leases =
+            oauth_refresh::FileRefreshLeases::new(paths::backup_root(), Duration::from_secs(1));
+        let held = leases.acquire(&account.stable_key()).await.unwrap();
+        let network = ActiveUsageNetwork {
+            refreshes: Mutex::new(VecDeque::from([RefreshOutcome {
+                credentials: Some(successor),
+                error: None,
+                token_account: None,
+            }])),
+            usages: Mutex::new(VecDeque::from([Ok(
+                serde_json::json!({"five_hour":{"utilization":29.0}}),
+            )])),
+            calls: Mutex::new(Vec::new()),
+        };
+        let refresh = fetch_active_usage_with_network(
+            &account,
+            &original,
+            &original,
+            &network,
+            Duration::from_secs(1),
+        );
+        tokio::pin!(refresh);
+
+        tokio::select! {
+            result = &mut refresh => panic!("active refresh bypassed the held account lease: {result:?}"),
+            () = tokio::time::sleep(Duration::from_millis(50)) => {}
+        }
+        assert!(network.calls.lock().unwrap().is_empty());
+
+        let vault_path = paths::backup_root().join(".lock");
+        let vault_guard = tokio::time::timeout(
+            Duration::from_secs(1),
+            tokio::task::spawn_blocking(move || {
+                crate::locking::acquire_or_err(vault_path, Duration::from_millis(250))
+            }),
+        )
+        .await
+        .expect("active refresh held the vault while waiting for the account lease")
+        .unwrap()
+        .expect("inactive persistence could not acquire the vault behind the active waiter");
+        drop(vault_guard);
+
+        drop(held);
+        assert_eq!(refresh.await.unwrap().five_hour.unwrap().pct, 29.0);
+        assert_eq!(
+            *network.calls.lock().unwrap(),
+            vec!["refresh:old-refresh", "usage:new-access"]
+        );
+    }
+
+    #[tokio::test]
+    async fn active_usage_401_forces_refresh_of_locally_fresh_owned_generation() {
+        let _env = setup_env();
+        let original =
+            expiring_oauth_creds_json("old-refresh", "old-access", 9_999_999_999_999_f64);
+        let successor =
+            expiring_oauth_creds_json("new-refresh", "new-access", 9_999_999_999_999_f64);
+        write_json_file(
+            &accounts_file(),
+            &serde_json::json!({"sequence":[1],"accounts":{"1":{"email":"alpha@example.com","organizationUuid":"org-1"}}}),
+        );
+        write_json_file(
+            &paths::global_config_path(),
+            &serde_json::json!({"oauthAccount":{"emailAddress":"alpha@example.com","organizationUuid":"org-1"}}),
+        );
+        let mut store = CredentialStore::new(GuiStoreHost);
+        store.write_refreshed_oauth_credentials(&original).unwrap();
+        store
+            .write_account_credentials("1", "alpha@example.com", &original)
+            .unwrap();
+        let account = read_accounts().unwrap().remove(0);
+        let network = ActiveUsageNetwork {
+            refreshes: Mutex::new(VecDeque::from([RefreshOutcome {
+                credentials: Some(successor),
+                error: None,
+                token_account: None,
+            }])),
+            usages: Mutex::new(VecDeque::from([
+                Err(UsageFetchError::Http {
+                    status: 401,
+                    retry_after_s: None,
+                }),
+                Ok(serde_json::json!({"five_hour":{"utilization":19.0}})),
+            ])),
+            calls: Mutex::new(Vec::new()),
+        };
+
+        let usage = fetch_active_usage_with_network(
+            &account,
+            &original,
+            &original,
+            &network,
+            Duration::from_secs(1),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(usage.five_hour.unwrap().pct, 19.0);
+        assert_eq!(
+            *network.calls.lock().unwrap(),
+            vec![
+                "usage:old-access",
+                "refresh:old-refresh",
+                "usage:new-access"
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn active_invalid_grant_quarantines_only_the_current_owned_generation() {
+        let _env = setup_env();
+        let original = expiring_oauth_creds_json("dead-refresh", "old-access", 1.0);
+        write_json_file(
+            &accounts_file(),
+            &serde_json::json!({"sequence":[1],"accounts":{"1":{"email":"alpha@example.com","organizationUuid":"org-1"}}}),
+        );
+        write_json_file(
+            &paths::global_config_path(),
+            &serde_json::json!({"oauthAccount":{"emailAddress":"alpha@example.com","organizationUuid":"org-1"}}),
+        );
+        let mut store = CredentialStore::new(GuiStoreHost);
+        store.write_refreshed_oauth_credentials(&original).unwrap();
+        store
+            .write_account_credentials("1", "alpha@example.com", &original)
+            .unwrap();
+        let account = read_accounts().unwrap().remove(0);
+        let network = ActiveUsageNetwork {
+            refreshes: Mutex::new(VecDeque::from([RefreshOutcome {
+                credentials: None,
+                error: Some(RefreshError::InvalidGrant),
+                token_account: None,
+            }])),
+            usages: Mutex::new(VecDeque::new()),
+            calls: Mutex::new(Vec::new()),
+        };
+
+        let result = fetch_active_usage_with_network(
+            &account,
+            &original,
+            &original,
+            &network,
+            Duration::from_secs(1),
+        )
+        .await;
+
+        assert_eq!(result, Err(ActiveUsageError::ReloginRequired));
+        let fingerprint = oauth::credential_fingerprint(&original).unwrap();
+        assert!(OAuthQuarantine::new(paths::backup_root())
+            .is_rejected(&account.stable_key(), &fingerprint));
+        assert_eq!(*network.calls.lock().unwrap(), vec!["refresh:dead-refresh"]);
+
+        let no_retry_network = ActiveUsageNetwork {
+            refreshes: Mutex::new(VecDeque::new()),
+            usages: Mutex::new(VecDeque::new()),
+            calls: Mutex::new(Vec::new()),
+        };
+        assert_eq!(
+            fetch_active_usage_with_network(
+                &account,
+                &original,
+                &original,
+                &no_retry_network,
+                Duration::from_secs(1),
+            )
+            .await,
+            Err(ActiveUsageError::ReloginRequired)
+        );
+        assert!(no_retry_network.calls.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn active_refresh_never_consumes_a_known_foreign_lineage() {
+        let _env = setup_env();
+        let foreign = expiring_oauth_creds_json("foreign-refresh", "foreign-access", 1.0);
+        write_json_file(
+            &accounts_file(),
+            &serde_json::json!({"sequence":[1],"accounts":{"1":{"email":"alpha@example.com","organizationUuid":"org-1"}}}),
+        );
+        write_json_file(
+            &paths::global_config_path(),
+            &serde_json::json!({"oauthAccount":{"emailAddress":"alpha@example.com","organizationUuid":"org-1"}}),
+        );
+        let account = read_accounts().unwrap().remove(0);
+        let key = active_provenance_cache_key(&account, &foreign).unwrap();
+        active_provenance_cache()
+            .lock()
+            .unwrap()
+            .insert(key, ProvenanceVerdict::Foreign);
+        let network = ActiveUsageNetwork {
+            refreshes: Mutex::new(VecDeque::new()),
+            usages: Mutex::new(VecDeque::new()),
+            calls: Mutex::new(Vec::new()),
+        };
+
+        let result = fetch_active_usage_with_network(
+            &account,
+            &foreign,
+            "",
+            &network,
+            Duration::from_secs(1),
+        )
+        .await;
+
+        assert_eq!(result, Err(ActiveUsageError::ForeignCredential));
+        assert!(network.calls.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn active_refresh_rechecks_config_identity_before_consuming_a_grant() {
+        let _env = setup_env();
+        let original = expiring_oauth_creds_json("owned-refresh", "owned-access", 1.0);
+        write_json_file(
+            &accounts_file(),
+            &serde_json::json!({"sequence":[1],"accounts":{"1":{"email":"alpha@example.com","organizationUuid":"org-1"}}}),
+        );
+        write_json_file(
+            &paths::global_config_path(),
+            &serde_json::json!({"oauthAccount":{"emailAddress":"someone-else@example.com","organizationUuid":"org-2"}}),
+        );
+        let account = Account {
+            number: 1,
+            email: "alpha@example.com".into(),
+            organization_uuid: Some("org-1".into()),
+            active: true,
+            ..Default::default()
+        };
+        let mut store = CredentialStore::new(GuiStoreHost);
+        store.write_refreshed_oauth_credentials(&original).unwrap();
+        store
+            .write_account_credentials("1", "alpha@example.com", &original)
+            .unwrap();
+        let network = ActiveUsageNetwork {
+            refreshes: Mutex::new(VecDeque::new()),
+            usages: Mutex::new(VecDeque::new()),
+            calls: Mutex::new(Vec::new()),
+        };
+
+        let result = fetch_active_usage_with_network(
+            &account,
+            &original,
+            &original,
+            &network,
+            Duration::from_secs(1),
+        )
+        .await;
+
+        assert_eq!(result, Err(ActiveUsageError::Unavailable));
+        assert!(network.calls.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn active_refresh_adopts_a_concurrent_fresh_generation_without_a_post() {
+        let _env = setup_env();
+        let observed = expiring_oauth_creds_json("same-refresh", "old-access", 1.0);
+        let concurrent =
+            expiring_oauth_creds_json("same-refresh", "fresh-access", 9_999_999_999_999_f64);
+        write_json_file(
+            &accounts_file(),
+            &serde_json::json!({"sequence":[1],"accounts":{"1":{"email":"alpha@example.com","organizationUuid":"org-1"}}}),
+        );
+        write_json_file(
+            &paths::global_config_path(),
+            &serde_json::json!({"oauthAccount":{"emailAddress":"alpha@example.com","organizationUuid":"org-1"}}),
+        );
+        let mut store = CredentialStore::new(GuiStoreHost);
+        store
+            .write_refreshed_oauth_credentials(&concurrent)
+            .unwrap();
+        store
+            .write_account_credentials("1", "alpha@example.com", &observed)
+            .unwrap();
+        let account = read_accounts().unwrap().remove(0);
+        let network = ActiveUsageNetwork {
+            refreshes: Mutex::new(VecDeque::new()),
+            usages: Mutex::new(VecDeque::from([Ok(
+                serde_json::json!({"five_hour":{"utilization":23.0}}),
+            )])),
+            calls: Mutex::new(Vec::new()),
+        };
+
+        let usage = fetch_active_usage_with_network(
+            &account,
+            &observed,
+            &observed,
+            &network,
+            Duration::from_secs(1),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(usage.five_hour.unwrap().pct, 23.0);
+        assert_eq!(*network.calls.lock().unwrap(), vec!["usage:fresh-access"]);
+        assert_eq!(
+            CredentialStore::new(GuiStoreHost).read_account_credentials("1", "alpha@example.com"),
+            concurrent
+        );
     }
 
     fn no_identity(_access_token: &str) -> Option<oauth::TokenAccount> {
@@ -3178,6 +5210,207 @@ mod tests {
         // never installed as the live login anywhere on this machine.
         assert!(!paths::credentials_path().exists());
         assert!(!paths::global_config_path().exists());
+    }
+
+    #[test]
+    fn successful_relogin_clears_only_the_replaced_generation_quarantine() {
+        let _env = setup_env();
+        let email = "recovered@example.com";
+        let old = oauth_creds_json("dead-refresh", "dead-access");
+        let replacement = oauth_creds_json("fresh-refresh", "fresh-access");
+        let stable_key = Account {
+            email: email.to_string(),
+            ..Account::default()
+        }
+        .stable_key();
+        let old_fingerprint = oauth::credential_fingerprint(&old).unwrap();
+        let quarantine = OAuthQuarantine::new(paths::backup_root());
+        quarantine
+            .reject(&stable_key, &old_fingerprint, chrono::Utc::now())
+            .unwrap();
+
+        add_oauth_credential_with_timeout(
+            &replacement,
+            Some(email),
+            None,
+            crate::locking::DEFAULT_TIMEOUT,
+            &no_identity,
+        )
+        .unwrap();
+
+        assert!(
+            !quarantine.is_rejected(&stable_key, &old_fingerprint),
+            "a committed replacement must release the prior dead-token lineage"
+        );
+    }
+
+    #[test]
+    fn relogin_replaces_the_selected_active_slot_and_preserves_its_registry_record() {
+        let _env = setup_env();
+        let email = "recovered@example.com";
+        let old = oauth_creds_json("dead-refresh", "dead-access");
+        let replacement = oauth_creds_json("fresh-refresh", "fresh-access");
+        write_json_file(
+            &accounts_file(),
+            &serde_json::json!({
+                "sequence": [1],
+                "activeAccountNumber": 1,
+                "accounts": {
+                    "1": {
+                        "email": email,
+                        "organizationUuid": "org-1",
+                        "uuid": "uuid-1",
+                        "alias": "Work",
+                        "added": "2026-01-01T00:00:00Z"
+                    }
+                }
+            }),
+        );
+        write_json_file(
+            &paths::global_config_path(),
+            &serde_json::json!({
+                "oauthAccount": {"emailAddress": email, "organizationUuid": "org-1"}
+            }),
+        );
+        let mut store = CredentialStore::new(GuiStoreHost);
+        store.write_account_credentials("1", email, &old).unwrap();
+        store.write_refreshed_oauth_credentials(&old).unwrap();
+        let account = read_accounts().unwrap().remove(0);
+        let quarantine = OAuthQuarantine::new(paths::backup_root());
+        let old_fingerprint = oauth::credential_fingerprint(&old).unwrap();
+        quarantine
+            .reject(&account.stable_key(), &old_fingerprint, chrono::Utc::now())
+            .unwrap();
+
+        replace_oauth_credential_with_timeout(
+            1,
+            &replacement,
+            Some("uuid-1"),
+            Some(email),
+            Some("org-1"),
+            Duration::from_secs(1),
+        )
+        .unwrap();
+
+        let registry: Value =
+            serde_json::from_str(&std::fs::read_to_string(accounts_file()).unwrap()).unwrap();
+        assert_eq!(registry["accounts"]["1"]["alias"], "Work");
+        assert_eq!(registry["accounts"]["1"]["added"], "2026-01-01T00:00:00Z");
+        assert_eq!(registry["activeAccountNumber"], 1);
+        assert_eq!(store.read_account_credentials("1", email), replacement);
+        assert_eq!(
+            store.read_active_credentials().value.as_deref(),
+            Some(replacement.as_str())
+        );
+        assert!(!quarantine.is_rejected(&account.stable_key(), &old_fingerprint));
+    }
+
+    #[test]
+    fn relogin_replaces_an_inactive_slot_without_touching_the_live_credential() {
+        let _env = setup_env();
+        let active_email = "active@example.com";
+        let inactive_email = "inactive@example.com";
+        let live = oauth_creds_json("live-refresh", "live-access");
+        let old = oauth_creds_json("old-refresh", "old-access");
+        let replacement = oauth_creds_json("fresh-refresh", "fresh-access");
+        write_json_file(
+            &accounts_file(),
+            &serde_json::json!({
+                "sequence": [1, 2],
+                "activeAccountNumber": 1,
+                "accounts": {
+                    "1": {"email": active_email, "organizationUuid": "org-1", "uuid": "uuid-1"},
+                    "2": {"email": inactive_email, "organizationUuid": "org-2", "uuid": "uuid-2", "alias": "Spare"}
+                }
+            }),
+        );
+        write_json_file(
+            &paths::global_config_path(),
+            &serde_json::json!({
+                "oauthAccount": {"emailAddress": active_email, "organizationUuid": "org-1"}
+            }),
+        );
+        let mut store = CredentialStore::new(GuiStoreHost);
+        store
+            .write_account_credentials("2", inactive_email, &old)
+            .unwrap();
+        store.write_refreshed_oauth_credentials(&live).unwrap();
+
+        replace_oauth_credential_with_timeout(
+            2,
+            &replacement,
+            Some("uuid-2"),
+            Some(inactive_email),
+            Some("org-2"),
+            Duration::from_secs(1),
+        )
+        .unwrap();
+
+        assert_eq!(
+            store.read_account_credentials("2", inactive_email),
+            replacement
+        );
+        assert_eq!(
+            store.read_active_credentials().value.as_deref(),
+            Some(live.as_str())
+        );
+        let registry: Value =
+            serde_json::from_str(&std::fs::read_to_string(accounts_file()).unwrap()).unwrap();
+        assert_eq!(registry["accounts"]["2"]["alias"], "Spare");
+        assert_eq!(registry["activeAccountNumber"], 1);
+    }
+
+    #[test]
+    fn relogin_refuses_a_different_identity_without_changing_credentials() {
+        let _env = setup_env();
+        let email = "owner@example.com";
+        let old = oauth_creds_json("old-refresh", "old-access");
+        let replacement = oauth_creds_json("other-refresh", "other-access");
+        write_json_file(
+            &accounts_file(),
+            &serde_json::json!({
+                "sequence": [1],
+                "accounts": {
+                    "1": {"email": email, "organizationUuid": "org-1", "uuid": "uuid-1"}
+                }
+            }),
+        );
+        let mut store = CredentialStore::new(GuiStoreHost);
+        store.write_account_credentials("1", email, &old).unwrap();
+
+        let error = replace_oauth_credential_with_timeout(
+            1,
+            &replacement,
+            Some("uuid-2"),
+            Some("other@example.com"),
+            Some("org-2"),
+            Duration::from_secs(1),
+        )
+        .unwrap_err();
+
+        assert!(matches!(error, SwitchError::InvalidCredential(_)));
+        assert_eq!(store.read_account_credentials("1", email), old);
+    }
+
+    #[test]
+    fn registry_mutations_refuse_pending_switch_recovery() {
+        let _env = setup_env();
+        write_json_file(
+            &accounts_file(),
+            &serde_json::json!({
+                "sequence": [1],
+                "accounts": {"1": {"email": "owner@example.com"}}
+            }),
+        );
+        crate::switch_transaction::set_recovery_requirement(Some("repair required".into()));
+
+        let error = set_account_enabled_with_timeout(1, false, Duration::from_secs(1)).unwrap_err();
+
+        crate::switch_transaction::set_recovery_requirement(None);
+        assert!(matches!(
+            error,
+            SwitchError::Transaction(crate::switch_transaction::TransactionError::RecoveryRequired)
+        ));
     }
 
     #[test]

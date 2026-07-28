@@ -25,13 +25,35 @@ when it happens.
 - Local usage history in SQLite, with burn-rate charts over days and weeks.
 - Interactive sign-in that runs `claude auth login` in an isolated
   `CLAUDE_CONFIG_DIR`, so the live login is never disturbed.
+- In-place re-login for rejected OAuth accounts. The selected slot, alias, and
+  account metadata are preserved, and the replacement is accepted only when
+  the isolated login resolves to the same account identity.
 - WSL awareness on Windows: native and per-distro logins are detected as separate
   environments, and a stopped distro is never woken by a background poll.
 - Refresh control on the Accounts screen and in the tray popover, rate-limited in the
   backend so it cannot outpace the poller.
 - Day / night / system theme.
-- Cross-process file locking compatible with the `cswap` CLI, verified by a test that
-  runs the real `claude_swap` Python package against this app's Rust implementation.
+- Cross-process file locking for account, credential, and configuration stores, verified by
+  Rust/Rust and protocol-level interoperability tests.
+- Recoverable account switching with Claude Code-compatible credential/config locks,
+  protected before-images, a secret-free durable journal, exact rollback, startup
+  recovery, an explicit `recoveryRequired` UI state, and backend-enforced blocking
+  of every credential or account-registry mutation until recovery succeeds.
+- Switch-time credential provenance checks: live bytes proven
+  to belong to a different or recycled account are preserved in the unclaimed safety
+  store and never written over the configured outgoing slot; an unavailable identity
+  oracle retains fail-open rotation behavior.
+- Active usage attribution: a credential accepted by the usage
+  endpoint is not assigned to the configured slot when the profile oracle proves it
+  belongs to another account; definitive lineage verdicts are memoized, while partial
+  or unavailable oracle results remain retryable.
+- Active OAuth recovery: expired or server-rejected active
+  generations refresh under Claude-compatible credential locks, recheck account and
+  lineage ownership before consuming a grant, and persist the successor to both the live
+  credential and its slot backup. Exact `invalid_grant` results remain generation-bound.
+- Active recovery now restores a definitively wiped live OAuth store from the slot backup, keeps
+  read failures distinct from genuine absence, and shares the inactive path's per-account lease so
+  a concurrent snapshot cannot consume the same rotating grant twice.
 
 ### Security
 

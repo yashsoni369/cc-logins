@@ -43,14 +43,14 @@ code sits behind `#[cfg(...)]`. A green run on your OS checks a third of it.
 
 ## Test safety — read this before touching tests
 
-A run of this suite once resolved the real `~/.claude-swap-backup` and
+A run of this suite once resolved a real credential backup directory and
 destroyed two logged-in accounts. Two guards exist because of that:
 
 - `guard_real_store()` in `src-tauri/src/test_support.rs` panics if a test
   resolves a path outside a temp directory. It is called on every resolution
   under `cfg(test)`, so it is not opt-in.
-- `src-tauri/tests/differential.rs` may invoke only the read-only `cswap list`
-  and `cswap status` subcommands, enforced by an `ALLOWED` list.
+- `src-tauri/tests/differential.rs` may invoke only its explicitly allowlisted
+  read-only commands.
 
 Never weaken either one, and never point a test at a real credential store. If
 a guard fires, the test's environment override didn't take effect — fix the

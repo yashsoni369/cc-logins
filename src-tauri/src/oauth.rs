@@ -21,6 +21,8 @@
 //! server. See the `tests` module at the bottom.
 
 use std::fmt;
+use std::future::Future;
+use std::pin::Pin;
 use std::time::Duration;
 
 use chrono::{DateTime, Datelike, Local, Utc};
@@ -102,11 +104,16 @@ fn sha256_hex(input: &str) -> String {
 /// source JSON) is treated as "not expired" — matching Python's
 /// `isinstance(expires_at, (int, float))` guard.
 pub fn is_oauth_token_expired(expires_at: Option<f64>) -> bool {
+    is_oauth_token_expired_at(expires_at, Utc::now().timestamp_millis() as f64)
+}
+
+/// Deterministic form of [`is_oauth_token_expired`] for coordinators and tests
+/// that already have an authoritative clock reading.
+pub fn is_oauth_token_expired_at(expires_at: Option<f64>, now_ms: f64) -> bool {
     let expires_at = match expires_at {
         Some(v) => v,
         None => return false,
     };
-    let now_ms = Utc::now().timestamp_millis() as f64;
     now_ms + OAUTH_EXPIRY_BUFFER_MS as f64 >= expires_at
 }
 
@@ -570,6 +577,50 @@ pub fn account_headroom(usage: Option<&UsageResult>, models: &[&str]) -> Option<
 // Refresh-token grant (network) — requirement 1
 // ---------------------------------------------------------------------------
 
+pub type OAuthFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
+
+pub trait OAuthNetwork: Send + Sync {
+    fn refresh<'a>(&'a self, credentials: &'a str) -> OAuthFuture<'a, RefreshOutcome>;
+
+    fn fetch_usage<'a>(
+        &'a self,
+        access_token: &'a str,
+    ) -> OAuthFuture<'a, Result<Value, UsageFetchError>>;
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct ReqwestOAuthNetwork {
+    refresh_timeout: Duration,
+}
+
+impl ReqwestOAuthNetwork {
+    pub fn with_refresh_timeout(refresh_timeout: Duration) -> Self {
+        Self { refresh_timeout }
+    }
+}
+
+impl Default for ReqwestOAuthNetwork {
+    fn default() -> Self {
+        Self::with_refresh_timeout(Duration::from_secs(10))
+    }
+}
+
+impl OAuthNetwork for ReqwestOAuthNetwork {
+    fn refresh<'a>(&'a self, credentials: &'a str) -> OAuthFuture<'a, RefreshOutcome> {
+        Box::pin(try_refresh_oauth_credentials_direct(
+            credentials,
+            self.refresh_timeout,
+        ))
+    }
+
+    fn fetch_usage<'a>(
+        &'a self,
+        access_token: &'a str,
+    ) -> OAuthFuture<'a, Result<Value, UsageFetchError>> {
+        Box::pin(request_usage_data_direct(access_token))
+    }
+}
+
 /// Account identity optionally carried alongside a token-endpoint response or
 /// an `/api/oauth/profile` fetch. `organization_uuid` and `email` are
 /// opportunistic (`str | None` in Python); `uuid` is the only field a caller
@@ -616,16 +667,15 @@ pub struct RefreshOutcome {
 
 /// Classify a non-2xx refresh-token response (requirement 1).
 ///
-/// Permanent (`InvalidGrant`) only when the server itself rejected the
-/// grant: a 400/401/403 status *and* an explicit `invalid_grant` /
-/// `invalid_client` marker in the response body. Everything else — a 400
-/// with an unrelated body, or a matching marker riding on an unrelated
-/// status like 500 — stays `Transient`. A misclassified transient costs one
-/// retry; a misclassified permanent would wrongly quarantine a live token.
+/// Permanent (`InvalidGrant`) only when the token endpoint returns the exact
+/// OAuth JSON error on HTTP 400. Everything else stays `Transient`. A
+/// misclassified transient costs one retry; a misclassified permanent would
+/// wrongly quarantine a live token.
 pub fn classify_refresh_failure(status: u16, body: &str) -> RefreshError {
-    if matches!(status, 400 | 401 | 403)
-        && (body.contains("invalid_grant") || body.contains("invalid_client"))
-    {
+    let error = serde_json::from_str::<Value>(body)
+        .ok()
+        .and_then(|value| value.get("error")?.as_str().map(str::to_owned));
+    if status == 400 && error.as_deref() == Some("invalid_grant") {
         RefreshError::InvalidGrant
     } else {
         RefreshError::Transient
@@ -661,7 +711,14 @@ fn parse_token_account(resp_data: &Value) -> Option<TokenAccount> {
 /// that is a caller-side rule (Claude Code owns those bytes), not something
 /// this function can enforce, since it has no notion of "active".
 pub async fn try_refresh_oauth_credentials(credentials: &str) -> RefreshOutcome {
-    let mut data: Value = match serde_json::from_str(credentials) {
+    ReqwestOAuthNetwork::default().refresh(credentials).await
+}
+
+async fn try_refresh_oauth_credentials_direct(
+    credentials: &str,
+    refresh_timeout: Duration,
+) -> RefreshOutcome {
+    let data: Value = match serde_json::from_str(credentials) {
         Ok(v) => v,
         Err(_) => {
             return RefreshOutcome {
@@ -672,7 +729,7 @@ pub async fn try_refresh_oauth_credentials(credentials: &str) -> RefreshOutcome 
         }
     };
 
-    let mut oauth: Map<String, Value> = match data.get("claudeAiOauth") {
+    let oauth: Map<String, Value> = match data.get("claudeAiOauth") {
         Some(Value::Object(map)) => map.clone(),
         _ => {
             return RefreshOutcome {
@@ -700,10 +757,7 @@ pub async fn try_refresh_oauth_credentials(credentials: &str) -> RefreshOutcome 
         "client_id": OAUTH_CLIENT_ID,
     });
 
-    let client = match reqwest::Client::builder()
-        .timeout(Duration::from_secs(10))
-        .build()
-    {
+    let client = match reqwest::Client::builder().timeout(refresh_timeout).build() {
         Ok(c) => c,
         Err(_) => {
             return RefreshOutcome {
@@ -763,62 +817,57 @@ pub async fn try_refresh_oauth_credentials(credentials: &str) -> RefreshOutcome 
         }
     };
 
-    let access_token = match resp_data.get("access_token").and_then(|v| v.as_str()) {
-        Some(t) => t.to_string(),
-        None => {
-            return RefreshOutcome {
-                credentials: None,
-                error: Some(RefreshError::Transient),
-                token_account: None,
-            }
-        }
-    };
-    // `.as_f64()` (not `.as_i64()`) so an `expires_in` sent as a JSON float
-    // (e.g. `3600.0`) still parses — Python's dynamic typing accepts either.
-    let expires_in = match resp_data.get("expires_in").and_then(|v| v.as_f64()) {
-        Some(v) => v as i64,
-        None => {
-            return RefreshOutcome {
-                credentials: None,
-                error: Some(RefreshError::Transient),
-                token_account: None,
-            }
-        }
-    };
-
-    let now_ms = Utc::now().timestamp_millis();
-    oauth.insert("accessToken".to_string(), Value::String(access_token));
-    oauth.insert(
-        "expiresAt".to_string(),
-        Value::Number(serde_json::Number::from(now_ms + expires_in * 1000)),
-    );
-    if let Some(rt) = resp_data.get("refresh_token").and_then(|v| v.as_str()) {
-        if !rt.is_empty() {
-            oauth.insert("refreshToken".to_string(), Value::String(rt.to_string()));
-        }
-    }
-    if let Some(scope) = resp_data.get("scope").and_then(|v| v.as_str()) {
-        if !scope.is_empty() {
-            let scopes: Vec<Value> = scope
-                .split_whitespace()
-                .map(|s| Value::String(s.to_string()))
-                .collect();
-            oauth.insert("scopes".to_string(), Value::Array(scopes));
-        }
-    }
-
     let token_account = parse_token_account(&resp_data);
-
-    if let Value::Object(top) = &mut data {
-        top.insert("claudeAiOauth".to_string(), Value::Object(oauth));
-    }
-    let credentials_out = serde_json::to_string(&data).ok();
+    let credentials_out =
+        apply_refresh_response(credentials, &resp_data, Utc::now().timestamp_millis());
 
     RefreshOutcome {
         credentials: credentials_out,
         error: None,
         token_account,
     }
+}
+
+fn apply_refresh_response(credentials: &str, response: &Value, now_ms: i64) -> Option<String> {
+    let mut data: Value = serde_json::from_str(credentials).ok()?;
+    let oauth = data.get_mut("claudeAiOauth")?.as_object_mut()?;
+    let access_token = response.get("access_token")?.as_str()?;
+    let expires_in = response.get("expires_in")?.as_f64()? as i64;
+
+    oauth.insert(
+        "accessToken".to_string(),
+        Value::String(access_token.to_string()),
+    );
+    oauth.insert(
+        "expiresAt".to_string(),
+        Value::Number(serde_json::Number::from(now_ms + expires_in * 1000)),
+    );
+    if let Some(refresh_token) = response
+        .get("refresh_token")
+        .and_then(Value::as_str)
+        .filter(|value| !value.is_empty())
+    {
+        oauth.insert(
+            "refreshToken".to_string(),
+            Value::String(refresh_token.to_string()),
+        );
+    }
+    if let Some(scope) = response
+        .get("scope")
+        .and_then(Value::as_str)
+        .filter(|value| !value.is_empty())
+    {
+        oauth.insert(
+            "scopes".to_string(),
+            Value::Array(
+                scope
+                    .split_whitespace()
+                    .map(|value| Value::String(value.to_string()))
+                    .collect(),
+            ),
+        );
+    }
+    serde_json::to_string(&data).ok()
 }
 
 /// Refresh an OAuth access token; `None` on any failure (see [`RefreshOutcome`]
@@ -907,10 +956,10 @@ pub async fn fetch_oauth_profile(access_token: &str) -> Option<TokenAccount> {
 // Usage fetch (network) — requirements 3, 4
 // ---------------------------------------------------------------------------
 
-/// Internal, unclassified network-layer failure from a usage-API call. Kept
-/// private: callers see the classified [`UsageError`] instead.
-#[derive(Debug)]
-enum UsageFetchError {
+/// Unclassified network-layer failure exposed only through the injectable
+/// transport boundary. Product callers see [`UsageError`] instead.
+#[derive(Debug, Clone, PartialEq)]
+pub enum UsageFetchError {
     Http {
         status: u16,
         retry_after_s: Option<f64>,
@@ -930,6 +979,12 @@ fn parse_retry_after(headers: &reqwest::header::HeaderMap) -> Option<f64> {
 /// responses carry the parsed `Retry-After` header (seconds form only — the
 /// HTTP-date form is rare enough to ignore, matching the Python source).
 async fn request_usage_data(access_token: &str) -> Result<Value, UsageFetchError> {
+    ReqwestOAuthNetwork::default()
+        .fetch_usage(access_token)
+        .await
+}
+
+async fn request_usage_data_direct(access_token: &str) -> Result<Value, UsageFetchError> {
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(5))
         .build()
@@ -1114,6 +1169,25 @@ pub async fn try_fetch_usage_for_account(
     is_active: bool,
     persist_credentials: Option<&PersistCallback>,
 ) -> UsageOutcome {
+    try_fetch_usage_for_account_with_network(
+        &ReqwestOAuthNetwork::default(),
+        account_num,
+        email,
+        credentials,
+        is_active,
+        persist_credentials,
+    )
+    .await
+}
+
+async fn try_fetch_usage_for_account_with_network(
+    network: &dyn OAuthNetwork,
+    account_num: &str,
+    email: &str,
+    credentials: &str,
+    is_active: bool,
+    persist_credentials: Option<&PersistCallback>,
+) -> UsageOutcome {
     // No email in the log context: paste-safe for public issues.
     let context = format!("for account {}", account_num);
 
@@ -1147,7 +1221,7 @@ pub async fn try_fetch_usage_for_account(
         .and_then(|v| v.as_f64());
 
     if !is_active && refresh_token_present && is_oauth_token_expired(expires_at) {
-        let refresh = try_refresh_oauth_credentials(&working_credentials).await;
+        let refresh = network.refresh(&working_credentials).await;
         if let Some(new_creds) = refresh.credentials {
             working_credentials = new_creds;
             persist(
@@ -1180,7 +1254,7 @@ pub async fn try_fetch_usage_for_account(
         // token; the 401 path below retries the refresh.
     }
 
-    match request_usage_data(&access_token).await {
+    match network.fetch_usage(&access_token).await {
         Ok(data) => match normalize_usage_response(&data) {
             Ok(usage) => UsageOutcome {
                 usage,
@@ -1217,7 +1291,7 @@ pub async fn try_fetch_usage_for_account(
             // refresh-token lineage is permanently dead — surface it
             // distinctly (not the generic "refresh-failed") so the store can
             // quarantine instead of retrying a dead token forever.
-            let refresh = try_refresh_oauth_credentials(&working_credentials).await;
+            let refresh = network.refresh(&working_credentials).await;
             let new_creds = match refresh.credentials {
                 Some(c) => c,
                 None => {
@@ -1258,7 +1332,7 @@ pub async fn try_fetch_usage_for_account(
                 }
             };
 
-            match request_usage_data(&new_token).await {
+            match network.fetch_usage(&new_token).await {
                 Ok(data) => match normalize_usage_response(&data) {
                     Ok(usage) => UsageOutcome {
                         usage,
@@ -1312,6 +1386,140 @@ pub async fn fetch_usage_for_account(
 mod tests {
     use super::*;
     use serde_json::json;
+    use std::collections::VecDeque;
+    use std::sync::{Arc, Mutex};
+
+    struct ScriptedNetwork {
+        refreshes: Mutex<VecDeque<RefreshOutcome>>,
+        usages: Mutex<VecDeque<Result<Value, UsageFetchError>>>,
+        calls: Mutex<Vec<String>>,
+    }
+
+    impl OAuthNetwork for ScriptedNetwork {
+        fn refresh<'a>(&'a self, credentials: &'a str) -> OAuthFuture<'a, RefreshOutcome> {
+            Box::pin(async move {
+                let token = extract_oauth_data(credentials)
+                    .and_then(|oauth| oauth.get("refreshToken").cloned())
+                    .and_then(|value| value.as_str().map(str::to_owned))
+                    .unwrap_or_default();
+                self.calls.lock().unwrap().push(format!("refresh:{token}"));
+                self.refreshes.lock().unwrap().pop_front().unwrap()
+            })
+        }
+
+        fn fetch_usage<'a>(
+            &'a self,
+            access_token: &'a str,
+        ) -> OAuthFuture<'a, Result<Value, UsageFetchError>> {
+            Box::pin(async move {
+                self.calls
+                    .lock()
+                    .unwrap()
+                    .push(format!("usage:{access_token}"));
+                self.usages.lock().unwrap().pop_front().unwrap()
+            })
+        }
+    }
+
+    #[test]
+    fn scripted_network_refresh_response_rotates_or_preserves_refresh_token() {
+        let original = json!({
+            "claudeAiOauth": {
+                "accessToken": "a-old",
+                "refreshToken": "r-old",
+                "expiresAt": 1
+            }
+        })
+        .to_string();
+        let rotated = apply_refresh_response(
+            &original,
+            &json!({"access_token":"a-new","refresh_token":"r-new","expires_in":3600}),
+            10_000,
+        )
+        .unwrap();
+        assert_eq!(
+            extract_oauth_data(&rotated)
+                .unwrap()
+                .get("refreshToken")
+                .and_then(Value::as_str),
+            Some("r-new")
+        );
+
+        let preserved = apply_refresh_response(
+            &original,
+            &json!({"access_token":"a-new","expires_in":3600}),
+            10_000,
+        )
+        .unwrap();
+        assert_eq!(
+            extract_oauth_data(&preserved)
+                .unwrap()
+                .get("refreshToken")
+                .and_then(Value::as_str),
+            Some("r-old")
+        );
+    }
+
+    #[tokio::test]
+    async fn scripted_network_exposes_401_and_preserves_exact_call_order() {
+        let original = json!({
+            "claudeAiOauth": {
+                "accessToken": "a-old",
+                "refreshToken": "r-old",
+                "expiresAt": 9_999_999_999_999_f64
+            }
+        })
+        .to_string();
+        let successor = json!({
+            "claudeAiOauth": {
+                "accessToken": "a-new",
+                "refreshToken": "r-new",
+                "expiresAt": 9_999_999_999_999_f64
+            }
+        })
+        .to_string();
+        let network = ScriptedNetwork {
+            refreshes: Mutex::new(VecDeque::from([RefreshOutcome {
+                credentials: Some(successor.clone()),
+                error: None,
+                token_account: None,
+            }])),
+            usages: Mutex::new(VecDeque::from([
+                Err(UsageFetchError::Http {
+                    status: 401,
+                    retry_after_s: None,
+                }),
+                Ok(json!({"five_hour":{"utilization":12.0}})),
+            ])),
+            calls: Mutex::new(Vec::new()),
+        };
+        let persisted = Arc::new(Mutex::new(Vec::new()));
+        let persisted_for_callback = Arc::clone(&persisted);
+        let persist = move |_: &str, _: &str, credentials: &str| {
+            persisted_for_callback
+                .lock()
+                .unwrap()
+                .push(credentials.to_string());
+            Ok(())
+        };
+
+        let result = try_fetch_usage_for_account_with_network(
+            &network,
+            "2",
+            "two@example.com",
+            &original,
+            false,
+            Some(&persist),
+        )
+        .await;
+
+        assert_eq!(result.usage.unwrap().five_hour.unwrap().pct, 12.0);
+        assert_eq!(*persisted.lock().unwrap(), vec![successor]);
+        assert_eq!(
+            network.calls.into_inner().unwrap(),
+            vec!["usage:a-old", "refresh:r-old", "usage:a-new"]
+        );
+    }
 
     // -- usage-response normaliser: legacy shape -----------------------------
 
@@ -1543,23 +1751,41 @@ mod tests {
     // -- error classification -------------------------------------------------
 
     #[test]
-    fn classify_refresh_failure_invalid_grant_requires_status_and_marker() {
+    fn classify_refresh_failure_requires_exact_structured_invalid_grant() {
         assert_eq!(
-            classify_refresh_failure(400, "error: invalid_grant"),
+            classify_refresh_failure(400, r#"{"error":"invalid_grant"}"#),
             RefreshError::InvalidGrant
         );
         assert_eq!(
-            classify_refresh_failure(401, "{\"error\":\"invalid_client\"}"),
-            RefreshError::InvalidGrant
-        );
-        assert_eq!(
-            classify_refresh_failure(403, "invalid_grant"),
+            classify_refresh_failure(
+                400,
+                r#"{"error":"invalid_grant","error_description":"expired"}"#
+            ),
             RefreshError::InvalidGrant
         );
     }
 
     #[test]
-    fn classify_refresh_failure_stays_transient_when_ambiguous() {
+    fn classify_refresh_failure_never_quarantines_ambiguous_responses() {
+        // A marker in prose is not the OAuth token error field.
+        assert_eq!(
+            classify_refresh_failure(400, "invalid_grant later"),
+            RefreshError::Transient
+        );
+        // Client configuration failures do not prove the grant is dead.
+        assert_eq!(
+            classify_refresh_failure(400, r#"{"error":"invalid_client"}"#),
+            RefreshError::Transient
+        );
+        // A resource-server status is not a token-endpoint invalid_grant.
+        assert_eq!(
+            classify_refresh_failure(401, r#"{"error":"invalid_grant"}"#),
+            RefreshError::Transient
+        );
+        assert_eq!(
+            classify_refresh_failure(403, r#"{"error":"invalid_grant"}"#),
+            RefreshError::Transient
+        );
         // Right status, unrelated body.
         assert_eq!(
             classify_refresh_failure(400, "internal error"),
@@ -1573,6 +1799,10 @@ mod tests {
         // Neither status nor marker.
         assert_eq!(classify_refresh_failure(503, ""), RefreshError::Transient);
         assert_eq!(classify_refresh_failure(401, ""), RefreshError::Transient);
+        assert_eq!(
+            classify_refresh_failure(400, "{not-json"),
+            RefreshError::Transient
+        );
     }
 
     #[test]
@@ -1622,12 +1852,21 @@ mod tests {
 
     #[test]
     fn token_expiry_uses_five_minute_buffer() {
-        assert!(!is_oauth_token_expired(None));
-
-        let now_ms = Utc::now().timestamp_millis() as f64;
-        assert!(!is_oauth_token_expired(Some(now_ms + 10.0 * 60_000.0))); // 10 min out
-        assert!(is_oauth_token_expired(Some(now_ms + 1.0 * 60_000.0))); // 1 min out
-        assert!(is_oauth_token_expired(Some(now_ms - 60_000.0))); // already past
+        let now_ms = 1_700_000_000_000.0;
+        assert!(!is_oauth_token_expired_at(None, now_ms));
+        assert!(!is_oauth_token_expired_at(
+            Some(now_ms + 10.0 * 60_000.0),
+            now_ms
+        ));
+        assert!(is_oauth_token_expired_at(
+            Some(now_ms + 1.0 * 60_000.0),
+            now_ms
+        ));
+        assert!(is_oauth_token_expired_at(Some(now_ms - 60_000.0), now_ms));
+        assert!(is_oauth_token_expired_at(
+            Some(now_ms + OAUTH_EXPIRY_BUFFER_MS as f64),
+            now_ms
+        ));
     }
 
     // -- reset-time formatting (pure, deterministic given both instants) -----

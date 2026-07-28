@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import BurnRateChart, { type BurnRateSeries } from "./BurnRateChart";
 import { mockHistoryRanges, type HistoryRangeId } from "../lib/mock";
-import { getAccounts, getSettings, historyAvailable, historySeries, historySummary } from "../lib/api";
+import { getAccounts, historyAvailable, historySeries, historySummary } from "../lib/api";
 import { displayName, stableKey, type DayStat, type HistorySummary } from "../types";
 
 const RANGE_ORDER: HistoryRangeId[] = ["7d", "30d", "90d"];
@@ -52,7 +52,7 @@ interface LoadedState {
  * this screen with no props, and history/settings are a separate read path
  * from the accounts snapshot `useSnapshot` owns.
  */
-export default function HistoryScreen() {
+export default function HistoryScreen({ settingsThreshold }: { settingsThreshold: number }) {
   const [rangeId, setRangeId] = useState<HistoryRangeId>("30d");
   const [loading, setLoading] = useState(true);
   const [state, setState] = useState<LoadedState | null>(null);
@@ -64,10 +64,8 @@ export default function HistoryScreen() {
     setLoading(true);
 
     (async () => {
-      const [accountsResult, settingsResult] = await Promise.all([getAccounts(), getSettings()]);
+      const accountsResult = await getAccounts();
       if (cancelled) return;
-
-      const threshold = settingsResult.data.threshold;
 
       if (!accountsResult.live) {
         // No backend at all: fall back to the same sample fixture the
@@ -87,7 +85,7 @@ export default function HistoryScreen() {
           series: range
             ? range.series.map((s) => ({ id: s.id, label: s.label, data: s.data, hasAnySample: s.data.length > 0 }))
             : [],
-          threshold,
+          threshold: settingsThreshold,
         });
         setLoading(false);
         return;
@@ -98,7 +96,7 @@ export default function HistoryScreen() {
         if (cancelled) return;
 
         if (!availableResult.data) {
-          setState({ live: true, available: false, summary: null, series: [], threshold });
+          setState({ live: true, available: false, summary: null, series: [], threshold: settingsThreshold });
           setLoading(false);
           return;
         }
@@ -138,11 +136,11 @@ export default function HistoryScreen() {
           available: true,
           summary: summaryResult.data,
           series: perAccount,
-          threshold,
+          threshold: settingsThreshold,
         });
       } catch {
         if (!cancelled) {
-          setState({ live: true, available: false, summary: null, series: [], threshold });
+          setState({ live: true, available: false, summary: null, series: [], threshold: settingsThreshold });
         }
       } finally {
         if (!cancelled) setLoading(false);
@@ -154,7 +152,7 @@ export default function HistoryScreen() {
     return () => {
       cancelled = true;
     };
-  }, [rangeId, days]);
+  }, [rangeId, days, settingsThreshold]);
 
   const meta = RANGE_META[rangeId];
 

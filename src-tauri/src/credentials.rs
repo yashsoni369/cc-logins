@@ -134,6 +134,15 @@ pub enum CredentialError {
     #[error("failed to write credentials: {0}")]
     Write(String),
 
+    #[error("could not snapshot exact active credential state: {0}")]
+    Snapshot(String),
+
+    #[error("could not restore exact active credential state: {0}")]
+    Restore(String),
+
+    #[error("active credential state does not match the recovery snapshot")]
+    VerificationFailed,
+
     /// A destination that must end up empty could not be verified empty
     /// (Python's `delete_account_credentials_strict`, which fails closed
     /// rather than risk resurfacing another account's material).
@@ -212,6 +221,21 @@ impl Backend {
 pub struct ActiveCredentials {
     pub value: Option<String>,
     pub keychain_unavailable: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase", tag = "presence", content = "value")]
+pub(crate) enum EntryState<T> {
+    Absent,
+    Present(T),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct ActiveCredentialState {
+    pub credentials_file: EntryState<Vec<u8>>,
+    pub oauth_keychain: EntryState<String>,
+    pub managed_keychain: EntryState<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -344,69 +368,9 @@ pub fn approved_form(api_key: &str) -> String {
 /// create_new, write, rename, cleanup on failure" shape Python's
 /// `tempfile.mkstemp(dir=..., suffix=".tmp")` provides.
 fn atomic_write(target: &Path, contents: &[u8]) -> io::Result<()> {
-    let dir = target.parent().unwrap_or_else(|| Path::new("."));
-    std::fs::create_dir_all(dir)?;
-
-    let file_name = target
-        .file_name()
-        .and_then(|n| n.to_str())
-        .unwrap_or("credential");
-    let tmp_path = dir.join(format!(
-        ".{file_name}.{}.{}.tmp",
-        std::process::id(),
-        next_tmp_suffix()
-    ));
-
-    let write_result = (|| -> io::Result<()> {
-        use std::io::Write;
-        let mut opts = std::fs::OpenOptions::new();
-        opts.write(true).create_new(true);
-        // Created 0600 rather than chmod'ed after the rename. With umask 022
-        // the old order left a plaintext credential world-readable for the
-        // whole write — open, write, fsync and rename all completed first.
-        #[cfg(not(windows))]
-        {
-            use std::os::unix::fs::OpenOptionsExt;
-            opts.mode(0o600);
-        }
-        let mut f = opts.open(&tmp_path)?;
-        f.write_all(contents)?;
-        f.sync_all()
-    })();
-
-    if let Err(e) = write_result {
-        let _ = std::fs::remove_file(&tmp_path);
-        return Err(e);
-    }
-
-    if let Err(e) = std::fs::rename(&tmp_path, target) {
-        let _ = std::fs::remove_file(&tmp_path);
-        return Err(e);
-    }
-
-    #[cfg(not(windows))]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        // Belt to the `mode(0o600)` brace above, for a pre-existing target
-        // whose mode the rename preserved. Deliberately not `?`: the rename
-        // has already committed, so failing here would report a successful
-        // switch as failed — the worst possible split state — over a file that
-        // is already correct in the common case.
-        if let Err(e) = std::fs::set_permissions(target, std::fs::Permissions::from_mode(0o600)) {
-            log::warn!("could not tighten permissions on {}: {e}", target.display());
-        }
-    }
-
-    Ok(())
-}
-
-/// Monotonic per-process counter for temp-file name uniqueness (avoids a
-/// dependency on a UUID/random crate for what is just filename collision
-/// avoidance within a single `atomic_write` caller).
-fn next_tmp_suffix() -> u64 {
-    use std::sync::atomic::{AtomicU64, Ordering};
-    static COUNTER: AtomicU64 = AtomicU64::new(0);
-    COUNTER.fetch_add(1, Ordering::Relaxed)
+    crate::durable_fs::stage_sibling(target, contents, Some(0o600))?
+        .commit()
+        .map_err(Into::into)
 }
 
 /// Best-effort process-local randomness for the unclaimed-credential entry
@@ -690,8 +654,8 @@ fn wrap_platform_bytes(plaintext: &[u8]) -> (ProtectionScheme, Vec<u8>) {
 }
 
 /// Encode `plaintext` into the versioned on-disk envelope described above.
-fn wrap_credential(plaintext: &str) -> Vec<u8> {
-    let (scheme, protected) = wrap_platform_bytes(plaintext.as_bytes());
+pub(crate) fn protect_bytes(plaintext: &[u8]) -> Vec<u8> {
+    let (scheme, protected) = wrap_platform_bytes(plaintext);
     let envelope = CredentialEnvelope {
         v: CREDENTIAL_ENVELOPE_VERSION,
         scheme: scheme.as_str().to_string(),
@@ -699,6 +663,29 @@ fn wrap_credential(plaintext: &str) -> Vec<u8> {
     };
     // A struct of plain String fields cannot fail to serialize.
     serde_json::to_vec(&envelope).expect("credential envelope serialization cannot fail")
+}
+
+fn wrap_credential(plaintext: &str) -> Vec<u8> {
+    protect_bytes(plaintext.as_bytes())
+}
+
+pub(crate) fn unprotect_bytes(raw: &[u8]) -> Result<Vec<u8>, String> {
+    let envelope = serde_json::from_slice::<CredentialEnvelope>(raw)
+        .map_err(|error| format!("protected artifact is not a valid envelope: {error}"))?;
+    if envelope.v != CREDENTIAL_ENVELOPE_VERSION {
+        return Err(format!(
+            "unsupported protected artifact version {}",
+            envelope.v
+        ));
+    }
+    let protected = BASE64_STANDARD
+        .decode(&envelope.data)
+        .map_err(|error| format!("protected artifact data is not valid base64: {error}"))?;
+    match envelope.scheme.as_str() {
+        "dpapi" => unwrap_dpapi(&protected),
+        "plain" | "keychain" => Ok(protected),
+        other => Err(format!("unrecognized protected artifact scheme {other:?}")),
+    }
 }
 
 /// Decode a stored credential blob, accepting both the current versioned
@@ -720,17 +707,9 @@ fn unwrap_credential(raw: &str) -> Result<String, String> {
     let trimmed = raw.trim();
 
     if let Ok(envelope) = serde_json::from_str::<CredentialEnvelope>(trimmed) {
-        let protected = BASE64_STANDARD
-            .decode(&envelope.data)
-            .map_err(|e| format!("credential envelope's data field is not valid base64: {e}"))?;
-        let plaintext = match envelope.scheme.as_str() {
-            "dpapi" => unwrap_dpapi(&protected)?,
-            // The file backend never writes "keychain" envelopes (see the
-            // module doc comment), but a byte-for-byte future migration
-            // scenario is still handled rather than rejected outright.
-            "plain" | "keychain" => protected,
-            other => return Err(format!("unrecognized credential envelope scheme {other:?}")),
-        };
+        let raw = serde_json::to_vec(&envelope)
+            .map_err(|error| format!("could not normalize credential envelope: {error}"))?;
+        let plaintext = unprotect_bytes(&raw)?;
         return String::from_utf8(plaintext)
             .map_err(|e| format!("decrypted credential was not valid UTF-8: {e}"));
     }
@@ -826,30 +805,13 @@ mod macos_keychain {
         "claude-code-user".to_string()
     }
 
-    #[cfg(target_os = "macos")]
+    #[cfg(all(target_os = "macos", not(test)))]
     mod imp {
         use super::KeychainError;
         use security_framework::base::Error as SfError;
         use security_framework::passwords::{
             delete_generic_password, get_generic_password, set_generic_password,
         };
-
-        /// The Keychain equivalent of `test_support::guard_real_store`.
-        ///
-        /// Keychain items are machine-global and keyed by service name, so no
-        /// `TempDir` can sandbox them — a test reaching here would read or
-        /// overwrite the developer's real Claude Code login. Every test host
-        /// pins its platform to the file backend, so this is unreachable; if
-        /// it ever is reached, stop rather than touch real credentials.
-        #[cfg(test)]
-        fn refuse_in_tests(op: &str) -> ! {
-            panic!(
-                "REFUSING TO RUN: a test reached the real macOS Keychain ({op}).\n\
-                 Keychain items are machine-global and cannot be sandboxed by a temp \
-                 directory, so this would read or overwrite the real Claude Code login. \
-                 Pin the StoreHost's platform to the file backend instead."
-            );
-        }
 
         /// `errSecItemNotFound`.
         const ERR_SEC_ITEM_NOT_FOUND: i32 = -25300;
@@ -860,8 +822,6 @@ mod macos_keychain {
         }
 
         pub fn get_password(service: &str, account: &str) -> Result<Option<String>, KeychainError> {
-            #[cfg(test)]
-            refuse_in_tests("get_password");
             match get_generic_password(service, account) {
                 Ok(bytes) => String::from_utf8(bytes).map(Some).map_err(|e| {
                     KeychainError(format!(
@@ -880,8 +840,6 @@ mod macos_keychain {
             account: &str,
             password: &str,
         ) -> Result<(), KeychainError> {
-            #[cfg(test)]
-            refuse_in_tests("set_password");
             set_generic_password(service, account, password.as_bytes()).map_err(|e| {
                 KeychainError(format!(
                     "keychain add-generic-password failed for {service}/{account}: {e}"
@@ -890,8 +848,6 @@ mod macos_keychain {
         }
 
         pub fn delete_password(service: &str, account: &str) -> Result<(), KeychainError> {
-            #[cfg(test)]
-            refuse_in_tests("delete_password");
             match delete_generic_password(service, account) {
                 Ok(()) => Ok(()),
                 Err(e) if is_not_found(&e) => Ok(()), // already absent counts as success
@@ -899,6 +855,43 @@ mod macos_keychain {
                     "keychain delete-generic-password failed for {service}/{account}: {e}"
                 ))),
             }
+        }
+    }
+
+    /// The Keychain equivalent of `test_support::guard_real_store`.
+    ///
+    /// Keychain items are machine-global and keyed by service name, so no
+    /// `TempDir` can sandbox them. The test implementation is compiled instead
+    /// of the production implementation, making it impossible for a macOS test
+    /// binary to reach the real Keychain APIs.
+    #[cfg(all(target_os = "macos", test))]
+    mod imp {
+        use super::KeychainError;
+
+        fn unavailable(op: &str) -> KeychainError {
+            KeychainError(format!(
+                "macOS Keychain unavailable in tests ({op}); the test implementation \
+                 never accesses machine-global Keychain items"
+            ))
+        }
+
+        pub fn get_password(
+            _service: &str,
+            _account: &str,
+        ) -> Result<Option<String>, KeychainError> {
+            Err(unavailable("get_password"))
+        }
+
+        pub fn set_password(
+            _service: &str,
+            _account: &str,
+            _password: &str,
+        ) -> Result<(), KeychainError> {
+            Err(unavailable("set_password"))
+        }
+
+        pub fn delete_password(_service: &str, _account: &str) -> Result<(), KeychainError> {
+            Err(unavailable("delete_password"))
         }
     }
 
@@ -932,6 +925,36 @@ mod macos_keychain {
 }
 
 use macos_keychain::KeychainError;
+
+fn restore_keychain_entry(
+    service: &str,
+    account: &str,
+    state: &EntryState<String>,
+) -> Result<(), CredentialError> {
+    match state {
+        EntryState::Absent => macos_keychain::delete_password(service, account),
+        EntryState::Present(value) => macos_keychain::set_password(service, account, value),
+    }
+    .map_err(|error| CredentialError::Restore(error.to_string()))
+}
+
+#[cfg(target_os = "macos")]
+pub(crate) fn recovery_keychain_get(account: &str) -> Result<Option<String>, String> {
+    macos_keychain::get_password("cc-logins-switch-recovery", account)
+        .map_err(|error| error.to_string())
+}
+
+#[cfg(all(target_os = "macos", not(test)))]
+pub(crate) fn recovery_keychain_set(account: &str, value: &str) -> Result<(), String> {
+    macos_keychain::set_password("cc-logins-switch-recovery", account, value)
+        .map_err(|error| error.to_string())
+}
+
+#[cfg(target_os = "macos")]
+pub(crate) fn recovery_keychain_delete(account: &str) -> Result<(), String> {
+    macos_keychain::delete_password("cc-logins-switch-recovery", account)
+        .map_err(|error| error.to_string())
+}
 
 // ---------------------------------------------------------------------------
 // CredentialStore.
@@ -1154,6 +1177,91 @@ impl<H: StoreHost> CredentialStore<H> {
         }
     }
 
+    /// Snapshot exact presence and bytes for every active credential backend.
+    /// Unlike [`Self::read_active_credentials`], this never normalizes absent
+    /// and empty values or falls through between backends.
+    pub(crate) fn snapshot_active_state(
+        &mut self,
+    ) -> Result<ActiveCredentialState, CredentialError> {
+        let file = crate::durable_fs::snapshot(&crate::paths::credentials_path())?;
+        let credentials_file = if file.existed {
+            EntryState::Present(file.bytes)
+        } else {
+            EntryState::Absent
+        };
+        let (oauth_keychain, managed_keychain) = if self.host.platform() == Platform::Macos {
+            let account = macos_keychain::keychain_account_name();
+            let oauth = macos_keychain::get_password(CLAUDE_CODE_KEYCHAIN_SERVICE, &account)
+                .map_err(|error| CredentialError::Snapshot(error.to_string()))?;
+            let managed =
+                macos_keychain::get_password(CLAUDE_CODE_MANAGED_KEYCHAIN_SERVICE, &account)
+                    .map_err(|error| CredentialError::Snapshot(error.to_string()))?;
+            (
+                oauth.map_or(EntryState::Absent, EntryState::Present),
+                managed.map_or(EntryState::Absent, EntryState::Present),
+            )
+        } else {
+            (EntryState::Absent, EntryState::Absent)
+        };
+        Ok(ActiveCredentialState {
+            credentials_file,
+            oauth_keychain,
+            managed_keychain,
+        })
+    }
+
+    /// Restore every backend exactly, including absence. A failure is
+    /// propagated so journal recovery can retain its artifacts and retry.
+    pub(crate) fn restore_active_state(
+        &mut self,
+        state: &ActiveCredentialState,
+    ) -> Result<(), CredentialError> {
+        let file_state = match &state.credentials_file {
+            EntryState::Absent => crate::durable_fs::FileState {
+                existed: false,
+                bytes: Vec::new(),
+            },
+            EntryState::Present(bytes) => crate::durable_fs::FileState {
+                existed: true,
+                bytes: bytes.clone(),
+            },
+        };
+        crate::durable_fs::restore(&crate::paths::credentials_path(), &file_state, Some(0o600))
+            .map_err(std::io::Error::from)?;
+
+        if self.host.platform() == Platform::Macos {
+            let account = macos_keychain::keychain_account_name();
+            restore_keychain_entry(
+                CLAUDE_CODE_KEYCHAIN_SERVICE,
+                &account,
+                &state.oauth_keychain,
+            )?;
+            restore_keychain_entry(
+                CLAUDE_CODE_MANAGED_KEYCHAIN_SERVICE,
+                &account,
+                &state.managed_keychain,
+            )?;
+        } else if state.oauth_keychain != EntryState::Absent
+            || state.managed_keychain != EntryState::Absent
+        {
+            return Err(CredentialError::Restore(
+                "snapshot contains Keychain state on a non-macOS backend".to_string(),
+            ));
+        }
+        Ok(())
+    }
+
+    pub(crate) fn verify_active_state(
+        &mut self,
+        expected: &ActiveCredentialState,
+    ) -> Result<(), CredentialError> {
+        if self.snapshot_active_state()? == *expected {
+            Ok(())
+        } else {
+            Err(CredentialError::VerificationFailed)
+        }
+    }
+
     /// Read the active managed API key, or `""` when absent. Non-mutating
     /// aside from the Keychain-capability cache.
     fn read_managed_key(&mut self) -> String {
@@ -1264,6 +1372,35 @@ impl<H: StoreHost> CredentialStore<H> {
             self.clear_managed_key();
             Ok(())
         }
+    }
+
+    /// Replace only Claude Code's active OAuth generation.
+    ///
+    /// Active refresh already holds the credential locks and must not touch
+    /// global config while the GUI vault lock is held. Unlike
+    /// [`Self::write_credentials`], this deliberately leaves the managed-key
+    /// axis unchanged.
+    pub(crate) fn write_refreshed_oauth_credentials(
+        &mut self,
+        credentials: &str,
+    ) -> Result<(), CredentialError> {
+        let oauth = serde_json::from_str::<Value>(credentials)
+            .ok()
+            .and_then(|value| value.get("claudeAiOauth").cloned())
+            .and_then(|value| value.as_object().cloned())
+            .ok_or_else(|| CredentialError::Write("refreshed OAuth payload is malformed".into()))?;
+        let has_pair = ["accessToken", "refreshToken"].into_iter().all(|field| {
+            oauth
+                .get(field)
+                .and_then(Value::as_str)
+                .is_some_and(|value| !value.is_empty())
+        });
+        if !has_pair {
+            return Err(CredentialError::Write(
+                "refreshed OAuth payload lacks a complete token pair".into(),
+            ));
+        }
+        self.write_oauth_credentials(credentials)
     }
 
     /// Activate a managed API key, then clear OAuth (mutual exclusion).
@@ -1949,17 +2086,51 @@ impl<H: StoreHost> CredentialStore<H> {
         let nonce = random_hex_suffix(3);
         let entry_id = format!("{ts}-{digest_short}-{nonce}");
 
-        self.atomic_envelope_write(&self.stash_entry_path(&entry_id), credentials)?;
+        self.write_unclaimed_credential_named(&entry_id, credentials, context)?;
+        Ok(entry_id)
+    }
+
+    /// Idempotent transaction-recovery form of the unclaimed stash writer.
+    /// Reusing the same safe identifier with the same bytes repairs/updates
+    /// its manifest row; different bytes fail closed.
+    pub(crate) fn write_unclaimed_credential_named(
+        &mut self,
+        entry_id: &str,
+        credentials: &str,
+        context: Map<String, Value>,
+    ) -> Result<(), CredentialError> {
+        if entry_id.is_empty()
+            || !entry_id
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
+        {
+            return Err(CredentialError::Write(
+                "invalid unclaimed credential identifier".to_string(),
+            ));
+        }
+
+        let entry_path = self.stash_entry_path(entry_id);
+        if entry_path.exists() {
+            let existing = std::fs::read_to_string(&entry_path)
+                .map_err(|error| CredentialError::Write(error.to_string()))?;
+            let decoded = unwrap_credential(&existing).map_err(CredentialError::Write)?;
+            if decoded != credentials {
+                return Err(CredentialError::Write(
+                    "unclaimed credential identifier already contains different bytes".to_string(),
+                ));
+            }
+        } else {
+            self.atomic_envelope_write(&entry_path, credentials)?;
+        }
 
         let mut entries = self.read_stash_manifest();
         let mut entry = context;
-        entry.insert(
-            "createdAt".to_string(),
-            Value::String(now.format("%Y-%m-%dT%H:%M:%SZ").to_string()),
-        );
-        entries.insert(entry_id.clone(), Value::Object(entry));
+        entry.entry("createdAt".to_string()).or_insert_with(|| {
+            Value::String(chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string())
+        });
+        entries.insert(entry_id.to_string(), Value::Object(entry));
         self.write_stash_manifest(entries)?;
-        Ok(entry_id)
+        Ok(())
     }
 
     /// Manifest entries by id, including orphaned entry files (no metadata).
@@ -2432,6 +2603,24 @@ mod tests {
     }
 
     #[test]
+    fn named_unclaimed_credential_is_idempotent_and_rejects_different_bytes() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = file_backed_store(dir.path());
+        let mut context = Map::new();
+        context.insert("reason".to_string(), Value::String("recovery".to_string()));
+        store
+            .write_unclaimed_credential_named("recovery-tx-1", "same-secret", context.clone())
+            .unwrap();
+        store
+            .write_unclaimed_credential_named("recovery-tx-1", "same-secret", context)
+            .unwrap();
+        assert_eq!(store.list_unclaimed_credentials().len(), 1);
+        assert!(store
+            .write_unclaimed_credential_named("recovery-tx-1", "different-secret", Map::new(),)
+            .is_err());
+    }
+
+    #[test]
     fn orphaned_unclaimed_entry_file_is_listed_without_manifest_metadata() {
         let dir = tempfile::tempdir().unwrap();
         let store = file_backed_store(dir.path());
@@ -2495,6 +2684,30 @@ mod tests {
     }
 
     #[test]
+    fn write_refreshed_oauth_credentials_does_not_mutate_managed_key_config() {
+        let dir = tempfile::tempdir().unwrap();
+        let _env = EnvVarScope::set(dir.path());
+        let global_config = dir.path().join(".claude.json");
+        std::fs::write(
+            &global_config,
+            r#"{"primaryApiKey":"keep-me","customApiKeyResponses":{"approved":["keep"]}}"#,
+        )
+        .unwrap();
+        let before = std::fs::read_to_string(&global_config).unwrap();
+        let refreshed =
+            r#"{"claudeAiOauth":{"accessToken":"new-access","refreshToken":"new-refresh"}}"#;
+
+        let mut store = file_backed_store(dir.path());
+        store.write_refreshed_oauth_credentials(refreshed).unwrap();
+
+        assert_eq!(std::fs::read_to_string(global_config).unwrap(), before);
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join(".credentials.json")).unwrap(),
+            refreshed
+        );
+    }
+
+    #[test]
     fn write_managed_credentials_sets_primary_api_key_and_approved() {
         let dir = tempfile::tempdir().unwrap();
         let _env = EnvVarScope::set(dir.path());
@@ -2547,6 +2760,88 @@ mod tests {
         assert_eq!(
             data["primaryApiKey"],
             "sk-ant-api03-abcdefghijklmnopqrstuvwxyz"
+        );
+    }
+
+    #[test]
+    fn snapshot_distinguishes_absent_from_present_empty_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let _env = EnvVarScope::set(dir.path());
+        let mut store = file_backed_store(dir.path());
+
+        let absent = store.snapshot_active_state().unwrap();
+        assert_eq!(absent.credentials_file, EntryState::Absent);
+        std::fs::write(dir.path().join(".credentials.json"), b"").unwrap();
+        let empty = store.snapshot_active_state().unwrap();
+        assert_eq!(empty.credentials_file, EntryState::Present(Vec::new()));
+    }
+
+    #[test]
+    fn restore_reinstates_exact_bytes_and_removes_a_previously_absent_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let _env = EnvVarScope::set(dir.path());
+        let mut store = file_backed_store(dir.path());
+        let absent = store.snapshot_active_state().unwrap();
+        std::fs::write(dir.path().join(".credentials.json"), b"temporary").unwrap();
+        store.restore_active_state(&absent).unwrap();
+        assert!(!dir.path().join(".credentials.json").exists());
+
+        let original = b"{\"claudeAiOauth\":{\"accessToken\":\"original\"}}";
+        std::fs::write(dir.path().join(".credentials.json"), original).unwrap();
+        let snapshot = store.snapshot_active_state().unwrap();
+        std::fs::write(dir.path().join(".credentials.json"), b"changed").unwrap();
+        store.restore_active_state(&snapshot).unwrap();
+        assert_eq!(
+            std::fs::read(dir.path().join(".credentials.json")).unwrap(),
+            original
+        );
+        store.verify_active_state(&snapshot).unwrap();
+    }
+
+    #[test]
+    fn verification_detects_a_stale_shadow_generation() {
+        let dir = tempfile::tempdir().unwrap();
+        let _env = EnvVarScope::set(dir.path());
+        let mut store = file_backed_store(dir.path());
+        std::fs::write(dir.path().join(".credentials.json"), b"first").unwrap();
+        let expected = store.snapshot_active_state().unwrap();
+        std::fs::write(dir.path().join(".credentials.json"), b"second").unwrap();
+        assert!(matches!(
+            store.verify_active_state(&expected),
+            Err(CredentialError::VerificationFailed)
+        ));
+    }
+
+    #[test]
+    fn unknown_keychain_presence_fails_closed() {
+        let dir = tempfile::tempdir().unwrap();
+        let _env = EnvVarScope::set(dir.path());
+        let mut store = CredentialStore::new(TestHost {
+            platform: Platform::Macos,
+            credentials_dir: dir.path().to_path_buf(),
+        });
+        assert!(matches!(
+            store.snapshot_active_state(),
+            Err(CredentialError::Snapshot(_))
+        ));
+    }
+
+    #[test]
+    fn oauth_to_api_key_transition_can_restore_the_exact_oauth_backend() {
+        let dir = tempfile::tempdir().unwrap();
+        let _env = EnvVarScope::set(dir.path());
+        let mut store = file_backed_store(dir.path());
+        let oauth = r#"{"claudeAiOauth":{"accessToken":"oauth"}}"#;
+        store.write_credentials(oauth).unwrap();
+        let before = store.snapshot_active_state().unwrap();
+        store
+            .write_credentials("sk-ant-api03-abcdefghijklmnopqrstuvwxyz")
+            .unwrap();
+        assert!(!dir.path().join(".credentials.json").exists());
+        store.restore_active_state(&before).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join(".credentials.json")).unwrap(),
+            oauth
         );
     }
 }

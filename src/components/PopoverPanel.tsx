@@ -1,38 +1,19 @@
 /**
- * The tray popover — screens 02 and 03 of the wireframe, and the surface
- * users see 90% of the time. Anchored under the tray icon, it answers one
- * question ("where do I stand, and do I need to act?") and lets a click
- * switch accounts without ever opening the full dashboard.
- *
- * Data comes from the same `useSnapshot` poller the main window uses — this
- * file does not start a second one. `previewTarget` is read alongside every
- * poll purely to power the "next" hint and the exhausted-state check; it is
- * never used to trigger a switch on its own. The only path that calls the
- * mutating `switchAccount` is an explicit click (a list row or "Switch now").
+ * Tray popover. Usage data is display-only; every automatic-switch label and
+ * action comes from the backend's revisioned `DaemonStatus` contract.
  */
 
 import { useCallback, useEffect, useRef, useState, type CSSProperties } from "react";
-import type { Account } from "@/types";
-import { ageLabel, bindingUtilisation, displayName, quotaState } from "@/types";
-import { hasBackend, IpcError, previewTarget, switchAccount } from "@/lib/api";
+
+import { RefreshButton } from "@/components/RefreshButton";
+import UsageMeter from "@/components/UsageMeter";
+import { hasBackend, IpcError, switchAccount } from "@/lib/api";
+import { useDaemonStatus } from "@/lib/useDaemonStatus";
+import { useSettings } from "@/lib/useSettings";
 import { useSnapshot } from "@/lib/useSnapshot";
 import { useTheme } from "@/lib/useTheme";
-import UsageMeter from "@/components/UsageMeter";
-import { RefreshButton } from "@/components/RefreshButton";
+import { ageLabel, bindingUtilisation, displayName } from "@/types";
 
-/** Matches the Settings screen's default auto-switch threshold and grace period. */
-const GRACE_PERIOD_SECONDS = 60;
-/** How long "Hold 1h" suppresses the limit banner for, client-side only. */
-const HOLD_DURATION_MS = 60 * 60 * 1000;
-
-/**
- * Persistent, non-dismissible notice that this popover is showing `mock.ts`
- * sample data because no Tauri backend is present. Same approach as
- * `App.tsx`'s `SampleDataBanner` — not imported from there because it isn't
- * exported, but deliberately identical: no close affordance, no colour
- * (this isn't a quota state), unmissable via full width and inverted
- * contrast instead.
- */
 function SampleDataBanner() {
   return (
     <div className="sample-banner" role="status">
@@ -41,42 +22,28 @@ function SampleDataBanner() {
   );
 }
 
-/** Lazily imports the window API so a plain-browser session never loads it. */
 async function currentPopoverWindow() {
   const { getCurrentWindow } = await import("@tauri-apps/api/window");
   return getCurrentWindow();
 }
 
-/**
- * Hides the popover the way a real menu behaves: losing focus, or Escape.
- * Window show/hide is not credential-mutating, so unlike `switchAccount` it
- * is fine to trigger from an effect.
- */
 function useDismissOnBlurOrEscape() {
   useEffect(() => {
     if (!hasBackend()) return;
     let cancelled = false;
     let unlisten: (() => void) | undefined;
-
     void (async () => {
       const win = await currentPopoverWindow();
       const off = await win.onFocusChanged(({ payload: focused }) => {
         if (!focused) void win.hide();
       });
-      if (cancelled) {
-        off();
-      } else {
-        unlisten = off;
-      }
+      if (cancelled) off();
+      else unlisten = off;
     })();
-
     const onKeyDown = (event: KeyboardEvent) => {
-      if (event.key === "Escape") {
-        void currentPopoverWindow().then((win) => win.hide());
-      }
+      if (event.key === "Escape") void currentPopoverWindow().then((win) => win.hide());
     };
     window.addEventListener("keydown", onKeyDown);
-
     return () => {
       cancelled = true;
       unlisten?.();
@@ -85,18 +52,11 @@ function useDismissOnBlurOrEscape() {
   }, []);
 }
 
-/**
- * Grows/shrinks the popover window to match its own content height. The
- * window is `resizable: false` (no user drag-resize) but that does not
- * block a programmatic `setSize`, which is how "height sized to content"
- * from a fixed-width window is achieved without hardcoding a height.
- */
 function useSizeToContent(ref: { current: HTMLDivElement | null }) {
   useEffect(() => {
     if (!hasBackend()) return;
     const node = ref.current;
     if (!node) return;
-
     let frame = 0;
     const apply = async (height: number) => {
       const [win, { LogicalSize }] = await Promise.all([
@@ -105,7 +65,6 @@ function useSizeToContent(ref: { current: HTMLDivElement | null }) {
       ]);
       await win.setSize(new LogicalSize(340, Math.max(1, Math.ceil(height))));
     };
-
     const observer = new ResizeObserver((entries) => {
       const height = entries[0]?.contentRect.height;
       if (height == null) return;
@@ -113,7 +72,6 @@ function useSizeToContent(ref: { current: HTMLDivElement | null }) {
       frame = requestAnimationFrame(() => void apply(height));
     });
     observer.observe(node);
-
     return () => {
       cancelAnimationFrame(frame);
       observer.disconnect();
@@ -121,107 +79,58 @@ function useSizeToContent(ref: { current: HTMLDivElement | null }) {
   }, [ref]);
 }
 
-/** Per-account outcome of the most recent switch attempt. */
+function clock(iso: string): string {
+  const date = new Date(iso);
+  if (Number.isNaN(date.getTime())) return "an unknown time";
+  return new Intl.DateTimeFormat(undefined, { hour: "numeric", minute: "2-digit" }).format(date);
+}
+
 interface SwitchErrorState {
   accountNumber: number;
   message: string;
 }
 
 export default function PopoverPanel() {
+  const settings = useSettings();
+  const daemon = useDaemonStatus();
   const { snapshot, live, loading, error, refresh } = useSnapshot();
   const rootRef = useRef<HTMLDivElement>(null);
-
-  // This popover is its own browsing context with its own <html> — the
-  // dashboard window's useTheme() call in App.tsx does not reach it, so it
-  // applies (and keeps live) the persisted theme itself. There is no theme
-  // control here; the popover only ever displays what Settings decided.
-  useTheme();
-
+  useTheme(settings);
   useDismissOnBlurOrEscape();
   useSizeToContent(rootRef);
 
   const [pendingAccount, setPendingAccount] = useState<number | null>(null);
   const [switchError, setSwitchError] = useState<SwitchErrorState | null>(null);
-  // undefined = not fetched yet; null = no viable target right now.
-  const [target, setTarget] = useState<Account | null | undefined>(undefined);
-  const [heldUntil, setHeldUntil] = useState<number | null>(null);
-  const [notifyAtReset, setNotifyAtReset] = useState(false);
-  const [now, setNow] = useState(() => Date.now());
-  const armedSinceRef = useRef<number | null>(null);
+  const [actionError, setActionError] = useState<string | null>(null);
+  const [now, setNow] = useState(Date.now);
 
-  const accounts = snapshot?.environments.flatMap((e) => e.accounts) ?? [];
-  const activeAccount = accounts.find((a) => a.active) ?? null;
-  const activeUtil = bindingUtilisation(activeAccount?.usage);
-  const activeState = quotaState(activeUtil);
-
-  // Read-only, refreshed alongside every snapshot poll. Powers the "next"
-  // hint and the exhausted check only — never reachable from a switch path.
+  const phase = daemon.status?.phase;
+  const recoveryBlocked = phase?.kind === "recoveryRequired";
   useEffect(() => {
-    let cancelled = false;
-    previewTarget()
-      .then((t) => {
-        if (!cancelled) setTarget(t);
-      })
-      .catch(() => {
-        if (!cancelled) setTarget(null);
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, [snapshot]);
+    if (phase?.kind !== "warning") return;
+    const timer = window.setInterval(() => setNow(Date.now()), 1000);
+    return () => window.clearInterval(timer);
+  }, [phase]);
 
-  const isHeld = heldUntil != null && now < heldUntil;
-  const isDanger = activeState === "danger" && activeUtil != null;
-  const hasTarget = target != null;
-  const armed = isDanger && hasTarget && !isHeld;
-  const exhausted = isDanger && target === null;
+  const accounts = snapshot?.environments.flatMap((environment) => environment.accounts) ?? [];
+  const activeAccount = accounts.find((account) => account.active) ?? null;
+  const warningTarget =
+    phase?.kind === "warning" ? accounts.find((account) => account.number === phase.to) ?? null : null;
 
-  // A healthy popover has nothing counting down — the tick only runs while
-  // there's something time-sensitive on screen (an armed countdown, or a
-  // hold waiting to expire).
-  useEffect(() => {
-    if (!armed && !isHeld) return;
-    const id = setInterval(() => setNow(Date.now()), 1000);
-    return () => clearInterval(id);
-  }, [armed, isHeld]);
-
-  useEffect(() => {
-    if (armed) {
-      armedSinceRef.current ??= Date.now();
-    } else {
-      armedSinceRef.current = null;
-    }
-  }, [armed]);
-
-  const secondsLeft = armed
-    ? Math.max(0, GRACE_PERIOD_SECONDS - Math.floor((now - (armedSinceRef.current ?? now)) / 1000))
-    : null;
-
-  const earliestReset = accounts.reduce<{ at: number; clock: string; alias: string } | null>((best, a) => {
-    const resetsAt = a.usage?.fiveHour?.resetsAt;
-    const clock = a.usage?.fiveHour?.clock;
-    if (!resetsAt || !clock) return best;
-    const at = Date.parse(resetsAt);
-    if (Number.isNaN(at)) return best;
-    if (!best || at < best.at) return { at, clock, alias: displayName(a) };
-    return best;
-  }, null);
-
-  // The ONLY call site for the mutating `switchAccount` in this file, wired
-  // exclusively to onClick handlers below — never an effect, timer, or the
-  // countdown reaching zero.
   const handleSwitch = useCallback(
     (accountNumber: number) => {
       setPendingAccount(accountNumber);
       setSwitchError(null);
       switchAccount(accountNumber)
         .then(() => refresh())
-        .catch((err: unknown) => {
+        .catch((reason: unknown) => {
           const message =
-            err instanceof IpcError && err.isBusy
-              ? "Another process (very likely the cswap CLI) is using your accounts right now. Try again in a moment."
-              : err instanceof Error
-                ? err.message
+            reason instanceof IpcError && reason.isBusy
+              ? "Another process is using your accounts right now. Try again in a moment."
+              : reason instanceof IpcError && reason.isReloginRequired
+                ? "This account needs a fresh sign-in before it can be activated."
+              : reason instanceof Error
+                ? reason.message
                 : "Couldn't switch accounts.";
           setSwitchError({ accountNumber, message });
         })
@@ -229,6 +138,20 @@ export default function PopoverPanel() {
     },
     [refresh],
   );
+
+  const snooze = useCallback(() => {
+    setActionError(null);
+    void settings.snooze(3600).catch((reason: unknown) => {
+      setActionError(reason instanceof Error ? reason.message : "Couldn't pause auto-switch.");
+    });
+  }, [settings.snooze]);
+
+  const resume = useCallback(() => {
+    setActionError(null);
+    void settings.resume().catch((reason: unknown) => {
+      setActionError(reason instanceof Error ? reason.message : "Couldn't resume auto-switch.");
+    });
+  }, [settings.resume]);
 
   if (loading && !snapshot) {
     return (
@@ -264,164 +187,136 @@ export default function PopoverPanel() {
     );
   }
 
-  const others = accounts.filter((a) => a.number !== activeAccount.number);
+  const activeUtil = bindingUtilisation(activeAccount.usage);
+  const others = accounts.filter((account) => account.number !== activeAccount.number);
   const fiveHour = activeAccount.usage?.fiveHour;
   const sevenDay = activeAccount.usage?.sevenDay;
   const activeAge = ageLabel(activeAccount.usageAgeSeconds);
-  // Last-good values render regardless, per the staleness rule — they just
-  // dim rather than look freshly confirmed when the latest poll failed.
   const dimStyle: CSSProperties | undefined = error ? { opacity: 0.55 } : undefined;
-
-  const showBanner = armed || exhausted;
-  const headerPillClass = showBanner ? "danger" : "on";
-  // Never print a number we do not have: an unreadable active account shows
-  // "no reading" rather than a reassuring 0%.
-  const headerPillText = showBanner
-    ? activeUtil == null
-      ? "no reading"
-      : `${Math.round(activeUtil)}%`
-    : "active";
-
-  const bindingLabel =
-    activeUtil != null && fiveHour?.pct === activeUtil ? "5-hour" : activeUtil != null && sevenDay?.pct === activeUtil ? "7-day" : "quota";
+  const urgent = phase?.kind === "warning" || phase?.kind === "switching" || phase?.kind === "exhausted";
+  const secondsLeft =
+    phase?.kind === "warning"
+      ? Math.max(0, Math.ceil((Date.parse(phase.deadline) - now) / 1000))
+      : null;
 
   return (
     <div className="pop" ref={rootRef}>
       {!live && <SampleDataBanner />}
 
-      {exhausted && (
-        <div className="banner danger" role="status">
-          <span>All accounts at their limit</span>
+      {phase?.kind === "warning" && (
+        <div className="banner caution" role="status">
+          <span>Switch planned to {warningTarget ? displayName(warningTarget) : `account ${phase.to}`}</span>
+          <span className="sp" />
+          <span className="num">{secondsLeft === 0 ? "switching now" : `switching in ${secondsLeft}s`}</span>
         </div>
       )}
-      {armed && (
-        <div className="banner caution" role="status">
-          <span>{bindingLabel} limit in reach</span>
-          <span className="sp"></span>
-          <span className="num">{secondsLeft === 0 ? "switching any moment" : `switching in ${secondsLeft}s`}</span>
+      {phase?.kind === "switching" && <div className="banner caution">Switching accounts now…</div>}
+      {phase?.kind === "exhausted" && <div className="banner danger">All accounts at their limit</div>}
+      {phase?.kind === "paused" && <div className="banner caution">Paused until {clock(phase.until)}</div>}
+      {phase?.kind === "cooldown" && <div className="banner caution">Cooldown until {clock(phase.until)}</div>}
+      {phase?.kind === "degraded" && (
+        <div className="banner caution">
+          {phase.reason === "usageUnknown" ? "Usage is currently unknown" : "The latest usage fetch failed"}
+        </div>
+      )}
+      {phase?.kind === "recoveryRequired" && (
+        <div className="banner danger" style={{ display: "block" }}>
+          <b>Recovery required</b>
+          <div style={{ marginTop: 4 }}>{phase.detail}</div>
         </div>
       )}
 
       <div className="pop-head">
         <div className="who">
-          <span className="mark on"></span>
+          <span className="mark on" />
           <span className="alias">{displayName(activeAccount)}</span>
-          <span className={`pill ${headerPillClass}`}>{headerPillText}</span>
+          <span className={`pill ${urgent ? "danger" : "on"}`}>
+            {urgent && activeUtil != null ? `${Math.round(activeUtil)}%` : "active"}
+          </span>
           {activeAge && <span className="pill">{activeAge}</span>}
         </div>
         <div className="pop-win">
           {fiveHour && (
             <div className="row">
               <span className="lab">5h</span>
-              <div style={dimStyle}>
-                <UsageMeter pct={fiveHour.pct} />
-              </div>
+              <div style={dimStyle}><UsageMeter pct={fiveHour.pct} /></div>
               <span className="rst">{fiveHour.clock ?? "—"}</span>
             </div>
           )}
           {sevenDay && (
             <div className="row">
               <span className="lab">7d</span>
-              <div style={dimStyle}>
-                <UsageMeter pct={sevenDay.pct} />
-              </div>
+              <div style={dimStyle}><UsageMeter pct={sevenDay.pct} /></div>
               <span className="rst">{sevenDay.clock ?? "—"}</span>
             </div>
           )}
         </div>
-        {exhausted && (
+        {phase?.kind === "exhausted" && (
           <p style={{ margin: "12px 0 0", fontSize: 12, color: "var(--muted)" }}>
-            {earliestReset ? (
-              <>
-                Earliest reset is <span className="num">{earliestReset.clock}</span> on{" "}
-                <b style={{ fontWeight: 550 }}>{earliestReset.alias}</b>. Nothing to switch to until then.
-              </>
-            ) : (
-              "Nothing to switch to until a quota resets."
-            )}
+            {phase.earliestReset
+              ? `The earliest known reset is ${clock(phase.earliestReset)}.`
+              : "Nothing can be selected automatically until a quota resets."}
           </p>
         )}
       </div>
 
       <div className="pop-list">
-        {others.map((a) => {
-          const isHeldOut = a.usageStatus === "disabled";
-          // Nullable, not coerced: an unreadable account must render as
-          // "no reading", never as a confident 0% that looks like plenty
-          // of headroom. UsageMeter handles null explicitly.
-          const worst = bindingUtilisation(a.usage);
-          const isNext = armed && target?.number === a.number;
-          const age = ageLabel(a.usageAgeSeconds);
-          const isPending = pendingAccount === a.number;
-
+        {others.map((account) => {
+          const disabled = account.usageStatus === "disabled";
+          const needsRelogin = account.usageStatus === "reloginrequired";
+          const hasForeignCredential = account.usageStatus === "foreigncredential";
+          const unavailable = disabled || needsRelogin || recoveryBlocked;
+          const isNext = phase?.kind === "warning" && phase.to === account.number;
+          const isPending = pendingAccount === account.number;
+          const age = ageLabel(account.usageAgeSeconds);
           return (
             <button
-              key={a.number}
+              key={account.number}
               type="button"
-              className={`pop-item${isHeldOut ? " dim" : ""}${isNext ? " next" : ""}`}
-              disabled={isHeldOut || pendingAccount !== null}
-              onClick={() => handleSwitch(a.number)}
+              className={`pop-item${unavailable ? " dim" : ""}${isNext ? " next" : ""}`}
+              disabled={unavailable || pendingAccount !== null}
+              onClick={() => handleSwitch(account.number)}
             >
-              <span className="mark"></span>
-              <span className="alias">{displayName(a)}</span>
-              {isHeldOut && <span className="pill">held out</span>}
+              <span className="mark" />
+              <span className="alias">{displayName(account)}</span>
+              {disabled && <span className="pill">held out</span>}
+              {needsRelogin && <span className="pill danger">Re-login required</span>}
+              {hasForeignCredential && <span className="pill danger">credential mismatch</span>}
               {isNext && <span className="pill">next</span>}
               {isPending && <span className="pill">switching…</span>}
-              {!isHeldOut && !isPending && age && <span className="pill">{age}</span>}
-              <div style={dimStyle}>
-                <UsageMeter pct={worst} />
-              </div>
+              {!unavailable && !isPending && age && <span className="pill">{age}</span>}
+              <div style={dimStyle}><UsageMeter pct={bindingUtilisation(account.usage)} /></div>
             </button>
           );
         })}
       </div>
 
-      {switchError && (
-        <div style={{ padding: "0 14px 10px", fontSize: 11, color: "var(--danger)" }}>{switchError.message}</div>
+      {(switchError || actionError) && (
+        <div style={{ padding: "0 14px 10px", fontSize: 11, color: "var(--danger)" }}>
+          {switchError?.message ?? actionError}
+        </div>
       )}
 
       <div className="pop-foot">
-        {exhausted ? (
+        {phase?.kind === "warning" && warningTarget ? (
           <>
-            <span>Notify me at reset</span>
-            <span className="sp"></span>
-            <span
-              role="switch"
-              aria-checked={notifyAtReset}
-              tabIndex={0}
-              style={{ display: "inline-flex", cursor: "pointer" }}
-              onClick={() => setNotifyAtReset((v) => !v)}
-              onKeyDown={(e) => {
-                if (e.key === "Enter" || e.key === " ") {
-                  e.preventDefault();
-                  setNotifyAtReset((v) => !v);
-                }
-              }}
+            <button
+              type="button"
+              className="btn"
+              disabled={recoveryBlocked || pendingAccount !== null || warningTarget.usageStatus === "reloginrequired"}
+              onClick={() => handleSwitch(warningTarget.number)}
             >
-              <span className={`sw${notifyAtReset ? " on" : ""}`}></span>
-            </span>
-          </>
-        ) : armed && target ? (
-          <>
-            <button type="button" className="btn" disabled={pendingAccount !== null} onClick={() => handleSwitch(target.number)}>
               Switch now
             </button>
-            <button type="button" className="btn ghost" onClick={() => setHeldUntil(Date.now() + HOLD_DURATION_MS)}>
-              Hold 1h
-            </button>
+            <button type="button" className="btn ghost" onClick={snooze}>Hold 1h</button>
           </>
+        ) : phase?.kind === "paused" ? (
+          <button type="button" className="btn" onClick={resume}>Resume</button>
         ) : (
           <>
-            <span>Auto-switch</span>
-            <span className="pill on">on</span>
-            <span className="sp"></span>
-            {/*
-              This slot used to advertise a "Ctrl+Shift+A" shortcut. Nothing
-              registered it — `tauri-plugin-global-shortcut` is not even a
-              dependency — so it was a keystroke hint for a keystroke that did
-              nothing, carried over from the wireframe. Replaced with a control
-              that does what it says.
-            */}
+            <span>{phase?.kind === "disabled" ? "Auto-switch off" : "Auto-switch"}</span>
+            {phase?.kind !== "disabled" && <span className="pill on">on</span>}
+            <span className="sp" />
             <RefreshButton compact />
           </>
         )}

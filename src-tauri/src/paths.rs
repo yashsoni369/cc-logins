@@ -233,6 +233,37 @@ pub fn credentials_path() -> PathBuf {
     claude_config_home().join(".credentials.json")
 }
 
+/// Claude Code 2.1.218+'s primary OAuth refresh directory lock.
+pub fn oauth_refresh_lock_dir() -> PathBuf {
+    claude_config_home().join(".oauth_refresh.lock")
+}
+
+/// Claude Code's legacy credential lock, still acquired after the primary
+/// OAuth lock for compatibility with external writers.
+pub fn credentials_lock_dir() -> PathBuf {
+    let home = claude_config_home();
+    let name = home
+        .file_name()
+        .and_then(|value| value.to_str())
+        .unwrap_or(".claude");
+    home.parent()
+        .unwrap_or_else(|| Path::new("."))
+        .join(format!("{name}.lock"))
+}
+
+/// `proper-lockfile` directory guarding Claude Code's global config.
+pub fn global_config_lock_dir() -> PathBuf {
+    let config = global_config_path();
+    let name = config
+        .file_name()
+        .and_then(|value| value.to_str())
+        .unwrap_or(".claude.json");
+    config
+        .parent()
+        .unwrap_or_else(|| Path::new("."))
+        .join(format!("{name}.lock"))
+}
+
 /// Directory name of the legacy (pre-XDG) backup root.
 pub const LEGACY_BACKUP_DIRNAME: &str = ".claude-swap-backup";
 

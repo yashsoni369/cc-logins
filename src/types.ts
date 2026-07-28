@@ -59,7 +59,11 @@ export interface Usage {
  */
 export type UsageStatus =
   | "ok"
-  /** Saved login was rejected by the server; re-login required. */
+  /** Live OAuth bytes were positively attributed to a different account. */
+  | "foreigncredential"
+  /** The server proved the refresh-token lineage is dead; re-login required. */
+  | "reloginrequired"
+  /** Legacy producer spelling, accepted for compatibility only. */
   | "expired"
   /** Usage could not be read this cycle; last-known values are shown. */
   | "stale"
@@ -249,6 +253,8 @@ export async function stableKey(account: Account): Promise<string> {
 /** Mirrors `src-tauri/src/settings.rs::Settings`, serde camelCase. */
 export interface Settings {
   autoSwitchEnabled: boolean;
+  /** Persisted daemon pause deadline, or null when automatic switching is live. */
+  autoSwitchPausedUntil: string | null;
   /** 50..99, clamped by the backend on save. */
   threshold: number;
   /** 0..86400 seconds, clamped by the backend on save. */
@@ -271,6 +277,33 @@ export interface Settings {
    * maps onto `data-theme` on `document.documentElement`.
    */
   theme: "system" | "day" | "night";
+}
+
+export interface SettingsSnapshot {
+  revision: number;
+  settings: Settings;
+}
+
+export type SettingsPatch = Partial<Settings>;
+
+export type DegradedReason = "usageUnknown" | "fetchFailed";
+
+export type DaemonPhase =
+  | { kind: "disabled" }
+  | { kind: "paused"; until: string }
+  | { kind: "monitoring" }
+  | { kind: "cooldown"; until: string }
+  | { kind: "warning"; from: number; to: number; deadline: string }
+  | { kind: "switching"; from: number; to: number }
+  | { kind: "exhausted"; earliestReset: string | null }
+  | { kind: "degraded"; reason: DegradedReason }
+  | { kind: "recoveryRequired"; detail: string };
+
+export interface DaemonStatus {
+  revision: number;
+  policyRevision: number;
+  phase: DaemonPhase;
+  updatedAt: string;
 }
 
 // ── about ─────────────────────────────────────────────────────────────────

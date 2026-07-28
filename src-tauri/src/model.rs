@@ -70,8 +70,10 @@ pub struct Usage {
 #[serde(rename_all = "lowercase")]
 pub enum UsageStatus {
     Ok,
-    /// Saved login was server-rejected; re-login required.
-    Expired,
+    /// Live OAuth bytes were positively attributed to a different account.
+    ForeignCredential,
+    /// Current credential generation was server-rejected; re-login required.
+    ReloginRequired,
     /// Could not be read this cycle; last-known values shown.
     Stale,
     /// Held out of auto-rotation by the user.
@@ -90,7 +92,8 @@ impl<'de> Deserialize<'de> for UsageStatus {
         let raw = String::deserialize(d)?;
         Ok(match raw.trim().to_ascii_lowercase().as_str() {
             "ok" => Self::Ok,
-            "expired" => Self::Expired,
+            "foreigncredential" | "foreign-credential" => Self::ForeignCredential,
+            "reloginrequired" | "expired" => Self::ReloginRequired,
             "stale" => Self::Stale,
             "disabled" => Self::Disabled,
             "unavailable" => Self::Unavailable,
@@ -107,6 +110,10 @@ impl<'de> Deserialize<'de> for UsageStatus {
 pub struct Account {
     pub number: u32,
     pub email: String,
+    /// Stable profile identity used for credential provenance checks. It is
+    /// backend-only and must not be exposed in the snapshot payload.
+    #[serde(skip)]
+    pub uuid: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub alias: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none", default)]
@@ -207,8 +214,17 @@ impl Account {
         !self.active
             && !matches!(
                 self.usage_status,
-                UsageStatus::Disabled | UsageStatus::Expired
+                UsageStatus::Disabled | UsageStatus::ReloginRequired
             )
+    }
+
+    /// Eligible for unattended activation. Automatic selection is
+    /// deliberately stricter than manual switching: the usage measurement
+    /// must be fresh, successful, and prove positive headroom.
+    pub fn is_automatic_target(&self) -> bool {
+        !self.active
+            && self.usage_status == UsageStatus::Ok
+            && matches!(self.headroom(), Some(value) if value > 0.0)
     }
 }
 
@@ -392,18 +408,59 @@ mod tests {
     }
 
     #[test]
-    fn disabled_and_expired_accounts_are_not_switch_targets() {
+    fn manual_and_automatic_target_eligibility_are_distinct() {
         let mut a = acct((0.0, 0.0), &[]);
         a.usage_status = UsageStatus::Ok;
         assert!(a.is_switchable());
+        assert!(a.is_automatic_target());
+        a.usage_status = UsageStatus::Stale;
+        assert!(a.is_switchable());
+        assert!(!a.is_automatic_target());
+        a.usage_status = UsageStatus::Unknown;
+        assert!(a.is_switchable());
+        assert!(!a.is_automatic_target());
+        a.usage_status = UsageStatus::ForeignCredential;
+        assert!(a.is_switchable());
+        assert!(!a.is_automatic_target());
         a.usage_status = UsageStatus::Disabled;
         assert!(!a.is_switchable());
-        a.usage_status = UsageStatus::Expired;
+        assert!(!a.is_automatic_target());
+        a.usage_status = UsageStatus::ReloginRequired;
         assert!(!a.is_switchable());
+        assert!(!a.is_automatic_target());
         // The active account is never its own switch target.
         a.usage_status = UsageStatus::Ok;
         a.active = true;
         assert!(!a.is_switchable());
+        assert!(!a.is_automatic_target());
+    }
+
+    #[test]
+    fn relogin_required_serializes_explicitly_and_accepts_legacy_expired() {
+        assert_eq!(
+            serde_json::to_string(&UsageStatus::ReloginRequired).unwrap(),
+            r#""reloginrequired""#
+        );
+        assert_eq!(
+            serde_json::from_str::<UsageStatus>(r#""reloginrequired""#).unwrap(),
+            UsageStatus::ReloginRequired
+        );
+        assert_eq!(
+            serde_json::from_str::<UsageStatus>(r#""expired""#).unwrap(),
+            UsageStatus::ReloginRequired
+        );
+    }
+
+    #[test]
+    fn foreign_credential_status_round_trips_explicitly() {
+        assert_eq!(
+            serde_json::to_string(&UsageStatus::ForeignCredential).unwrap(),
+            r#""foreigncredential""#
+        );
+        assert_eq!(
+            serde_json::from_str::<UsageStatus>(r#""foreign-credential""#).unwrap(),
+            UsageStatus::ForeignCredential
+        );
     }
 
     #[test]

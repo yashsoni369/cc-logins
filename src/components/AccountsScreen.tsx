@@ -19,6 +19,11 @@ interface EnableError {
   message: string;
 }
 
+interface ReloginError {
+  accountNumber: number;
+  message: string;
+}
+
 interface AccountsScreenProps {
   snapshot: Snapshot;
   /** Invoked only from this screen's Switch button onClick — never elsewhere. */
@@ -43,6 +48,11 @@ interface AccountsScreenProps {
   pendingInteractiveLogin: boolean;
   /** `null` covers both rest and a quiet cancellation — SignInFlow renders nothing for either. */
   interactiveLoginError: string | null;
+
+  /** Re-authenticate an existing dead OAuth slot without creating a duplicate. */
+  onRelogin: (accountNumber: number) => void;
+  pendingReloginAccount: number | null;
+  reloginError: ReloginError | null;
 
   /** Invoked only from a row's Enable/Disable button onClick. */
   onSetEnabled: (accountNumber: number, enabled: boolean) => void;
@@ -101,6 +111,9 @@ export default function AccountsScreen({
   onInteractiveLogin,
   pendingInteractiveLogin,
   interactiveLoginError,
+  onRelogin,
+  pendingReloginAccount,
+  reloginError,
   onSetEnabled,
   pendingEnableAccount,
   enableError,
@@ -144,6 +157,8 @@ export default function AccountsScreen({
         <tbody>
           {accounts.map((account) => {
             const isHeldOut = account.usageStatus === "disabled";
+            const needsRelogin = account.usageStatus === "reloginrequired";
+            const hasForeignCredential = account.usageStatus === "foreigncredential";
             const resets = account.usage?.fiveHour?.clock ?? "—";
             const ratio = paceRatio(account.usage?.sevenDay);
             const pace = paceLabel(ratio);
@@ -207,9 +222,16 @@ export default function AccountsScreen({
                           {displayName(account)}{" "}
                           {account.active && <span className="pill on">active</span>}
                           {isHeldOut && <span className="pill">held out</span>}
+                          {hasForeignCredential && <span className="pill danger">credential mismatch</span>}
+                          {needsRelogin && <span className="pill danger">Re-login required</span>}
                           {age && <span className="pill">{age}</span>}
                         </div>
                         <div className="mail">{maskEmail(account.email)}</div>
+                        {needsRelogin && (
+                          <div style={{ marginTop: 3, fontSize: 11, color: "var(--danger)" }}>
+                            Sign in again to replace this account&apos;s rejected login.
+                          </div>
+                        )}
                       </div>
                     </div>
                   </td>
@@ -247,7 +269,19 @@ export default function AccountsScreen({
                   </td>
                   <td className="r">
                     <div className="acct-actions">
-                      {!account.active && !isHeldOut && (
+                      {needsRelogin ? (
+                        <button
+                          type="button"
+                          className="btn primary"
+                          disabled={mutationInFlight}
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            onRelogin(account.number);
+                          }}
+                        >
+                          {pendingReloginAccount === account.number ? "Signing in…" : "Re-login"}
+                        </button>
+                      ) : !account.active && !isHeldOut ? (
                         <button
                           type="button"
                           className="btn"
@@ -259,7 +293,7 @@ export default function AccountsScreen({
                         >
                           {pendingAccount === account.number ? "Switching…" : "Switch"}
                         </button>
-                      )}
+                      ) : null}
                       <button
                         type="button"
                         className="btn ghost"
@@ -286,6 +320,11 @@ export default function AccountsScreen({
                     {enableError?.accountNumber === account.number && (
                       <div style={{ marginTop: 6, fontSize: 11, color: "var(--danger)", textAlign: "right" }}>
                         {enableError.message}
+                      </div>
+                    )}
+                    {reloginError?.accountNumber === account.number && (
+                      <div style={{ marginTop: 6, fontSize: 11, color: "var(--danger)", textAlign: "right" }}>
+                        {reloginError.message}
                       </div>
                     )}
                   </td>
