@@ -70,6 +70,8 @@ pub struct Usage {
 #[serde(rename_all = "lowercase")]
 pub enum UsageStatus {
     Ok,
+    /// Live OAuth bytes were positively attributed to a different account.
+    ForeignCredential,
     /// Current credential generation was server-rejected; re-login required.
     ReloginRequired,
     /// Could not be read this cycle; last-known values shown.
@@ -90,6 +92,7 @@ impl<'de> Deserialize<'de> for UsageStatus {
         let raw = String::deserialize(d)?;
         Ok(match raw.trim().to_ascii_lowercase().as_str() {
             "ok" => Self::Ok,
+            "foreigncredential" | "foreign-credential" => Self::ForeignCredential,
             "reloginrequired" | "expired" => Self::ReloginRequired,
             "stale" => Self::Stale,
             "disabled" => Self::Disabled,
@@ -107,6 +110,10 @@ impl<'de> Deserialize<'de> for UsageStatus {
 pub struct Account {
     pub number: u32,
     pub email: String,
+    /// Stable profile identity used for credential provenance checks. It is
+    /// backend-only and must not be exposed in the snapshot payload.
+    #[serde(skip)]
+    pub uuid: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub alias: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none", default)]
@@ -412,6 +419,9 @@ mod tests {
         a.usage_status = UsageStatus::Unknown;
         assert!(a.is_switchable());
         assert!(!a.is_automatic_target());
+        a.usage_status = UsageStatus::ForeignCredential;
+        assert!(a.is_switchable());
+        assert!(!a.is_automatic_target());
         a.usage_status = UsageStatus::Disabled;
         assert!(!a.is_switchable());
         assert!(!a.is_automatic_target());
@@ -438,6 +448,18 @@ mod tests {
         assert_eq!(
             serde_json::from_str::<UsageStatus>(r#""expired""#).unwrap(),
             UsageStatus::ReloginRequired
+        );
+    }
+
+    #[test]
+    fn foreign_credential_status_round_trips_explicitly() {
+        assert_eq!(
+            serde_json::to_string(&UsageStatus::ForeignCredential).unwrap(),
+            r#""foreigncredential""#
+        );
+        assert_eq!(
+            serde_json::from_str::<UsageStatus>(r#""foreign-credential""#).unwrap(),
+            UsageStatus::ForeignCredential
         );
     }
 

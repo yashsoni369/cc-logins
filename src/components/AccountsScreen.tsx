@@ -145,6 +145,7 @@ export default function AccountsScreen({
           {accounts.map((account) => {
             const isHeldOut = account.usageStatus === "disabled";
             const needsRelogin = account.usageStatus === "reloginrequired";
+            const hasForeignCredential = account.usageStatus === "foreigncredential";
             const resets = account.usage?.fiveHour?.clock ?? "—";
             const ratio = paceRatio(account.usage?.sevenDay);
             const pace = paceLabel(ratio);
@@ -208,6 +209,7 @@ export default function AccountsScreen({
                           {displayName(account)}{" "}
                           {account.active && <span className="pill on">active</span>}
                           {isHeldOut && <span className="pill">held out</span>}
+                          {hasForeignCredential && <span className="pill danger">credential mismatch</span>}
                           {needsRelogin && <span className="pill danger">Re-login required</span>}
                           {age && <span className="pill">{age}</span>}
                         </div>

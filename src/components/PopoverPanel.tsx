@@ -263,6 +263,7 @@ export default function PopoverPanel() {
         {others.map((account) => {
           const disabled = account.usageStatus === "disabled";
           const needsRelogin = account.usageStatus === "reloginrequired";
+          const hasForeignCredential = account.usageStatus === "foreigncredential";
           const unavailable = disabled || needsRelogin;
           const isNext = phase?.kind === "warning" && phase.to === account.number;
           const isPending = pendingAccount === account.number;
@@ -279,6 +280,7 @@ export default function PopoverPanel() {
               <span className="alias">{displayName(account)}</span>
               {disabled && <span className="pill">held out</span>}
               {needsRelogin && <span className="pill danger">Re-login required</span>}
+              {hasForeignCredential && <span className="pill danger">credential mismatch</span>}
               {isNext && <span className="pill">next</span>}
               {isPending && <span className="pill">switching…</span>}
               {!unavailable && !isPending && age && <span className="pill">{age}</span>}

@@ -59,6 +59,8 @@ export interface Usage {
  */
 export type UsageStatus =
   | "ok"
+  /** Live OAuth bytes were positively attributed to a different account. */
+  | "foreigncredential"
   /** The server proved the refresh-token lineage is dead; re-login required. */
   | "reloginrequired"
   /** Legacy producer spelling, accepted for compatibility only. */
