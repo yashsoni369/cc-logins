@@ -10,10 +10,13 @@ on:
 # burn double the CI minutes.
 concurrency:
   # event_name is part of the key so a push to main does not cancel a
-  # workflow_dispatch run on the same ref — which is how the only two
-  # full three-OS runs so far both died before finishing.
+  # workflow_dispatch run on the same ref.
   group: ci-${{ github.workflow }}-${{ github.ref }}-${{ github.event_name }}
-  cancel-in-progress: true
+  # Only pushes supersede each other. Linux and macOS run on pull_request and
+  # workflow_dispatch only, and macOS queues for a long time — cancelling those
+  # meant a second dispatch killed the first before macOS ever started, four
+  # times over. Deliberate runs are worth their minutes; rapid pushes are not.
+  cancel-in-progress: ${{ github.event_name == 'push' }}
 
 env:
   CARGO_TERM_COLOR: always
