@@ -1,0 +1,36 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" width="1024" height="1024">
+  <!--
+    CC Logins app icon — macOS master. Feeds icon.icns ONLY.
+
+    Identical artwork to ../../app-icon.svg, but sized to Apple's macOS icon
+    grid instead of full-bleed: an 824x824 plate centred in a 1024 canvas
+    (a 100px transparent gutter per side), corner radius 185.4.
+
+    This exists because Tauri's `tauri icon` command applies no macOS mask,
+    inset, rounding or shadow — it is a pure resize. A full-bleed source
+    therefore renders roughly a quarter larger than every neighbouring Dock
+    icon. Windows and Linux want the opposite (edge-to-edge), which is why
+    there are two masters rather than one.
+
+    Regenerate the .icns from this file with:
+
+        pnpm exec tauri icon ./docs/brand/app-icon-macos.svg -o <tmp>
+        cp <tmp>/icon.icns src-tauri/icons/icon.icns
+
+    Everything else in src-tauri/icons/ comes from the full-bleed master.
+  -->
+  <defs>
+    <filter id="dock-shadow" x="-20%" y="-20%" width="140%" height="140%">
+      <!-- Apple's Dock shadow: black at 50%, 28px blur, offset 12px down. -->
+      <feDropShadow dx="0" dy="12" stdDeviation="14" flood-color="#000000" flood-opacity="0.5"/>
+    </filter>
+  </defs>
+
+  <g filter="url(#dock-shadow)">
+    <rect x="100" y="100" width="824" height="824" rx="185.4" ry="185.4" fill="#1F252C"/>
+    <g fill="none" stroke-linecap="butt">
+      <path d="M 695.1 308.6 A 273.6 273.6 0 1 0 695.1 715.4" stroke="#F6F7F8" stroke-width="70.8"/>
+      <path d="M 654.0 401.0 A 180.3 180.3 0 1 0 654.0 623.0" stroke="#4E7896" stroke-width="61.2"/>
+    </g>
+  </g>
+</svg>

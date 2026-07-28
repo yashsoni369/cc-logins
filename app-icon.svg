@@ -1,0 +1,29 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" width="1024" height="1024">
+  <!--
+    CC Logins — app icon master.
+
+    This is the source of truth for every generated icon. To regenerate the
+    full set into src-tauri/icons/ after editing:
+
+        pnpm exec tauri icon ./app-icon.svg
+
+    Geometry: two concentric open "C" arcs, both opening right. The outer arc
+    stops sooner (96 deg gap) than the inner one (76 deg gap), so the inner arc
+    reads as continuing past it — the nested-C monogram from the brand sheet.
+
+    The mark reaches 75% of the half-size, leaving the margin Apple expects
+    inside the Big Sur squircle; rx 229 is 22.37% of 1024, that squircle's
+    radius. Tauri's icon command does NOT round corners for you, so the shape
+    is baked in here.
+
+    Colours are the brand palette: Graphite #1F252C ground, Cloud #F6F7F8
+    outer C, Steel Blue #4E7896 inner C. A dark ground is deliberate — a
+    graphite mark on a light tile greys out against Windows' dark taskbar and
+    the macOS dock. See docs/brand/ for the light-ground variant.
+  -->
+  <rect width="1024" height="1024" rx="229" ry="229" fill="#1F252C"/>
+  <g fill="none" stroke-linecap="butt">
+    <path d="M 739.5 259.3 A 340 340 0 1 0 739.5 764.7" stroke="#F6F7F8" stroke-width="88"/>
+    <path d="M 688.5 374.1 A 224 224 0 1 0 688.5 649.9" stroke="#4E7896" stroke-width="76"/>
+  </g>
+</svg>
