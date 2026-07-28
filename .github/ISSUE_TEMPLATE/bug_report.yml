@@ -1,0 +1,124 @@
+name: Bug report
+description: Something in the app behaves incorrectly
+title: "[Bug]: "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for taking the time to file this.
+
+        **Do not paste tokens, credential files, or the contents of
+        `.credentials.json` anywhere in this form.** If a problem can only be
+        shown with real credential material, say so instead and we will work
+        out how to reproduce it without it. Suspected *security*
+        vulnerabilities should go through
+        [a private advisory](https://github.com/yashsoni369/cc-logins/security/advisories/new),
+        not this form.
+
+  - type: dropdown
+    id: os
+    attributes:
+      label: Operating system
+      options:
+        - Windows 11
+        - Windows 10
+        - macOS (Apple Silicon)
+        - macOS (Intel)
+        - Linux
+    validations:
+      required: true
+
+  - type: input
+    id: os-version
+    attributes:
+      label: OS version, and distro if Linux
+      placeholder: "Windows 11 23H2 22631 / macOS 15.3 / Ubuntu 24.04 GNOME Wayland"
+    validations:
+      required: true
+
+  - type: input
+    id: app-version
+    attributes:
+      label: App version
+      description: Settings → About shows this. Please give the exact version rather than "latest".
+      placeholder: "0.1.0"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: install
+    attributes:
+      label: How did you install it?
+      options:
+        - Installer from GitHub Releases
+        - AppImage
+        - .deb
+        - Built from source
+        - Not sure
+    validations:
+      required: true
+
+  - type: dropdown
+    id: environment
+    attributes:
+      label: Which Claude Code install is affected?
+      description: On Windows, a native install and one inside WSL keep entirely separate logins.
+      options:
+        - Native
+        - WSL
+        - Both
+        - Not applicable / not sure
+    validations:
+      required: true
+
+  - type: textarea
+    id: repro
+    attributes:
+      label: Steps to reproduce
+      description: Click by click. A bug that cannot be reproduced usually cannot be fixed.
+      placeholder: |
+        1. Open the app with two accounts already added
+        2. Click Refresh on the Accounts screen
+        3. ...
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: What you expected to happen
+    validations:
+      required: true
+
+  - type: textarea
+    id: actual
+    attributes:
+      label: What actually happened
+      description: Exact error text, and a screenshot if it is a display problem.
+    validations:
+      required: true
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Log output
+      description: |
+        The tail of the log file is usually the fastest route to a diagnosis.
+
+        - Windows: `%APPDATA%\cc-logins\app.log`
+        - macOS: `~/Library/Application Support/cc-logins/app.log`
+        - Linux: `~/.local/share/cc-logins/app.log`
+
+        Emails are masked in the log, but read it before pasting it.
+      render: shell
+
+  - type: checkboxes
+    id: confirmations
+    attributes:
+      label: Before submitting
+      options:
+        - label: I searched existing issues, including closed ones.
+          required: true
+        - label: I have removed any tokens, credentials, and personal data from this report.
+          required: true

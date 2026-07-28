@@ -1,0 +1,11 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Report a security vulnerability
+    url: https://github.com/yashsoni369/cc-logins/security/advisories/new
+    about: Anything that could expose a credential or token. Report it privately here, never as a public issue.
+  - name: Read the security policy first
+    url: https://github.com/yashsoni369/cc-logins/blob/main/SECURITY.md
+    about: What this app does with your tokens, and what is a known gap rather than a bug.
+  - name: Unsigned build warnings
+    url: https://github.com/yashsoni369/cc-logins/blob/main/README.md
+    about: SmartScreen and Gatekeeper warn because releases are not code-signed. Expected, documented, not a bug.

@@ -1,0 +1,45 @@
+name: Feature request
+description: Suggest a change to what the app does
+title: "[Feature]: "
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        This is a single-maintainer, pre-1.0 project. Small, well-scoped
+        requests get further than large ones. Open this before writing a
+        large PR, not after.
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: What problem does this solve?
+      description: Describe what you were trying to do and where the app got in the way. Not the feature — the problem.
+      placeholder: "I run four accounts and I can't tell at a glance which one resets soonest, so I switch to one that's about to throttle."
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: What would you like it to do instead?
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: What you already tried
+      description: Existing settings, the `cswap` CLI, or a workaround — and why it isn't enough.
+    validations:
+      required: false
+
+  - type: checkboxes
+    id: scope
+    attributes:
+      label: Scope
+      options:
+        - label: This does not require sending credentials, usage data, or anything else to a third-party service.
+          required: true
+        - label: I searched existing issues, including closed ones.
+          required: true
