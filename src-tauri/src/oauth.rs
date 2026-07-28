@@ -102,11 +102,16 @@ fn sha256_hex(input: &str) -> String {
 /// source JSON) is treated as "not expired" — matching Python's
 /// `isinstance(expires_at, (int, float))` guard.
 pub fn is_oauth_token_expired(expires_at: Option<f64>) -> bool {
+    is_oauth_token_expired_at(expires_at, Utc::now().timestamp_millis() as f64)
+}
+
+/// Deterministic form of [`is_oauth_token_expired`] for coordinators and tests
+/// that already have an authoritative clock reading.
+pub fn is_oauth_token_expired_at(expires_at: Option<f64>, now_ms: f64) -> bool {
     let expires_at = match expires_at {
         Some(v) => v,
         None => return false,
     };
-    let now_ms = Utc::now().timestamp_millis() as f64;
     now_ms + OAUTH_EXPIRY_BUFFER_MS as f64 >= expires_at
 }
 
@@ -616,16 +621,15 @@ pub struct RefreshOutcome {
 
 /// Classify a non-2xx refresh-token response (requirement 1).
 ///
-/// Permanent (`InvalidGrant`) only when the server itself rejected the
-/// grant: a 400/401/403 status *and* an explicit `invalid_grant` /
-/// `invalid_client` marker in the response body. Everything else — a 400
-/// with an unrelated body, or a matching marker riding on an unrelated
-/// status like 500 — stays `Transient`. A misclassified transient costs one
-/// retry; a misclassified permanent would wrongly quarantine a live token.
+/// Permanent (`InvalidGrant`) only when the token endpoint returns the exact
+/// OAuth JSON error on HTTP 400. Everything else stays `Transient`. A
+/// misclassified transient costs one retry; a misclassified permanent would
+/// wrongly quarantine a live token.
 pub fn classify_refresh_failure(status: u16, body: &str) -> RefreshError {
-    if matches!(status, 400 | 401 | 403)
-        && (body.contains("invalid_grant") || body.contains("invalid_client"))
-    {
+    let error = serde_json::from_str::<Value>(body)
+        .ok()
+        .and_then(|value| value.get("error")?.as_str().map(str::to_owned));
+    if status == 400 && error.as_deref() == Some("invalid_grant") {
         RefreshError::InvalidGrant
     } else {
         RefreshError::Transient
@@ -1543,23 +1547,41 @@ mod tests {
     // -- error classification -------------------------------------------------
 
     #[test]
-    fn classify_refresh_failure_invalid_grant_requires_status_and_marker() {
+    fn classify_refresh_failure_requires_exact_structured_invalid_grant() {
         assert_eq!(
-            classify_refresh_failure(400, "error: invalid_grant"),
+            classify_refresh_failure(400, r#"{"error":"invalid_grant"}"#),
             RefreshError::InvalidGrant
         );
         assert_eq!(
-            classify_refresh_failure(401, "{\"error\":\"invalid_client\"}"),
-            RefreshError::InvalidGrant
-        );
-        assert_eq!(
-            classify_refresh_failure(403, "invalid_grant"),
+            classify_refresh_failure(
+                400,
+                r#"{"error":"invalid_grant","error_description":"expired"}"#
+            ),
             RefreshError::InvalidGrant
         );
     }
 
     #[test]
-    fn classify_refresh_failure_stays_transient_when_ambiguous() {
+    fn classify_refresh_failure_never_quarantines_ambiguous_responses() {
+        // A marker in prose is not the OAuth token error field.
+        assert_eq!(
+            classify_refresh_failure(400, "invalid_grant later"),
+            RefreshError::Transient
+        );
+        // Client configuration failures do not prove the grant is dead.
+        assert_eq!(
+            classify_refresh_failure(400, r#"{"error":"invalid_client"}"#),
+            RefreshError::Transient
+        );
+        // A resource-server status is not a token-endpoint invalid_grant.
+        assert_eq!(
+            classify_refresh_failure(401, r#"{"error":"invalid_grant"}"#),
+            RefreshError::Transient
+        );
+        assert_eq!(
+            classify_refresh_failure(403, r#"{"error":"invalid_grant"}"#),
+            RefreshError::Transient
+        );
         // Right status, unrelated body.
         assert_eq!(
             classify_refresh_failure(400, "internal error"),
@@ -1573,6 +1595,10 @@ mod tests {
         // Neither status nor marker.
         assert_eq!(classify_refresh_failure(503, ""), RefreshError::Transient);
         assert_eq!(classify_refresh_failure(401, ""), RefreshError::Transient);
+        assert_eq!(
+            classify_refresh_failure(400, "{not-json"),
+            RefreshError::Transient
+        );
     }
 
     #[test]
@@ -1622,12 +1648,21 @@ mod tests {
 
     #[test]
     fn token_expiry_uses_five_minute_buffer() {
-        assert!(!is_oauth_token_expired(None));
-
-        let now_ms = Utc::now().timestamp_millis() as f64;
-        assert!(!is_oauth_token_expired(Some(now_ms + 10.0 * 60_000.0))); // 10 min out
-        assert!(is_oauth_token_expired(Some(now_ms + 1.0 * 60_000.0))); // 1 min out
-        assert!(is_oauth_token_expired(Some(now_ms - 60_000.0))); // already past
+        let now_ms = 1_700_000_000_000.0;
+        assert!(!is_oauth_token_expired_at(None, now_ms));
+        assert!(!is_oauth_token_expired_at(
+            Some(now_ms + 10.0 * 60_000.0),
+            now_ms
+        ));
+        assert!(is_oauth_token_expired_at(
+            Some(now_ms + 1.0 * 60_000.0),
+            now_ms
+        ));
+        assert!(is_oauth_token_expired_at(Some(now_ms - 60_000.0), now_ms));
+        assert!(is_oauth_token_expired_at(
+            Some(now_ms + OAUTH_EXPIRY_BUFFER_MS as f64),
+            now_ms
+        ));
     }
 
     // -- reset-time formatting (pure, deterministic given both instants) -----
