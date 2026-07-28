@@ -53,7 +53,7 @@
 //! - [`crate::locking`] — [`crate::locking::acquire_or_err`] guards every
 //!   mutation. Two *different* locks are in play here, not one shared between
 //!   this app and `cswap` — see the "Locking" section further down this file
-//!   (just above [`acquire_cswap_and_vault_locks`]) for the full split.
+//!   (in `crate::switch_transaction`) for the full split.
 //! - [`crate::paths`] — every on-disk location comes from here, never
 //!   hand-rolled: [`crate::paths::backup_root`] for OUR vault,
 //!   [`crate::paths::cswap_store_root`] for the CLI's (read-only interop
@@ -74,7 +74,8 @@
 //! 1. **Lock the whole mutate.** Every mutating function in this module
 //!    acquires a [`crate::locking::FileLock`] before touching any file and
 //!    holds it for the entire operation. [`switch_to`] (and
-//!    [`import_from_cswap`], which also reads the CLI's store) hold two locks
+//!    [`import_from_cswap`], which also reads the CLI's store) hold its two
+//!    source/destination locks
 //!    — see the "Locking" section below.
 //! 2. **Never hold a lock across a network call.** [`read_snapshot`] fetches
 //!    usage with no lock held at all. [`add_current_account`],
@@ -136,7 +137,7 @@ fn credentials_dir() -> PathBuf {
 
 /// `<our backup_root>/.lock` — the lock guarding OUR vault. Only ever taken by
 /// this app; no other process has a reason to touch this specific file. See
-/// [`acquire_cswap_and_vault_locks`] for how this relates to the *other* lock
+/// `crate::switch_transaction` for how this relates to the live-state locks
 /// this module sometimes also takes.
 fn vault_lock_path() -> PathBuf {
     paths::backup_root().join(".lock")
@@ -202,6 +203,9 @@ impl StoreHost for GuiStoreHost {
 pub enum SwitchError {
     #[error(transparent)]
     Locking(#[from] crate::locking::LockingError),
+
+    #[error(transparent)]
+    LiveStateLock(#[from] crate::switch_transaction::LiveStateLockError),
 
     #[error(transparent)]
     Credential(#[from] CredentialError),
@@ -768,12 +772,9 @@ fn to_model_usage(u: &oauth::UsageResult) -> Usage {
 //   exact same OS primitive, which is the entire interop contract).
 //
 // So any function that writes the official files — today, only [`switch_to`]
-// — must hold BOTH locks for the whole mutation, and every such caller must
-// acquire them in the SAME order, or two processes taking the two locks in
-// opposite orders could deadlock each other. [`acquire_cswap_and_vault_locks`]
-// is that one order, enforced structurally by being the only way any function
-// in this module acquires both: cswap-compat lock first, our vault lock
-// second. A function that only ever touches our own vault (`add_current_account`,
+// — holds the complete lock set from `crate::switch_transaction`: cswap's
+// account lock, Claude's primary + legacy credential locks, Claude's config
+// lock, then our vault lock. A function that only ever touches our own vault (`add_current_account`,
 // `add_token`, `set_account_enabled`) has no reason to take the cswap lock at
 // all — there is nothing there for another process to race it on — so those
 // take [`vault_lock_path`] alone.
@@ -788,12 +789,10 @@ fn to_model_usage(u: &oauth::UsageResult) -> Usage {
 // this app otherwise never touches — see [`import_from_cswap`]'s doc for the
 // read side of that same directory.
 
-/// Acquire, in order, the `cswap`-compatible lock (only if that CLI's store
-/// directory already exists) and then our own vault lock. See the module
-/// section above this function for the full reasoning; this is the single
-/// choke point every caller that needs both locks must go through, so the
-/// acquisition order can never drift out of sync between call sites.
-fn acquire_cswap_and_vault_locks(
+/// Import-only coordination: lock cswap's source store before this GUI's
+/// destination vault. Imports never touch Claude's live credential/config,
+/// so the Claude directory locks deliberately are not part of this helper.
+fn acquire_import_locks(
     timeout: Duration,
 ) -> Result<(Option<crate::locking::FileLock>, crate::locking::FileLock), SwitchError> {
     let cswap_root = paths::cswap_store_root();
@@ -815,9 +814,8 @@ fn acquire_cswap_and_vault_locks(
 
 /// Switch the live login to `target`'s stored credential.
 ///
-/// Holds BOTH the `cswap`-compat lock (when that CLI's store exists) and our
-/// own vault lock for the whole mutation — see
-/// [`acquire_cswap_and_vault_locks`] for why two locks and why this order.
+/// Holds the complete cswap/Claude/vault lock set for the whole mutation —
+/// see `crate::switch_transaction` for the canonical order.
 /// OAuth freshening is the only network phase and completes before those
 /// mutation locks are acquired. Order of operations:
 ///
@@ -894,8 +892,8 @@ fn switch_to_validated_with_timeout(
 
     // Rule 1: lock before touching anything, for the whole mutation. This
     // function writes Claude Code's official files (step 4 below), so it
-    // needs both locks — see `acquire_cswap_and_vault_locks`.
-    let (_cswap_lock, _lock) = acquire_cswap_and_vault_locks(timeout)?;
+    // needs the complete cross-process lock set.
+    let _locks = crate::switch_transaction::acquire_live_state_locks(timeout)?;
 
     let mut data = read_sequence_data().ok_or(SwitchError::NoAccountsManaged)?;
 
@@ -1374,7 +1372,7 @@ fn add_current_account_with_timeout(
 
     // Only our own vault is written here (the live login is read, never
     // written) — no cswap-compat lock needed, see the module-level locking
-    // section above `acquire_cswap_and_vault_locks`.
+    // locking section above.
     let _lock = crate::locking::acquire_or_err(vault_lock_path(), timeout)?;
 
     let mut data = read_sequence_data().unwrap_or_default();
@@ -2014,7 +2012,7 @@ pub struct ImportOutcome {
 /// If `<cswap_store_root>` does not exist at all, this returns
 /// `Ok(ImportOutcome::default())` without taking any lock and without
 /// touching the filesystem — same reasoning as
-/// `acquire_cswap_and_vault_locks`: no directory means no `cswap` install to
+/// `acquire_import_locks`: no directory means no `cswap` install to
 /// import from, and we must not go looking for one by creating it.
 ///
 /// # Locking
@@ -2022,7 +2020,7 @@ pub struct ImportOutcome {
 /// When the source directory does exist, this acquires the cswap-compat lock
 /// (for a consistent read of a registry the CLI might be concurrently
 /// mutating) and then our own vault lock (we are about to write into it) —
-/// via [`acquire_cswap_and_vault_locks`], the same order [`switch_to`] uses.
+/// via `acquire_import_locks`: source first, then destination.
 ///
 /// # Duplicate detection
 ///
@@ -2047,7 +2045,7 @@ fn import_from_cswap_with_timeout(timeout: Duration) -> Result<ImportOutcome, Sw
         return Ok(ImportOutcome::default());
     }
 
-    let (_cswap_lock, _lock) = acquire_cswap_and_vault_locks(timeout)?;
+    let (_cswap_lock, _lock) = acquire_import_locks(timeout)?;
 
     let Some(source_data) = read_sequence_data_at(&cswap_root) else {
         return Ok(ImportOutcome::default());
@@ -2596,7 +2594,7 @@ mod tests {
     /// too — *provided* `XDG_DATA_HOME` is unset. On Linux that variable is
     /// consulted first, and CI runners set it, so leaving it alone let a real
     /// `$XDG_DATA_HOME/claude-swap` escape the sandbox: `guard_real_store`
-    /// would panic, and `acquire_cswap_and_vault_locks` could create a `.lock`
+    /// would panic, and an import/live lock helper could create a `.lock`
     /// in the user's actual directory. `WSL_DISTRO_NAME` is pinned for the
     /// same reason — it flips `Platform::detect()`.
     ///
@@ -2877,8 +2875,8 @@ mod tests {
     fn switch_fails_cleanly_rather_than_half_applying_when_the_vault_lock_cannot_be_acquired() {
         let _env = setup_env();
         seed_two_accounts();
-        // No cswap store exists in this test, so switch_to skips that lock
-        // entirely and its only contention point is our own vault lock.
+        // The pre-network target-identity read uses only our vault lock and
+        // therefore fails before the complete mutation lock set is entered.
         assert!(!paths::cswap_store_root().exists());
 
         let _held =
@@ -2916,10 +2914,10 @@ mod tests {
                 .unwrap();
 
         let err = switch_to_with_timeout(&bravo_target(), Duration::from_millis(200)).unwrap_err();
-        assert!(matches!(err, SwitchError::Locking(_)));
+        assert!(matches!(err, SwitchError::LiveStateLock(_)));
 
         // The cswap-compat lock is acquired FIRST (see
-        // `acquire_cswap_and_vault_locks`), so failing to get it must
+        // the full live-state coordinator), so failing to get it must
         // short-circuit before any effect on OUR vault or the live login —
         // proving the ordering, not just that both locks exist.
         assert_eq!(

@@ -98,7 +98,9 @@ impl From<SwitchError> for IpcError {
         // `Internal`.
         match &e {
             SwitchError::NoAccountsManaged => IpcError::NotConfigured,
-            SwitchError::Locking(_) => IpcError::Busy(e.to_string()),
+            SwitchError::Locking(_) | SwitchError::LiveStateLock(_) => {
+                IpcError::Busy(e.to_string())
+            }
             SwitchError::TargetGenerationChanged(_) => IpcError::Busy(e.to_string()),
             SwitchError::Refresh(crate::oauth_refresh::RefreshCoordinatorError::Lease(_)) => {
                 IpcError::Busy(e.to_string())
