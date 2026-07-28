@@ -1027,6 +1027,9 @@ pub fn publish_daemon_status(
     now: DateTime<Utc>,
 ) {
     let state = app.state::<crate::commands::AppState>();
+    let phase = crate::switch_transaction::recovery_requirement()
+        .map(|detail| crate::runtime::DaemonPhase::RecoveryRequired { detail })
+        .unwrap_or(phase);
     let Some(status) = state.daemon_status.transition(policy_revision, phase, now) else {
         return;
     };
@@ -1170,6 +1173,7 @@ pub async fn run(
             if policy_revision == state.policy.revision
                 && state.policy.auto_switch_enabled
                 && !state.requires_fresh_snapshot
+                && crate::switch_transaction::recovery_requirement().is_none()
             {
                 publish_daemon_status(&app, policy_revision, due.phase(), now);
                 let trusted = state.last_trusted_snapshot.clone();
@@ -1246,7 +1250,9 @@ pub async fn run(
         match &decision {
             Decision::Switch { from, to, .. } => {
                 let (from, to) = (*from, *to);
-                if perform_switch(&app, &snapshot, from, to).await {
+                if crate::switch_transaction::recovery_requirement().is_none()
+                    && perform_switch(&app, &snapshot, from, to).await
+                {
                     state.complete_switch(from, now);
                     next_poll_at = tokio::time::Instant::now();
                     continue;

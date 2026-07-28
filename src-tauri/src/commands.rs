@@ -66,6 +66,8 @@ pub enum IpcError {
     CannotDisableActive(String),
     /// The server proved this account's refresh-token lineage is dead.
     ReloginRequired(String),
+    /// An interrupted switch could not be recovered automatically.
+    RecoveryRequired(String),
     /// A settings editor tried to overwrite a newer canonical revision.
     SettingsConflict {
         expected_revision: u64,
@@ -101,9 +103,17 @@ impl From<SwitchError> for IpcError {
             SwitchError::Locking(_) | SwitchError::LiveStateLock(_) => {
                 IpcError::Busy(e.to_string())
             }
+            SwitchError::Transaction(_)
+                if crate::switch_transaction::recovery_requirement().is_some() =>
+            {
+                IpcError::RecoveryRequired(e.to_string())
+            }
             SwitchError::Transaction(
                 crate::switch_transaction::TransactionError::RecoveryRequired,
-            ) => IpcError::Busy(e.to_string()),
+            )
+            | SwitchError::Transaction(
+                crate::switch_transaction::TransactionError::RollbackIncomplete { .. },
+            ) => IpcError::RecoveryRequired(e.to_string()),
             SwitchError::TargetGenerationChanged(_) => IpcError::Busy(e.to_string()),
             SwitchError::Refresh(crate::oauth_refresh::RefreshCoordinatorError::Lease(_)) => {
                 IpcError::Busy(e.to_string())
@@ -561,6 +571,13 @@ impl AppState {
             current
         };
         let daemon_status = crate::runtime::DaemonStatusStore::new(&policy, now);
+        if let Some(detail) = crate::switch_transaction::recovery_requirement() {
+            let _ = daemon_status.transition(
+                policy.revision,
+                crate::runtime::DaemonPhase::RecoveryRequired { detail },
+                now,
+            );
+        }
         let history = match crate::history::HistoryStore::open(&data_dir) {
             Ok(h) => Some(h),
             Err(e) => {
@@ -1236,6 +1253,21 @@ mod tests {
             serde_json::json!({
                 "kind": "reloginRequired",
                 "detail": "account requires re-login"
+            })
+        );
+    }
+
+    #[test]
+    fn pending_switch_recovery_is_a_structured_ipc_error() {
+        let mapped: IpcError =
+            SwitchError::Transaction(crate::switch_transaction::TransactionError::RecoveryRequired)
+                .into();
+        assert!(matches!(mapped, IpcError::RecoveryRequired(_)));
+        assert_eq!(
+            serde_json::to_value(mapped).unwrap(),
+            serde_json::json!({
+                "kind": "recoveryRequired",
+                "detail": "another switch transaction requires recovery"
             })
         );
     }

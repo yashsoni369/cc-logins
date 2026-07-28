@@ -54,6 +54,7 @@ export type IpcErrorKind =
   | "alreadyRegistered"
   | "cannotDisableActive"
   | "reloginRequired"
+  | "recoveryRequired"
   | "settingsConflict"
   | "internal";
 
@@ -127,6 +128,10 @@ export class IpcError extends Error {
   /** The selected account needs a fresh interactive login before activation. */
   get isReloginRequired() {
     return this.kind === "reloginRequired";
+  }
+
+  get isRecoveryRequired() {
+    return this.kind === "recoveryRequired";
   }
 }
 

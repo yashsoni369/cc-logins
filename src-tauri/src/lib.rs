@@ -243,6 +243,14 @@ pub fn run() {
     paths::set_store_root(data_dir.join("accounts"));
     log::info!("account vault: {}", paths::backup_root().display());
 
+    match switch_transaction::recover_pending_switch() {
+        Ok(switch_transaction::RecoveryDisposition::NothingToRecover) => {}
+        Ok(disposition) => log::warn!("recovered interrupted account switch: {disposition:?}"),
+        Err(error) => {
+            log::error!("automatic switch recovery failed; switching remains disabled: {error}")
+        }
+    }
+
     // Backstop for isolated-login temp dirs. They clean up on Drop, but an
     // abort runs no destructors, and one of those briefly holds a real
     // credential. Only sweeps dirs older than an hour so a login running in

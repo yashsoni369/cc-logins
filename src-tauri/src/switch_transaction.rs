@@ -122,6 +122,50 @@ pub enum TransactionError {
     InvalidTargetNumber(String),
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RecoveryDisposition {
+    NothingToRecover,
+    RolledBack { transaction_id: String },
+    VerifiedCommitted { transaction_id: String },
+}
+
+#[cfg(not(test))]
+fn recovery_state() -> &'static std::sync::Mutex<Option<String>> {
+    static STATE: std::sync::OnceLock<std::sync::Mutex<Option<String>>> =
+        std::sync::OnceLock::new();
+    STATE.get_or_init(|| std::sync::Mutex::new(None))
+}
+
+#[cfg(test)]
+thread_local! {
+    static TEST_RECOVERY_STATE: std::cell::RefCell<Option<String>> = const { std::cell::RefCell::new(None) };
+}
+
+#[cfg(not(test))]
+fn set_recovery_requirement(detail: Option<String>) {
+    *recovery_state()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner()) = detail;
+}
+
+#[cfg(test)]
+fn set_recovery_requirement(detail: Option<String>) {
+    TEST_RECOVERY_STATE.with(|state| *state.borrow_mut() = detail);
+}
+
+#[cfg(not(test))]
+pub fn recovery_requirement() -> Option<String> {
+    recovery_state()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .clone()
+}
+
+#[cfg(test)]
+pub fn recovery_requirement() -> Option<String> {
+    TEST_RECOVERY_STATE.with(|state| state.borrow().clone())
+}
+
 fn transaction_id() -> String {
     use std::sync::atomic::{AtomicU64, Ordering};
     static NEXT: AtomicU64 = AtomicU64::new(0);
@@ -194,6 +238,9 @@ pub(crate) fn execute_locked<H: StoreHost>(
     let root = crate::paths::backup_root();
     let journal_store = JournalStore::new(&root);
     if journal_store.load()?.is_some() {
+        set_recovery_requirement(Some(
+            "an interrupted account switch must be recovered before switching again".to_string(),
+        ));
         return Err(TransactionError::RecoveryRequired);
     }
 
@@ -307,12 +354,15 @@ pub(crate) fn execute_locked<H: StoreHost>(
             .existed
             .then(|| recovery.put(&transaction_id, "outgoing-config", &config_before.bytes))
             .transpose()?;
-        let outgoing_number = match &plan.outgoing {
-            OutgoingDestination::Managed { number, .. } => Some(number.clone()),
-            OutgoingDestination::Unclaimed => None,
+        let (outgoing_number, outgoing_email) = match &plan.outgoing {
+            OutgoingDestination::Managed { number, email, .. } => {
+                (Some(number.clone()), Some(email.clone()))
+            }
+            OutgoingDestination::Unclaimed => (None, None),
         };
         journal.outgoing_generation = Some(OutgoingGeneration {
             account_number: outgoing_number,
+            email: outgoing_email,
             credential: Some(outgoing_credential),
             config: outgoing_config,
             credential_sha256: Some(sha256(active_value.as_bytes())),
@@ -341,7 +391,11 @@ pub(crate) fn execute_locked<H: StoreHost>(
                     "reason".to_string(),
                     Value::String("displaced-live-login".to_string()),
                 );
-                store.write_unclaimed_credential(&active_value, context)?;
+                store.write_unclaimed_credential_named(
+                    &format!("recovery-{transaction_id}"),
+                    &active_value,
+                    context,
+                )?;
             }
         }
 
@@ -391,7 +445,13 @@ pub(crate) fn execute_locked<H: StoreHost>(
         Ok(())
     })();
 
-    if operation.is_ok() || journal.phase == JournalPhase::Committed {
+    if journal.phase == JournalPhase::Committed {
+        if let Err(error) = &operation {
+            set_recovery_requirement(Some(error.to_string()));
+        }
+        return operation;
+    }
+    if operation.is_ok() {
         return operation;
     }
 
@@ -446,11 +506,233 @@ pub(crate) fn execute_locked<H: StoreHost>(
         let _ = journal_store.remove(&transaction_id);
         Err(operation_error)
     } else {
-        Err(TransactionError::RollbackIncomplete {
+        let error = TransactionError::RollbackIncomplete {
             operation: operation_error.to_string(),
             rollback: rollback_errors.join("; "),
-        })
+        };
+        set_recovery_requirement(Some(error.to_string()));
+        Err(error)
     }
+}
+
+fn recovered_file_state(
+    record: &ArtifactRecord,
+    recovery: &mut crate::recovery_store::RecoveryStore,
+) -> Result<crate::durable_fs::FileState, TransactionError> {
+    Ok(crate::durable_fs::FileState {
+        existed: record.existed_before,
+        bytes: record.load_verified_before(recovery)?.unwrap_or_default(),
+    })
+}
+
+fn verify_hash(bytes: &[u8], expected: Option<&str>, label: &str) -> Result<(), TransactionError> {
+    if expected.is_some_and(|expected| sha256(bytes) == expected) {
+        Ok(())
+    } else {
+        Err(TransactionError::Verification(format!(
+            "{label} recovery bytes failed their integrity check"
+        )))
+    }
+}
+
+fn preserve_outgoing_generation(
+    store: &mut CredentialStore<crate::switcher::GuiStoreHost>,
+    journal: &SwitchJournal,
+    recovery: &mut crate::recovery_store::RecoveryStore,
+) -> Result<(), TransactionError> {
+    let outgoing = journal.outgoing_generation.as_ref().ok_or_else(|| {
+        TransactionError::Verification("journal has no outgoing generation".to_string())
+    })?;
+    let credential_ref = outgoing.credential.as_ref().ok_or_else(|| {
+        TransactionError::Verification("outgoing credential reference is missing".to_string())
+    })?;
+    let credential = recovery.get(credential_ref)?;
+    verify_hash(
+        &credential,
+        outgoing.credential_sha256.as_deref(),
+        "outgoing credential",
+    )?;
+    let credential_text = String::from_utf8(credential).map_err(|error| {
+        TransactionError::Verification(format!("outgoing credential is not UTF-8: {error}"))
+    })?;
+
+    match (&outgoing.account_number, &outgoing.email) {
+        (Some(number), Some(email)) => {
+            let config_ref = outgoing.config.as_ref().ok_or_else(|| {
+                TransactionError::Verification("outgoing config reference is missing".to_string())
+            })?;
+            let config = recovery.get(config_ref)?;
+            verify_hash(
+                &config,
+                outgoing.config_sha256.as_deref(),
+                "outgoing config",
+            )?;
+            store.write_account_credentials(number, email, &credential_text)?;
+            let config_path = crate::paths::backup_root()
+                .join("configs")
+                .join(format!(".claude-config-{number}-{email}.json"));
+            crate::durable_fs::stage_sibling(&config_path, &config, Some(0o600))?.commit()?;
+            Ok(())
+        }
+        (None, None) => {
+            let mut context = Map::new();
+            context.insert(
+                "reason".to_string(),
+                Value::String("displaced-live-login".to_string()),
+            );
+            store.write_unclaimed_credential_named(
+                &format!("recovery-{}", journal.transaction_id),
+                &credential_text,
+                context,
+            )?;
+            Ok(())
+        }
+        _ => Err(TransactionError::Verification(
+            "outgoing slot identity is incomplete".to_string(),
+        )),
+    }
+}
+
+fn remove_journal_stages(journal: &SwitchJournal) {
+    if let Some(name) = &journal.global_config.staged_relative_path {
+        let target = crate::paths::global_config_path();
+        remove_stage(
+            &target
+                .parent()
+                .unwrap_or_else(|| std::path::Path::new("."))
+                .join(name),
+        );
+    }
+    if let Some(name) = &journal.sequence.staged_relative_path {
+        remove_stage(&crate::paths::backup_root().join(name));
+    }
+}
+
+fn verify_committed(
+    store: &mut CredentialStore<crate::switcher::GuiStoreHost>,
+    journal: &SwitchJournal,
+) -> Result<(), TransactionError> {
+    let active = store
+        .read_active_credentials()
+        .value
+        .ok_or(TransactionError::CredentialRead)?;
+    verify_hash(
+        active.as_bytes(),
+        journal.active_credential.after_sha256.as_deref(),
+        "committed active credential",
+    )?;
+    verify_hash(
+        &std::fs::read(crate::paths::global_config_path())?,
+        journal.global_config.after_sha256.as_deref(),
+        "committed global config",
+    )?;
+    verify_hash(
+        &std::fs::read(crate::paths::backup_root().join("sequence.json"))?,
+        journal.sequence.after_sha256.as_deref(),
+        "committed sequence",
+    )
+}
+
+pub fn recover_pending_switch() -> Result<RecoveryDisposition, TransactionError> {
+    recover_pending_switch_with(crate::claude_locks::DEFAULT_TIMEOUT)
+}
+
+pub(crate) fn recover_pending_switch_with(
+    timeout: Duration,
+) -> Result<RecoveryDisposition, TransactionError> {
+    let result = recover_pending_switch_inner(timeout);
+    if let Err(error) = &result {
+        set_recovery_requirement(Some(error.to_string()));
+    }
+    result
+}
+
+fn recover_pending_switch_inner(
+    timeout: Duration,
+) -> Result<RecoveryDisposition, TransactionError> {
+    let root = crate::paths::backup_root();
+    let journal_store = JournalStore::new(&root);
+    if journal_store.load()?.is_none() {
+        set_recovery_requirement(None);
+        return Ok(RecoveryDisposition::NothingToRecover);
+    }
+    let _locks = acquire_live_state_locks(timeout).map_err(|error| {
+        TransactionError::Verification(format!("could not acquire recovery locks: {error}"))
+    })?;
+    let Some(journal) = journal_store.load()? else {
+        set_recovery_requirement(None);
+        return Ok(RecoveryDisposition::NothingToRecover);
+    };
+    let transaction_id = journal.transaction_id.clone();
+    let mut recovery = crate::recovery_store::RecoveryStore::new(&root);
+    let mut store = CredentialStore::new(crate::switcher::GuiStoreHost);
+
+    let result = if journal.phase == JournalPhase::Committed {
+        verify_committed(&mut store, &journal)?;
+        RecoveryDisposition::VerifiedCommitted {
+            transaction_id: transaction_id.clone(),
+        }
+    } else {
+        // Verify and deserialize every before-image before mutating anything.
+        let active_bytes = journal
+            .active_credential
+            .load_verified_before(&mut recovery)?
+            .ok_or_else(|| {
+                TransactionError::Verification(
+                    "active credential before-image is missing".to_string(),
+                )
+            })?;
+        let active: ActiveCredentialState = serde_json::from_slice(&active_bytes)?;
+        let config = recovered_file_state(&journal.global_config, &mut recovery)?;
+        let sequence = recovered_file_state(&journal.sequence, &mut recovery)?;
+
+        let mut errors = Vec::new();
+        if journal.outgoing_generation.is_some() {
+            if let Err(error) = preserve_outgoing_generation(&mut store, &journal, &mut recovery) {
+                errors.push(format!("outgoing generation: {error}"));
+            }
+        }
+        if let Err(error) =
+            crate::durable_fs::restore(&root.join("sequence.json"), &sequence, Some(0o600))
+        {
+            errors.push(format!("sequence: {error}"));
+        }
+        if let Err(error) =
+            crate::durable_fs::restore(&crate::paths::global_config_path(), &config, Some(0o600))
+        {
+            errors.push(format!("global config: {error}"));
+        }
+        if let Err(error) = store.restore_active_state(&active) {
+            errors.push(format!("active credential: {error}"));
+        }
+        if store.verify_active_state(&active).is_err()
+            || crate::durable_fs::snapshot(&crate::paths::global_config_path())
+                .ok()
+                .as_ref()
+                != Some(&config)
+            || crate::durable_fs::snapshot(&root.join("sequence.json"))
+                .ok()
+                .as_ref()
+                != Some(&sequence)
+        {
+            errors.push("restored state verification failed".to_string());
+        }
+        if !errors.is_empty() {
+            return Err(TransactionError::RollbackIncomplete {
+                operation: "restart recovery".to_string(),
+                rollback: errors.join("; "),
+            });
+        }
+        RecoveryDisposition::RolledBack {
+            transaction_id: transaction_id.clone(),
+        }
+    };
+
+    remove_journal_stages(&journal);
+    recovery.remove_transaction(&transaction_id)?;
+    journal_store.remove(&transaction_id)?;
+    set_recovery_requirement(None);
+    Ok(result)
 }
 
 /// Acquire the complete live-state lock set in the canonical order.
@@ -558,6 +840,17 @@ mod tests {
             } else {
                 Ok(())
             }
+        }
+    }
+
+    struct PanicFault(FaultPoint);
+
+    impl FaultInjector for PanicFault {
+        fn hit(&self, point: FaultPoint) -> Result<(), InjectedFault> {
+            if self.0 == point {
+                panic!("simulated process termination at {point:?}");
+            }
+            Ok(())
         }
     }
 
@@ -740,6 +1033,123 @@ mod tests {
         assert!(!JournalStore::new(env.vault.path()).path().exists());
         let recovery_root = env.vault.path().join("switch-recovery");
         assert!(!recovery_root.exists() || fs::read_dir(recovery_root).unwrap().next().is_none());
+    }
+
+    #[test]
+    fn recovery_rolls_back_every_noncommitted_phase_and_is_idempotent() {
+        for point in [
+            FaultPoint::AfterJournalSync,
+            FaultPoint::AfterStageSequence,
+            FaultPoint::AfterActiveCredentialInstall,
+            FaultPoint::AfterCredentialPhaseSync,
+            FaultPoint::AfterGlobalConfigInstall,
+            FaultPoint::AfterConfigPhaseSync,
+            FaultPoint::AfterSequenceInstall,
+            FaultPoint::AfterSequencePhaseSync,
+        ] {
+            let env = setup();
+            let (mut store, plan, active, config, sequence) = transaction_fixture(&env);
+            let crashed = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                let _ = execute_locked(&mut store, plan.clone(), &PanicFault(point));
+            }));
+            assert!(crashed.is_err(), "{point:?}");
+            assert!(
+                JournalStore::new(env.vault.path()).path().exists(),
+                "{point:?}"
+            );
+
+            let recovered = recover_pending_switch_with(Duration::from_secs(1)).unwrap();
+            assert!(matches!(recovered, RecoveryDisposition::RolledBack { .. }));
+            assert_eq!(
+                fs::read(crate::paths::credentials_path()).unwrap(),
+                active,
+                "{point:?}"
+            );
+            assert_eq!(
+                fs::read(crate::paths::global_config_path()).unwrap(),
+                config,
+                "{point:?}"
+            );
+            assert_eq!(
+                fs::read(&plan.sequence_path).unwrap(),
+                sequence,
+                "{point:?}"
+            );
+            assert_eq!(
+                recover_pending_switch_with(Duration::from_secs(1)).unwrap(),
+                RecoveryDisposition::NothingToRecover
+            );
+            assert!(recovery_requirement().is_none());
+            drop(env);
+        }
+    }
+
+    #[test]
+    fn recovery_verifies_a_committed_switch_then_cleans_up() {
+        let env = setup();
+        let (mut store, plan, active, _, _) = transaction_fixture(&env);
+        let crashed = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _ = execute_locked(&mut store, plan, &PanicFault(FaultPoint::AfterCommitSync));
+        }));
+        assert!(crashed.is_err());
+        assert_ne!(fs::read(crate::paths::credentials_path()).unwrap(), active);
+        assert!(matches!(
+            recover_pending_switch_with(Duration::from_secs(1)).unwrap(),
+            RecoveryDisposition::VerifiedCommitted { .. }
+        ));
+        assert!(!JournalStore::new(env.vault.path()).path().exists());
+        assert!(recovery_requirement().is_none());
+    }
+
+    #[test]
+    fn recovery_noop_does_not_create_or_touch_any_lock_path() {
+        let env = setup();
+        assert_eq!(
+            recover_pending_switch_with(Duration::from_millis(50)).unwrap(),
+            RecoveryDisposition::NothingToRecover
+        );
+        assert!(!crate::paths::oauth_refresh_lock_dir().exists());
+        assert!(!crate::paths::credentials_lock_dir().exists());
+        assert!(!crate::paths::global_config_lock_dir().exists());
+        assert!(!env.vault.path().join(".lock").exists());
+        assert!(!crate::paths::cswap_store_root().exists());
+    }
+
+    #[test]
+    fn recovery_tamper_failure_retains_journal_and_blocks_the_next_switch() {
+        let env = setup();
+        let (mut store, plan, _, _, _) = transaction_fixture(&env);
+        let crashed = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _ = execute_locked(
+                &mut store,
+                plan.clone(),
+                &PanicFault(FaultPoint::AfterActiveCredentialInstall),
+            );
+        }));
+        assert!(crashed.is_err());
+        let journal_store = JournalStore::new(env.vault.path());
+        let journal = journal_store.load().unwrap().unwrap();
+        let crate::recovery_store::ProtectedArtifactRef::File { relative_path, .. } =
+            journal.active_credential.before.as_ref().unwrap()
+        else {
+            panic!("test recovery backend must be file based");
+        };
+        fs::write(
+            env.vault.path().join(relative_path),
+            crate::credentials::protect_bytes(b"tampered"),
+        )
+        .unwrap();
+
+        assert!(recover_pending_switch_with(Duration::from_secs(1)).is_err());
+        assert!(journal_store.path().exists());
+        assert!(recovery_requirement().is_some());
+        let before = fs::read(crate::paths::credentials_path()).unwrap();
+        assert!(matches!(
+            execute_locked(&mut store, plan, &NoFaults),
+            Err(TransactionError::RecoveryRequired)
+        ));
+        assert_eq!(fs::read(crate::paths::credentials_path()).unwrap(), before);
+        set_recovery_requirement(None);
     }
 
     #[test]

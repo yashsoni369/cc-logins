@@ -82,6 +82,7 @@ impl ArtifactRecord {
 #[serde(rename_all = "camelCase")]
 pub struct OutgoingGeneration {
     pub account_number: Option<String>,
+    pub email: Option<String>,
     pub credential: Option<ProtectedArtifactRef>,
     pub config: Option<ProtectedArtifactRef>,
     pub credential_sha256: Option<String>,

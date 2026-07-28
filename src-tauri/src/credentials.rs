@@ -2043,17 +2043,51 @@ impl<H: StoreHost> CredentialStore<H> {
         let nonce = random_hex_suffix(3);
         let entry_id = format!("{ts}-{digest_short}-{nonce}");
 
-        self.atomic_envelope_write(&self.stash_entry_path(&entry_id), credentials)?;
+        self.write_unclaimed_credential_named(&entry_id, credentials, context)?;
+        Ok(entry_id)
+    }
+
+    /// Idempotent transaction-recovery form of the unclaimed stash writer.
+    /// Reusing the same safe identifier with the same bytes repairs/updates
+    /// its manifest row; different bytes fail closed.
+    pub(crate) fn write_unclaimed_credential_named(
+        &mut self,
+        entry_id: &str,
+        credentials: &str,
+        context: Map<String, Value>,
+    ) -> Result<(), CredentialError> {
+        if entry_id.is_empty()
+            || !entry_id
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
+        {
+            return Err(CredentialError::Write(
+                "invalid unclaimed credential identifier".to_string(),
+            ));
+        }
+
+        let entry_path = self.stash_entry_path(entry_id);
+        if entry_path.exists() {
+            let existing = std::fs::read_to_string(&entry_path)
+                .map_err(|error| CredentialError::Write(error.to_string()))?;
+            let decoded = unwrap_credential(&existing).map_err(CredentialError::Write)?;
+            if decoded != credentials {
+                return Err(CredentialError::Write(
+                    "unclaimed credential identifier already contains different bytes".to_string(),
+                ));
+            }
+        } else {
+            self.atomic_envelope_write(&entry_path, credentials)?;
+        }
 
         let mut entries = self.read_stash_manifest();
         let mut entry = context;
-        entry.insert(
-            "createdAt".to_string(),
-            Value::String(now.format("%Y-%m-%dT%H:%M:%SZ").to_string()),
-        );
-        entries.insert(entry_id.clone(), Value::Object(entry));
+        entry.entry("createdAt".to_string()).or_insert_with(|| {
+            Value::String(chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string())
+        });
+        entries.insert(entry_id.to_string(), Value::Object(entry));
         self.write_stash_manifest(entries)?;
-        Ok(entry_id)
+        Ok(())
     }
 
     /// Manifest entries by id, including orphaned entry files (no metadata).
@@ -2523,6 +2557,24 @@ mod tests {
             entries[&entry_id]["reason"],
             Value::String("provenance-mismatch".to_string())
         );
+    }
+
+    #[test]
+    fn named_unclaimed_credential_is_idempotent_and_rejects_different_bytes() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = file_backed_store(dir.path());
+        let mut context = Map::new();
+        context.insert("reason".to_string(), Value::String("recovery".to_string()));
+        store
+            .write_unclaimed_credential_named("recovery-tx-1", "same-secret", context.clone())
+            .unwrap();
+        store
+            .write_unclaimed_credential_named("recovery-tx-1", "same-secret", context)
+            .unwrap();
+        assert_eq!(store.list_unclaimed_credentials().len(), 1);
+        assert!(store
+            .write_unclaimed_credential_named("recovery-tx-1", "different-secret", Map::new(),)
+            .is_err());
     }
 
     #[test]

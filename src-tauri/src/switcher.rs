@@ -160,7 +160,7 @@ fn account_config_path_at(root: &Path, account_num: &str, email: &str) -> PathBu
 /// vault, never the `cswap` CLI's. [`CswapStoreHost`] (below, near
 /// [`import_from_cswap`]) is the read-only counterpart pointed at the CLI's
 /// own credentials directory.
-struct GuiStoreHost;
+pub(crate) struct GuiStoreHost;
 
 impl StoreHost for GuiStoreHost {
     /// Under `cfg(test)` this is pinned to `Linux` — the file-only backend —
