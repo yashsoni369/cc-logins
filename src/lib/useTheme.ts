@@ -22,7 +22,7 @@
  *
  * ## No flash of the wrong theme
  *
- * The persisted theme only arrives after an async `getSettings()` call, but
+ * The persisted theme only arrives after the settings owner hydrates, but
  * the very first paint can't wait for that. So every time the resolved
  * theme is applied, it is also cached in `localStorage` — a render-time
  * cache only, never the source of truth — which a small inline script in
@@ -32,7 +32,8 @@
  */
 
 import { useCallback, useEffect, useRef, useState } from "react";
-import { getSettings, IpcError, setSettings } from "@/lib/api";
+import { IpcError } from "@/lib/api";
+import type { UseSettingsResult } from "@/lib/useSettings";
 import type { Settings } from "@/types";
 
 export type Theme = Settings["theme"];
@@ -91,7 +92,7 @@ export interface UseThemeResult {
   error: string | null;
 }
 
-export function useTheme(): UseThemeResult {
+export function useTheme(runtime: UseSettingsResult): UseThemeResult {
   const [theme, setThemeState] = useState<Theme>("system");
   const [resolvedTheme, setResolvedTheme] = useState<ResolvedTheme>(() => resolve("system"));
   const [error, setError] = useState<string | null>(null);
@@ -99,28 +100,25 @@ export function useTheme(): UseThemeResult {
   // Read from timers/callbacks instead of state so they never see a value
   // stale-captured at the point the callback was created.
   const themeRef = useRef<Theme>("system");
-  // Cached whenever loaded from the backend, so `setTheme` can merge the new
-  // theme into the rest of `Settings` without an extra round trip for the
-  // common case of a settings object already having been fetched once.
-  const settingsRef = useRef<Settings | null>(null);
   const mounted = useRef(true);
 
-  // Load the persisted theme once, then apply it for real.
+  // Apply every newly confirmed revision. Including the revision in the
+  // dependency is intentional: a conflict can rehydrate the same theme value
+  // after an optimistic local change, and that confirmation must restore it.
   useEffect(() => {
     mounted.current = true;
-    getSettings().then((result) => {
-      if (!mounted.current) return;
-      settingsRef.current = result.data;
-      themeRef.current = result.data.theme;
-      setThemeState(result.data.theme);
-      const resolved = resolve(result.data.theme);
+    const confirmed = runtime.settings?.theme;
+    if (confirmed) {
+      themeRef.current = confirmed;
+      setThemeState(confirmed);
+      const resolved = resolve(confirmed);
       setResolvedTheme(resolved);
-      applyTheme(result.data.theme, resolved);
-    });
+      applyTheme(confirmed, resolved);
+    }
     return () => {
       mounted.current = false;
     };
-  }, []);
+  }, [runtime.settings?.theme, runtime.snapshot?.revision]);
 
   // React live to the OS theme changing while the app is open — only
   // matters while "system" is selected, but the resolved value must stay
@@ -138,29 +136,22 @@ export function useTheme(): UseThemeResult {
     return () => mql.removeEventListener("change", onChange);
   }, []);
 
-  const setTheme = useCallback((next: Theme) => {
-    themeRef.current = next;
-    setThemeState(next);
-    const resolved = resolve(next);
-    setResolvedTheme(resolved);
-    applyTheme(next, resolved); // instant — do not wait on the backend round-trip
-    setError(null);
+  const setTheme = useCallback(
+    (next: Theme) => {
+      themeRef.current = next;
+      setThemeState(next);
+      const resolved = resolve(next);
+      setResolvedTheme(resolved);
+      applyTheme(next, resolved); // instant — do not wait on the backend round-trip
+      setError(null);
 
-    const base = settingsRef.current
-      ? Promise.resolve(settingsRef.current)
-      : getSettings().then((r) => r.data);
-
-    void base
-      .then((current) => setSettings({ ...current, theme: next }))
-      .then((saved) => {
-        if (!mounted.current) return;
-        settingsRef.current = saved;
-      })
-      .catch((err: unknown) => {
+      void runtime.update({ theme: next }).catch((err: unknown) => {
         if (!mounted.current) return;
         setError(err instanceof IpcError ? err.message : "Couldn't save theme.");
       });
-  }, []);
+    },
+    [runtime.update],
+  );
 
   return { theme, resolvedTheme, setTheme, error };
 }

@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import AboutSection from "./AboutSection";
-import { getSettings, IpcError, setSettings } from "../lib/api";
+import { IpcError } from "../lib/api";
+import type { UseSettingsResult } from "../lib/useSettings";
 import type { Theme } from "../lib/useTheme";
 import type { Settings } from "../types";
 
@@ -104,6 +105,7 @@ const THEME_OPTIONS: Array<SegOption<Theme>> = [
 ];
 
 interface SettingsScreenProps {
+  runtime: UseSettingsResult;
   /** Current theme preference — owned by `useTheme()` in `App.tsx`, passed down so this control and the theme actually applied to the window never disagree. */
   theme: Theme;
   onThemeChange: (theme: Theme) => void;
@@ -117,17 +119,15 @@ interface SettingsScreenProps {
  * at the bottom is the one open product decision, surfaced as a real control
  * rather than hidden in a config file.
  *
- * Loads real settings on mount and persists every change via `set_settings`.
+ * Uses the window's shared settings owner and persists named-field patches.
  * The threshold slider is debounced so a drag sends one write, not one per
  * pixel; every other control commits immediately since a discrete click is
  * already a single deliberate change. Every commit replaces local state with
  * the backend's *returned* (clamped) settings rather than the value sent —
  * echoing the request would show a number that was not actually saved.
  */
-export default function SettingsScreen({ theme, onThemeChange, themeError }: SettingsScreenProps) {
-  const [settings, setSettingsState] = useState<Settings | null>(null);
-  const [live, setLive] = useState(false);
-  const [loading, setLoading] = useState(true);
+export default function SettingsScreen({ runtime, theme, onThemeChange, themeError }: SettingsScreenProps) {
+  const { settings, live, loading, update } = runtime;
   const [saveError, setSaveError] = useState<string | null>(null);
 
   // Local draft for the slider only, so dragging feels instant even though
@@ -136,63 +136,36 @@ export default function SettingsScreen({ theme, onThemeChange, themeError }: Set
 
   const commitTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const mounted = useRef(true);
-  // Always mirrors the currently *displayed* settings (confirmed plus any
-  // optimistic field not yet round-tripped), read from timers/callbacks
-  // instead of the state itself so those reads never see a value
-  // stale-captured at the point the callback was created — used as the merge
-  // base when building the next payload to send.
-  const settingsRef = useRef<Settings | null>(null);
-  // The last value the backend actually confirmed saving. Distinct from
-  // `settingsRef`: on a failed commit, this is what gets restored, never the
-  // optimistic value that just failed to persist.
-  const lastConfirmedRef = useRef<Settings | null>(null);
 
   useEffect(() => {
     mounted.current = true;
-    getSettings().then((result) => {
-      if (!mounted.current) return;
-      setSettingsState(result.data);
-      settingsRef.current = result.data;
-      lastConfirmedRef.current = result.data;
-      setLive(result.live);
-      setLoading(false);
-    });
     return () => {
       mounted.current = false;
       if (commitTimer.current != null) clearTimeout(commitTimer.current);
     };
   }, []);
 
-  /** Sends `next` to the backend and, on success, adopts the (possibly clamped) value it actually saved. */
-  const commit = useCallback(async (next: Settings) => {
-    try {
-      const saved = await setSettings(next);
-      if (!mounted.current) return;
-      setSettingsState(saved);
-      settingsRef.current = saved;
-      lastConfirmedRef.current = saved;
-      setDraftThreshold(null);
-      setSaveError(null);
-    } catch (err) {
-      if (!mounted.current) return;
-      // Revert to the last CONFIRMED value — an optimistic update here would
-      // show a setting as saved when it was not.
-      setSettingsState(lastConfirmedRef.current);
-      settingsRef.current = lastConfirmedRef.current;
-      setDraftThreshold(null);
-      setSaveError(err instanceof IpcError ? err.message : "Couldn't save settings.");
-    }
-  }, []);
+  /** Sends only named fields; the shared owner adopts the canonical response. */
+  const commit = useCallback(
+    async (patch: Partial<Settings>) => {
+      try {
+        await update(patch);
+        if (!mounted.current) return;
+        setDraftThreshold(null);
+        setSaveError(null);
+      } catch (err) {
+        if (!mounted.current) return;
+        setDraftThreshold(null);
+        setSaveError(err instanceof IpcError ? err.message : "Couldn't save settings.");
+      }
+    },
+    [update],
+  );
 
   /** Immediate controls (toggle/segmented): no clamping applies to these fields, so the sent value is safe to show right away. */
   const commitField = useCallback(
     <K extends keyof Settings>(key: K, value: Settings[K]) => {
-      const prev = settingsRef.current;
-      if (!prev) return;
-      const next = { ...prev, [key]: value };
-      setSettingsState(next);
-      settingsRef.current = next;
-      void commit(next);
+      void commit({ [key]: value } as Pick<Settings, K>);
     },
     [commit],
   );
@@ -202,9 +175,7 @@ export default function SettingsScreen({ theme, onThemeChange, themeError }: Set
       setDraftThreshold(value);
       if (commitTimer.current != null) clearTimeout(commitTimer.current);
       commitTimer.current = setTimeout(() => {
-        const prev = settingsRef.current;
-        if (!prev) return;
-        void commit({ ...prev, threshold: value });
+        void commit({ threshold: value });
       }, SLIDER_COMMIT_MS);
     },
     [commit],
@@ -232,9 +203,9 @@ export default function SettingsScreen({ theme, onThemeChange, themeError }: Set
         {!live && <span className="sub">Sample settings — not running in the desktop app, so nothing here persists.</span>}
       </div>
 
-      {(saveError || themeError) && (
+      {(saveError || themeError || runtime.error != null) && (
         <div className="banner danger" role="alert">
-          <span>{saveError ?? themeError}</span>
+          <span>{saveError ?? themeError ?? "Couldn't load confirmed settings."}</span>
         </div>
       )}
 
@@ -331,44 +302,6 @@ export default function SettingsScreen({ theme, onThemeChange, themeError }: Set
               value={grace}
               onChange={(id) => commitField("graceSeconds", GRACE_SECONDS[id])}
               options={GRACE_OPTIONS}
-            />
-          </div>
-        </div>
-
-        <div className="field">
-          <div className="k">
-            Notify me
-            <i>Desktop notifications.</i>
-          </div>
-          <div className="v">
-            <Toggle
-              checked={settings.notifyOnSwitch}
-              onChange={(v) => commitField("notifyOnSwitch", v)}
-              label="When an account is switched"
-            />
-            <Toggle
-              checked={settings.notifyOnExhausted}
-              onChange={(v) => commitField("notifyOnExhausted", v)}
-              label="When all accounts are exhausted"
-            />
-            <Toggle
-              checked={settings.notifyOnExpiry}
-              onChange={(v) => commitField("notifyOnExpiry", v)}
-              label="When a login expires"
-            />
-          </div>
-        </div>
-
-        <div className="field">
-          <div className="k">
-            Start at login
-            <i>Run in the tray when the machine starts.</i>
-          </div>
-          <div className="v">
-            <Toggle
-              checked={settings.startAtLogin}
-              onChange={(v) => commitField("startAtLogin", v)}
-              label={settings.startAtLogin ? "Enabled" : "Disabled"}
             />
           </div>
         </div>

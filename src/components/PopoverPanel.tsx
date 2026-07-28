@@ -17,6 +17,7 @@ import { ageLabel, bindingUtilisation, displayName, quotaState } from "@/types";
 import { hasBackend, IpcError, previewTarget, switchAccount } from "@/lib/api";
 import { useSnapshot } from "@/lib/useSnapshot";
 import { useTheme } from "@/lib/useTheme";
+import { useSettings } from "@/lib/useSettings";
 import UsageMeter from "@/components/UsageMeter";
 import { RefreshButton } from "@/components/RefreshButton";
 
@@ -128,6 +129,7 @@ interface SwitchErrorState {
 }
 
 export default function PopoverPanel() {
+  const settings = useSettings();
   const { snapshot, live, loading, error, refresh } = useSnapshot();
   const rootRef = useRef<HTMLDivElement>(null);
 
@@ -135,7 +137,7 @@ export default function PopoverPanel() {
   // dashboard window's useTheme() call in App.tsx does not reach it, so it
   // applies (and keeps live) the persisted theme itself. There is no theme
   // control here; the popover only ever displays what Settings decided.
-  useTheme();
+  useTheme(settings);
 
   useDismissOnBlurOrEscape();
   useSizeToContent(rootRef);

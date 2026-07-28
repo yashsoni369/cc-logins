@@ -6,6 +6,7 @@ import SettingsScreen from "./components/SettingsScreen";
 import FirstRunScreen from "./components/FirstRunScreen";
 import { useSnapshot } from "./lib/useSnapshot";
 import { useTheme, type Theme } from "./lib/useTheme";
+import { useSettings } from "./lib/useSettings";
 import {
   addCurrentAccount,
   addToken,
@@ -194,11 +195,12 @@ function SampleDataBanner() {
 export default function App() {
   const [screen, setScreen] = useState<Screen>("accounts");
   const { snapshot, live, loading, error, refresh } = useSnapshot();
+  const settings = useSettings();
   // Applies the persisted theme to this window's <html> and keeps it live
   // against OS changes. SettingsScreen gets the same instance as props
   // rather than mounting its own, so the segmented control there and the
   // theme actually applied to this document never disagree.
-  const theme = useTheme();
+  const theme = useTheme(settings);
 
   const [pendingAccount, setPendingAccount] = useState<number | null>(null);
   const [switchError, setSwitchError] = useState<SwitchError | null>(null);
@@ -428,10 +430,13 @@ export default function App() {
             degraded={error !== null}
           />
         )}
-        {screen === "history" && <HistoryScreen />}
+        {screen === "history" && (
+          <HistoryScreen settingsThreshold={settings.settings?.threshold ?? 90} />
+        )}
         {screen === "environments" && <EnvironmentsScreen environments={displaySnapshot.environments} />}
         {screen === "settings" && (
           <SettingsScreen
+            runtime={settings}
             theme={theme.theme}
             onThemeChange={theme.setTheme}
             themeError={theme.error}

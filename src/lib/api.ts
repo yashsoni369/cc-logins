@@ -491,12 +491,6 @@ export async function getSettingsSnapshot(): Promise<Sourced<SettingsSnapshot>> 
   return { data: await call<SettingsSnapshot>("get_settings"), live: true };
 }
 
-/** @deprecated Use the revision-safe `useSettings` owner. */
-export async function getSettings(): Promise<Sourced<Settings>> {
-  const snapshot = await getSettingsSnapshot();
-  return { data: snapshot.data.settings, live: snapshot.live };
-}
-
 /**
  * Persist settings. Returns the values the backend actually saved, which are
  * clamped (threshold to 50..99, interval to 15..3600, etc.) and may not
@@ -517,13 +511,6 @@ export async function updateSettings(
   return call<SettingsSnapshot>("update_settings", {
     input: { expectedRevision, patch },
   });
-}
-
-/** @deprecated Removed once all consumers use named-field patches. */
-export async function setSettings(settings: Settings): Promise<Settings> {
-  const current = await getSettingsSnapshot();
-  const saved = await updateSettings(current.data.revision, settings);
-  return saved.settings;
 }
 
 export async function snoozeAutoSwitch(durationSeconds: number): Promise<SettingsSnapshot> {
