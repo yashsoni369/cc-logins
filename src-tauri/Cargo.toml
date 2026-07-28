@@ -49,7 +49,7 @@ reqwest = { version = "0.12", default-features = false, features = ["json", "rus
 chrono = { version = "0.4", features = ["serde"] }
 sha2 = "0.10"
 base64 = "0.22"
-dirs = "5"
+dirs = "6"
 # Used by login.rs (interactive_login) to create the isolated CLAUDE_CONFIG_DIR
 # temp directory at runtime — previously only a [dev-dependencies] entry,
 # which covered the test suite but not a real (non-test) build.
@@ -57,7 +57,7 @@ tempfile = "3"
 
 # Tray icon bitmaps are rasterised at runtime: Windows tray icons carry no
 # text label, so the utilisation number is drawn into the image itself.
-tiny-skia = "0.11"
+tiny-skia = "0.12"
 
 # Local usage history. Bundled so no system SQLite is required.
 rusqlite = { version = "0.32", features = ["bundled", "chrono"] }

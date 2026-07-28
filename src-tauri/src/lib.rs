@@ -224,15 +224,18 @@ pub fn run() {
         .join(&context.config().identifier);
 
     // One-time migration across the bundle identifier rename
-    // (dev.apex36.claude-account-switcher -> dev.apex36.cc-logins). Tauri
+    // (dev.apex36.cc-logins -> cc-logins). Tauri
     // derives app_data_dir() from the identifier, so the rename alone would
     // move this app's data tree to a new, empty directory and silently orphan
     // a real user's accounts one directory over. Must run before
     // `set_store_root`/`AppState::new`, since both read from `data_dir`. See
     // migrate.rs for the safety model (copy-verify-retire, never delete).
     if let Some(parent) = data_dir.parent() {
-        let old_data_dir = parent.join("dev.apex36.claude-account-switcher");
-        migrate::migrate_app_data(&old_data_dir, &data_dir);
+        let old_data_dirs = [
+            parent.join("dev.apex36.cc-logins"),
+            parent.join("dev.apex36.claude-account-switcher"),
+        ];
+        migrate::migrate_app_data_chain(&old_data_dirs, &data_dir);
     }
 
     // Point the vault at our own directory before anything reads it. Not a

@@ -3,7 +3,7 @@
   "productName": "CC Logins",
   "mainBinaryName": "cc-logins",
   "version": "0.1.0",
-  "identifier": "dev.apex36.cc-logins",
+  "identifier": "cc-logins",
   "build": {
     "beforeDevCommand": "pnpm dev",
     "devUrl": "http://localhost:1420",

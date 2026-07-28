@@ -115,8 +115,8 @@ background poller.
 
 | What | Location |
 |---|---|
-| Account vault | `%APPDATA%\dev.apex36.cc-logins\accounts` (Windows) · `~/Library/Application Support/dev.apex36.cc-logins/accounts` (macOS) · `~/.local/share/dev.apex36.cc-logins/accounts` (Linux) |
-| Settings and usage history | the same `dev.apex36.cc-logins` directory |
+| Account vault | `%APPDATA%\cc-logins\accounts` (Windows) · `~/Library/Application Support/cc-logins/accounts` (macOS) · `~/.local/share/cc-logins/accounts` (Linux) |
+| Settings and usage history | the same `cc-logins` directory |
 | Log file | `%APPDATA%\cc-logins\app.log` · `~/Library/Application Support/cc-logins/app.log` · `~/.local/share/cc-logins/app.log` |
 
 Switches are journaled across the active credential, global config, and account sequence. If the
