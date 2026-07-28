@@ -22,11 +22,134 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  # Which halves of the tree a run actually needs to check. A docs- or
+  # workflow-only pull request has no business starting the three-OS Rust
+  # matrix, which is the slow and expensive part of this file.
+  #
+  # This is job-level `if:`, deliberately, rather than workflow-level `paths:`.
+  # GitHub treats the two differently for branch protection: a job skipped by a
+  # conditional reports Success, while a workflow skipped by a path filter
+  # leaves its check Pending forever and blocks the merge.
+  # https://docs.github.com/en/pull-requests/collaborating-with-pull-requests/collaborating-on-repositories-with-code-quality-features/troubleshooting-required-status-checks
+  #
+  # Computed with `git diff` rather than a filter action: this is the job that
+  # decides what gets checked at all, and it is worth keeping free of a
+  # third-party dependency in a repository that handles OAuth credentials.
+  changes:
+    name: Detect changed areas
+    runs-on: ubuntu-latest
+    outputs:
+      rust: ${{ steps.filter.outputs.rust }}
+      frontend: ${{ steps.filter.outputs.frontend }}
+      workflows: ${{ steps.filter.outputs.workflows }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Needs real history to diff against the base branch.
+          fetch-depth: 0
+
+      - id: filter
+        env:
+          EVENT: ${{ github.event_name }}
+          BASE_REF: ${{ github.base_ref }}
+        run: |
+          set -euo pipefail
+
+          # Anything that is not a pull request checks everything. A push to
+          # main is the tail of a merge and a dispatch is deliberate; neither is
+          # worth narrowing, and getting it wrong there is worse than the cost.
+          if [ "$EVENT" != "pull_request" ]; then
+            echo "$EVENT is not a pull request — checking everything"
+            {
+              echo "rust=true"
+              echo "frontend=true"
+              echo "workflows=true"
+            } >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          base=$(git merge-base "origin/$BASE_REF" HEAD)
+          changed=$(git diff --name-only "$base" HEAD)
+          echo "changed files against $base:"
+          echo "$changed"
+
+          # `if has ...` rather than `has ... && x=true`: under `set -e` the
+          # second form exits the script the first time a pattern misses.
+          has() { printf '%s\n' "$changed" | grep -qE "$1"; }
+
+          rust=false
+          frontend=false
+          workflows=false
+
+          if has '^src-tauri/'; then rust=true; fi
+          if has '^\.github/workflows/'; then workflows=true; fi
+          if has '^(src/|index\.html|popover\.html|package\.json|pnpm-lock\.yaml|tsconfig[^/]*\.json|vite\.config\.ts|vitest\.config\.ts)'; then
+            frontend=true
+          fi
+
+          # Editing the checks themselves means running them.
+          if has '^\.github/workflows/ci\.yml$'; then
+            rust=true
+            frontend=true
+          fi
+
+          echo "rust=$rust frontend=$frontend workflows=$workflows"
+          {
+            echo "rust=$rust"
+            echo "frontend=$frontend"
+            echo "workflows=$workflows"
+          } >> "$GITHUB_OUTPUT"
+
+  # Three files carry the version and nothing keeps them in step. This is cheap
+  # and runs on every change regardless of what was touched, because a version
+  # can drift from a one-line edit to any one of them.
+  versions:
+    name: Versions agree
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Versions agree across package.json, tauri.conf.json and Cargo.toml
+        run: |
+          PKG=$(node -p "require('./package.json').version")
+          CONF=$(node -p "require('./src-tauri/tauri.conf.json').version")
+          CARGO=$(grep -m1 '^version = ' src-tauri/Cargo.toml | cut -d'"' -f2)
+          echo "package.json=$PKG tauri.conf.json=$CONF Cargo.toml=$CARGO"
+          if [ "$PKG" != "$CONF" ] || [ "$PKG" != "$CARGO" ]; then
+            echo "::error::version mismatch: package.json=$PKG tauri.conf.json=$CONF Cargo.toml=$CARGO"
+            exit 1
+          fi
+
+  # Catches what review does not: retired runner labels, undefined `needs`
+  # references, bad expression syntax, and (via shellcheck, preinstalled on the
+  # runner) errors inside `run:` blocks. The macos-13 image was retired in
+  # December 2025 and this reports that as an unknown label.
+  actionlint:
+    name: Lint workflows
+    needs: changes
+    if: needs.changes.outputs.workflows == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run actionlint
+        env:
+          # Pinned, not "latest": this job exists to catch regressions in the
+          # diff, so a linter that moves on its own would report failures that
+          # have nothing to do with the change under review.
+          VERSION: 1.7.12
+        run: |
+          set -euo pipefail
+          curl -sSfL -o actionlint.tar.gz \
+            "https://github.com/rhysd/actionlint/releases/download/v${VERSION}/actionlint_${VERSION}_linux_amd64.tar.gz"
+          tar -xzf actionlint.tar.gz actionlint
+          ./actionlint -color
+
   # Fast, Rust-independent feedback on the frontend: type errors and the
   # production Vite build. Runs on ubuntu only — there is nothing
   # platform-specific here.
   frontend:
     name: Frontend (typecheck + build)
+    needs: changes
+    if: needs.changes.outputs.frontend == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -41,20 +164,6 @@ jobs:
           cache: pnpm
 
       - run: pnpm install --frozen-lockfile
-
-      # Three files carry the version and nothing keeps them in step. Tauri
-      # stamps tauri.conf.json's into the installers, so drift ships wrong
-      # numbers to users rather than failing anything loudly.
-      - name: Versions agree across package.json, tauri.conf.json and Cargo.toml
-        run: |
-          PKG=$(node -p "require('./package.json').version")
-          CONF=$(node -p "require('./src-tauri/tauri.conf.json').version")
-          CARGO=$(grep -m1 '^version = ' src-tauri/Cargo.toml | cut -d'"' -f2)
-          echo "package.json=$PKG tauri.conf.json=$CONF Cargo.toml=$CARGO"
-          if [ "$PKG" != "$CONF" ] || [ "$PKG" != "$CARGO" ]; then
-            echo "::error::version mismatch: package.json=$PKG tauri.conf.json=$CONF Cargo.toml=$CARGO"
-            exit 1
-          fi
 
       - name: Typecheck
         run: pnpm exec tsc --noEmit
@@ -72,6 +181,8 @@ jobs:
   # branches uncompiled and unchecked.
   rust:
     name: Rust (${{ matrix.os }})
+    needs: changes
+    if: needs.changes.outputs.rust == 'true'
     strategy:
       fail-fast: false
       matrix:
@@ -159,3 +270,44 @@ jobs:
       - name: cargo test (unit + integration; differential/lock_interop skip without cswap/Python)
         working-directory: src-tauri
         run: cargo test --all-features
+
+  # The single check to require in branch protection. Without it the required
+  # list has to name every job above, including each leg of a matrix whose
+  # membership changes with the event — and that list silently rots as jobs are
+  # renamed. This one job is stable, so point branch protection at it alone.
+  #
+  # `always()` is what makes it meaningful: it has to report even when a job it
+  # needs was skipped or failed, rather than being skipped along with them.
+  ci:
+    name: CI passed
+    if: always()
+    needs: [changes, versions, actionlint, frontend, rust]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Verify nothing failed
+        env:
+          # Via env rather than inline: this JSON is interpolated into the
+          # script otherwise, and a job name is not something to trust to
+          # shell quoting.
+          RESULTS: ${{ toJSON(needs) }}
+        run: |
+          set -euo pipefail
+          echo "$RESULTS" | jq .
+
+          # `skipped` is a pass: it means `changes` decided the area was not
+          # touched. Only real failures and cancellations count against us.
+          #
+          # Tests the captured text rather than `jq -e`'s exit status, which is
+          # not reliable across jq builds — some return 0 even for a `false`
+          # result, which would turn this gate into one that never blocks.
+          failed=$(echo "$RESULTS" | jq -r 'to_entries[]
+            | select(.value.result == "failure" or .value.result == "cancelled")
+            | "  \(.key): \(.value.result)"')
+
+          if [ -n "$failed" ]; then
+            echo "::error::a required job did not pass"
+            echo "$failed"
+            exit 1
+          fi
+
+          echo "all checks passed or were skipped as not applicable"
