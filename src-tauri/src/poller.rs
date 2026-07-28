@@ -28,12 +28,12 @@
 //! entirely by [`poll_policy`]'s own floor ([`poll_policy::MIN_INTERVAL_S`]),
 //! independent of whatever `interval_seconds` is configured to.
 //!
-//! # Decision core is pure
+//! # LegacyDecision core is pure
 //!
 //! [`decide`] takes a snapshot, a config, and a small piece of carried-over
-//! state, and returns a [`Decision`] — no I/O, no clock reads (the caller
+//! state, and returns a [`LegacyDecision`] — no I/O, no clock reads (the caller
 //! passes `now`), no mutation. [`run`] is the only impure part: it fetches,
-//! records history, paints the tray, emits events, mutates [`DaemonState`]
+//! records history, paints the tray, emits events, mutates [`LegacyDaemonState`]
 //! between ticks, and — gated by [`PollerConfig::auto_switch_enabled`] —
 //! calls [`crate::switcher::switch_to`].
 //!
@@ -47,12 +47,12 @@
 //! 3. Hysteresis: the account just switched away from is excluded as a
 //!    target until its utilisation has dropped `hysteresis_pct` below
 //!    `threshold`.
-//! 4. All-exhausted returns [`Decision::Exhausted`] with the earliest known
+//! 4. All-exhausted returns [`LegacyDecision::Exhausted`] with the earliest known
 //!    recovery time — never spins on a genuinely stuck state.
 //! 5. `unhealthy_ticks` consecutive ticks of unreadable active usage before
 //!    failover is considered.
-//! 6. A decided switch is announced via [`Decision::Warn`] for
-//!    `grace_seconds` before [`Decision::Switch`] is ever returned for it
+//! 6. A decided switch is announced via [`LegacyDecision::Warn`] for
+//!    `grace_seconds` before [`LegacyDecision::Switch`] is ever returned for it
 //!    (`grace_seconds: 0` switches on the same tick it is decided).
 //! 7. [`run`] calls [`crate::switcher::switch_to`] only when
 //!    `config.auto_switch_enabled` is `true`, which
@@ -319,7 +319,7 @@ pub struct PollerConfig {
     /// Consecutive ticks of unreadable active-account usage before failover
     /// is considered. Absorbs a single blip.
     pub unhealthy_ticks: u32,
-    /// Seconds a decided switch is announced via [`Decision::Warn`] before
+    /// Seconds a decided switch is announced via [`LegacyDecision::Warn`] before
     /// it is carried out. `0` switches on the same tick it is decided.
     pub grace_seconds: f64,
     /// Whether [`run`] is allowed to actually call
@@ -356,7 +356,7 @@ impl Default for PollerConfig {
 /// construct any point in the state machine directly without simulating the
 /// ticks that would normally produce it.
 #[derive(Debug, Clone, Default, PartialEq)]
-pub struct DaemonState {
+pub struct LegacyDaemonState {
     /// Epoch seconds of the last completed switch, or `None` if none yet
     /// this run.
     pub last_switch_at: Option<f64>,
@@ -370,13 +370,13 @@ pub struct DaemonState {
     pub unhealthy_ticks: u32,
     /// A switch decided but not yet carried out — the in-progress grace
     /// countdown (rule 6).
-    pub pending: Option<PendingSwitch>,
+    pub pending: Option<LegacyPendingSwitch>,
 }
 
 /// A switch [`decide`] has committed to but is still counting down before
 /// performing.
 #[derive(Debug, Clone, Copy, PartialEq)]
-pub struct PendingSwitch {
+pub struct LegacyPendingSwitch {
     pub from: u32,
     pub to: u32,
     /// Epoch seconds when this countdown started.
@@ -389,7 +389,7 @@ pub struct PendingSwitch {
 /// [`PollerConfig::auto_switch_enabled`].
 #[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase", tag = "kind")]
-pub enum Decision {
+pub enum LegacyDecision {
     /// Nothing to do this tick.
     Hold,
     /// A switch to `account` has been decided and is counting down;
@@ -421,7 +421,7 @@ pub fn next_unhealthy_ticks(previous: u32, active_usage_known_this_tick: bool) -
 /// about candidate selection in general, and this is a narrower, different
 /// exclusion (anti-flap on the one account just vacated), not a
 /// reinterpretation of "unknown" as disqualifying.
-fn hysteresis_ok(account: &Account, state: &DaemonState, config: &PollerConfig) -> bool {
+fn hysteresis_ok(account: &Account, state: &LegacyDaemonState, config: &PollerConfig) -> bool {
     if state.last_switch_from != Some(account.number) {
         return true;
     }
@@ -493,30 +493,30 @@ fn earliest_recovery_ts(accounts: &[&Account]) -> Option<i64> {
 /// The pure decision core. See the module doc comment for the full rule
 /// list; in short:
 ///
-/// - No active account → [`Decision::Hold`] (nothing to warn about or
+/// - No active account → [`LegacyDecision::Hold`] (nothing to warn about or
 ///   switch away from).
 /// - The active account's binding utilisation below `threshold` (and
-///   readable) → [`Decision::Hold`].
+///   readable) → [`LegacyDecision::Hold`].
 /// - Unreadable active usage only triggers failover after
 ///   `config.unhealthy_ticks` consecutive ticks (`state.unhealthy_ticks`,
 ///   which [`run`] updates via [`next_unhealthy_ticks`] *before* calling
 ///   this) — one blip never ejects the active account.
 /// - A switch is needed but the last one was within `cooldown_seconds` →
-///   [`Decision::Hold`] (rule 2).
+///   [`LegacyDecision::Hold`] (rule 2).
 /// - Candidates are ranked by `config.strategy` via
 ///   [`crate::switcher::pick_target`] (which already never treats unknown
 ///   usage as zero — rule 1), after excluding the hysteresis-blocked
 ///   account (rule 3, [`hysteresis_ok`]).
-/// - A candidate found: counts down via [`Decision::Warn`] for
-///   `grace_seconds`, then [`Decision::Switch`] (rule 6). `state.pending`
+/// - A candidate found: counts down via [`LegacyDecision::Warn`] for
+///   `grace_seconds`, then [`LegacyDecision::Switch`] (rule 6). `state.pending`
 ///   carries the countdown's start time across ticks; a different target
 ///   winning mid-countdown restarts the countdown for the new target rather
 ///   than inheriting the old elapsed time.
-/// - No candidate found: [`Decision::Exhausted`] only when every account
+/// - No candidate found: [`LegacyDecision::Exhausted`] only when every account
 ///   that could plausibly be used (the active one, plus every account
 ///   [`crate::model::Account::is_switchable`] would allow) is *known* to be
 ///   at its limit — an unknown reading anywhere means "not yet", never
-///   "give up" (rule 4). Otherwise [`Decision::Hold`] — blocked this tick,
+///   "give up" (rule 4). Otherwise [`LegacyDecision::Hold`] — blocked this tick,
 ///   but not proven stuck.
 ///
 /// `now` is epoch seconds, passed in rather than read from a clock so this
@@ -525,11 +525,11 @@ fn earliest_recovery_ts(accounts: &[&Account]) -> Option<i64> {
 pub fn decide(
     snapshot: &Snapshot,
     config: &PollerConfig,
-    state: &DaemonState,
+    state: &LegacyDaemonState,
     now: f64,
-) -> Decision {
+) -> LegacyDecision {
     let Some(active) = snapshot.active_account() else {
-        return Decision::Hold;
+        return LegacyDecision::Hold;
     };
     let active_number = active.number;
     let active_headroom = active.headroom();
@@ -539,7 +539,7 @@ pub fn decide(
         None => state.unhealthy_ticks >= config.unhealthy_ticks,
     };
     if !need_switch {
-        return Decision::Hold;
+        return LegacyDecision::Hold;
     }
 
     // Rule 2: cooldown. Applied uniformly (no at-limit bypass) — a
@@ -548,7 +548,7 @@ pub fn decide(
     // because a strict floor still self-heals within `cooldown_seconds`.
     if let Some(last) = state.last_switch_at {
         if now - last < config.cooldown_seconds {
-            return Decision::Hold;
+            return LegacyDecision::Hold;
         }
     }
 
@@ -571,7 +571,7 @@ pub fn decide(
         let to = target.number;
 
         if config.grace_seconds <= 0.0 {
-            return Decision::Switch {
+            return LegacyDecision::Switch {
                 from: active_number,
                 to,
             };
@@ -581,12 +581,12 @@ pub fn decide(
             Some(p) if p.to == to => {
                 let elapsed = (now - p.decided_at).max(0.0);
                 if elapsed >= config.grace_seconds {
-                    Decision::Switch {
+                    LegacyDecision::Switch {
                         from: p.from,
                         to: p.to,
                     }
                 } else {
-                    Decision::Warn {
+                    LegacyDecision::Warn {
                         account: to,
                         seconds_left: config.grace_seconds - elapsed,
                     }
@@ -594,7 +594,7 @@ pub fn decide(
             }
             // No countdown in progress, or it was counting down for a
             // different target — (re)start the countdown fresh.
-            _ => Decision::Warn {
+            _ => LegacyDecision::Warn {
                 account: to,
                 seconds_left: config.grace_seconds,
             },
@@ -621,10 +621,329 @@ pub fn decide(
         let earliest_reset = earliest_recovery_ts(&relevant)
             .and_then(|ts| DateTime::<Utc>::from_timestamp(ts, 0))
             .map(|dt| dt.to_rfc3339());
-        Decision::Exhausted { earliest_reset }
+        LegacyDecision::Exhausted { earliest_reset }
     } else {
-        Decision::Hold
+        LegacyDecision::Hold
     }
+}
+
+/// An automatic switch committed under one immutable policy revision.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PendingSwitch {
+    pub from: u32,
+    pub to: u32,
+    pub deadline: DateTime<Utc>,
+    pub policy_revision: u64,
+}
+
+/// Revision-aware daemon state. Wall-clock instants are absolute so a grace
+/// deadline can wake independently from the network polling cadence.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct DaemonState {
+    pub last_switch_at: Option<DateTime<Utc>>,
+    pub last_switch_from: Option<u32>,
+    pub unhealthy_ticks: u32,
+    pub pending: Option<PendingSwitch>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase",
+    tag = "kind"
+)]
+pub enum Decision {
+    Disabled,
+    Paused {
+        until: DateTime<Utc>,
+    },
+    Monitoring,
+    Cooldown {
+        until: DateTime<Utc>,
+    },
+    Warning {
+        from: u32,
+        to: u32,
+        deadline: DateTime<Utc>,
+    },
+    Switch {
+        from: u32,
+        to: u32,
+        policy_revision: u64,
+    },
+    Exhausted {
+        earliest_reset: Option<DateTime<Utc>>,
+    },
+    Degraded {
+        reason: crate::runtime::DegradedReason,
+    },
+}
+
+impl Decision {
+    pub fn phase(&self) -> crate::runtime::DaemonPhase {
+        match self {
+            Self::Disabled => crate::runtime::DaemonPhase::Disabled,
+            Self::Paused { until } => crate::runtime::DaemonPhase::Paused { until: *until },
+            Self::Monitoring => crate::runtime::DaemonPhase::Monitoring,
+            Self::Cooldown { until } => crate::runtime::DaemonPhase::Cooldown { until: *until },
+            Self::Warning { from, to, deadline } => crate::runtime::DaemonPhase::Warning {
+                from: *from,
+                to: *to,
+                deadline: *deadline,
+            },
+            Self::Switch { from, to, .. } => crate::runtime::DaemonPhase::Switching {
+                from: *from,
+                to: *to,
+            },
+            Self::Exhausted { earliest_reset } => crate::runtime::DaemonPhase::Exhausted {
+                earliest_reset: *earliest_reset,
+            },
+            Self::Degraded { reason } => crate::runtime::DaemonPhase::Degraded { reason: *reason },
+        }
+    }
+}
+
+/// Complete state owned by the interruptible poller loop.
+#[derive(Debug, Clone)]
+pub struct PollerLoopState {
+    pub policy: crate::runtime::RuntimePolicy,
+    pub daemon: DaemonState,
+    pub last_trusted_snapshot: Option<Snapshot>,
+    pub requires_fresh_snapshot: bool,
+}
+
+impl PollerLoopState {
+    pub fn new(policy: crate::runtime::RuntimePolicy) -> Self {
+        Self {
+            policy,
+            daemon: DaemonState::default(),
+            last_trusted_snapshot: None,
+            requires_fresh_snapshot: true,
+        }
+    }
+
+    /// Apply only a newer complete policy. Every accepted revision cancels a
+    /// decision produced under the old one and requires one fresh snapshot
+    /// before automatic switching can resume.
+    pub fn apply_policy(
+        &mut self,
+        policy: crate::runtime::RuntimePolicy,
+        _now: DateTime<Utc>,
+    ) -> bool {
+        if policy.revision <= self.policy.revision {
+            return false;
+        }
+        self.policy = policy;
+        self.daemon.pending = None;
+        self.requires_fresh_snapshot = true;
+        true
+    }
+
+    pub fn decision_at(&self, now: DateTime<Utc>) -> Decision {
+        if !self.policy.auto_switch_enabled {
+            return Decision::Disabled;
+        }
+        if let Some(until) = self.policy.paused_until.filter(|until| *until > now) {
+            return Decision::Paused { until };
+        }
+        if self.requires_fresh_snapshot {
+            return Decision::Monitoring;
+        }
+        match self.daemon.pending {
+            Some(pending) if pending.policy_revision == self.policy.revision => {
+                if now >= pending.deadline {
+                    Decision::Switch {
+                        from: pending.from,
+                        to: pending.to,
+                        policy_revision: pending.policy_revision,
+                    }
+                } else {
+                    Decision::Warning {
+                        from: pending.from,
+                        to: pending.to,
+                        deadline: pending.deadline,
+                    }
+                }
+            }
+            _ => Decision::Monitoring,
+        }
+    }
+
+    pub fn on_fetch_failed(&self, now: DateTime<Utc>) -> Decision {
+        match self.policy_gate(now) {
+            Some(decision) => decision,
+            None => Decision::Degraded {
+                reason: crate::runtime::DegradedReason::FetchFailed,
+            },
+        }
+    }
+
+    pub fn on_snapshot(&mut self, snapshot: Snapshot, now: DateTime<Utc>) -> Decision {
+        self.last_trusted_snapshot = Some(snapshot.clone());
+        self.requires_fresh_snapshot = false;
+
+        if let Some(decision) = self.policy_gate(now) {
+            self.daemon.pending = None;
+            return decision;
+        }
+
+        let active_known = snapshot
+            .active_account()
+            .and_then(Account::headroom)
+            .is_some();
+        self.daemon.unhealthy_ticks =
+            next_unhealthy_ticks(self.daemon.unhealthy_ticks, active_known);
+
+        let Some(active) = snapshot.active_account() else {
+            self.daemon.pending = None;
+            return Decision::Monitoring;
+        };
+        let needs_switch = match active.headroom() {
+            Some(headroom) => 100.0 - headroom >= self.policy.threshold,
+            None => self.daemon.unhealthy_ticks >= self.policy.unhealthy_ticks,
+        };
+        if !needs_switch {
+            self.daemon.pending = None;
+            return if active_known {
+                Decision::Monitoring
+            } else {
+                Decision::Degraded {
+                    reason: crate::runtime::DegradedReason::UsageUnknown,
+                }
+            };
+        }
+
+        if let Some(last_switch_at) = self.daemon.last_switch_at {
+            let until = add_std_duration(last_switch_at, self.policy.cooldown);
+            if now < until {
+                self.daemon.pending = None;
+                return Decision::Cooldown { until };
+            }
+        }
+
+        let legacy_config = PollerConfig {
+            threshold: self.policy.threshold,
+            interval_seconds: poll_policy::DEFAULT_INTERVAL_S,
+            cooldown_seconds: 0.0,
+            hysteresis_pct: self.policy.hysteresis_pct,
+            strategy: self.policy.strategy,
+            unhealthy_ticks: self.policy.unhealthy_ticks,
+            grace_seconds: 0.0,
+            auto_switch_enabled: self.policy.auto_switch_enabled,
+        };
+        let legacy_state = LegacyDaemonState {
+            last_switch_at: None,
+            last_switch_from: self.daemon.last_switch_from,
+            unhealthy_ticks: self.daemon.unhealthy_ticks,
+            pending: None,
+        };
+        match decide(
+            &snapshot,
+            &legacy_config,
+            &legacy_state,
+            datetime_epoch_seconds(now),
+        ) {
+            LegacyDecision::Switch { from, to } => self.commit_candidate(from, to, now),
+            LegacyDecision::Exhausted { earliest_reset } => {
+                self.daemon.pending = None;
+                Decision::Exhausted {
+                    earliest_reset: earliest_reset
+                        .as_deref()
+                        .and_then(|value| DateTime::parse_from_rfc3339(value).ok())
+                        .map(|value| value.with_timezone(&Utc)),
+                }
+            }
+            LegacyDecision::Hold => {
+                self.daemon.pending = None;
+                let has_unknown = snapshot
+                    .environments
+                    .iter()
+                    .flat_map(|environment| environment.accounts.iter())
+                    .filter(|account| account.active || account.is_switchable())
+                    .any(|account| account.headroom().is_none());
+                if has_unknown {
+                    Decision::Degraded {
+                        reason: crate::runtime::DegradedReason::UsageUnknown,
+                    }
+                } else {
+                    Decision::Monitoring
+                }
+            }
+            // Grace is forced to zero above, so the legacy selector can never
+            // produce a relative countdown.
+            LegacyDecision::Warn { .. } => Decision::Monitoring,
+        }
+    }
+
+    pub fn complete_switch(&mut self, from: u32, at: DateTime<Utc>) {
+        self.daemon.last_switch_at = Some(at);
+        self.daemon.last_switch_from = Some(from);
+        self.daemon.pending = None;
+        self.requires_fresh_snapshot = true;
+    }
+
+    fn policy_gate(&self, now: DateTime<Utc>) -> Option<Decision> {
+        if !self.policy.auto_switch_enabled {
+            Some(Decision::Disabled)
+        } else {
+            self.policy
+                .paused_until
+                .filter(|until| *until > now)
+                .map(|until| Decision::Paused { until })
+        }
+    }
+
+    fn commit_candidate(&mut self, from: u32, to: u32, now: DateTime<Utc>) -> Decision {
+        if self.policy.grace.is_zero() {
+            self.daemon.pending = None;
+            return Decision::Switch {
+                from,
+                to,
+                policy_revision: self.policy.revision,
+            };
+        }
+
+        let pending = match self.daemon.pending {
+            Some(pending)
+                if pending.from == from
+                    && pending.to == to
+                    && pending.policy_revision == self.policy.revision =>
+            {
+                pending
+            }
+            _ => PendingSwitch {
+                from,
+                to,
+                deadline: add_std_duration(now, self.policy.grace),
+                policy_revision: self.policy.revision,
+            },
+        };
+        self.daemon.pending = Some(pending);
+        if now >= pending.deadline {
+            Decision::Switch {
+                from,
+                to,
+                policy_revision: pending.policy_revision,
+            }
+        } else {
+            Decision::Warning {
+                from,
+                to,
+                deadline: pending.deadline,
+            }
+        }
+    }
+}
+
+fn add_std_duration(at: DateTime<Utc>, duration: Duration) -> DateTime<Utc> {
+    chrono::Duration::from_std(duration)
+        .ok()
+        .and_then(|offset| at.checked_add_signed(offset))
+        .unwrap_or(DateTime::<Utc>::MAX_UTC)
+}
+
+fn datetime_epoch_seconds(at: DateTime<Utc>) -> f64 {
+    at.timestamp() as f64 + f64::from(at.timestamp_subsec_nanos()) / 1_000_000_000.0
 }
 
 // ============================================================================
@@ -739,7 +1058,7 @@ pub async fn run(app: AppHandle, config: PollerConfig) {
     );
 
     let history = open_history(&app);
-    let mut state = DaemonState::default();
+    let mut state = LegacyDaemonState::default();
     let mut prev_binding_pct: Option<f64> = None;
     let mut interval_s = config.interval_seconds.max(poll_policy::MIN_INTERVAL_S);
 
@@ -784,7 +1103,7 @@ pub async fn run(app: AppHandle, config: PollerConfig) {
             Ok(d) => d,
             Err(_) => {
                 log::warn!("poller: decide() panicked; holding this tick");
-                Decision::Hold
+                LegacyDecision::Hold
             }
         };
 
@@ -795,13 +1114,13 @@ pub async fn run(app: AppHandle, config: PollerConfig) {
         let mut sleep_override: Option<f64> = None;
 
         match &decision {
-            Decision::Hold => {
+            LegacyDecision::Hold => {
                 state.pending = None;
             }
-            Decision::Warn { account, .. } => {
+            LegacyDecision::Warn { account, .. } => {
                 if state.pending.as_ref().map(|p| p.to) != Some(*account) {
                     if let Some(active) = snapshot.active_account() {
-                        state.pending = Some(PendingSwitch {
+                        state.pending = Some(LegacyPendingSwitch {
                             from: active.number,
                             to: *account,
                             decided_at: now,
@@ -809,7 +1128,7 @@ pub async fn run(app: AppHandle, config: PollerConfig) {
                     }
                 }
             }
-            Decision::Switch { from, to } => {
+            LegacyDecision::Switch { from, to } => {
                 let (from, to) = (*from, *to);
                 if config.auto_switch_enabled {
                     perform_switch(&app, &snapshot, from, to, &mut state, now);
@@ -820,7 +1139,7 @@ pub async fn run(app: AppHandle, config: PollerConfig) {
                 }
                 state.pending = None;
             }
-            Decision::Exhausted { earliest_reset } => {
+            LegacyDecision::Exhausted { earliest_reset } => {
                 state.pending = None;
                 let wait = earliest_reset
                     .as_deref()
@@ -888,7 +1207,7 @@ fn perform_switch(
     snapshot: &Snapshot,
     from: u32,
     to: u32,
-    state: &mut DaemonState,
+    state: &mut LegacyDaemonState,
     now: f64,
 ) {
     let Some(target) = find_account(snapshot, to).cloned() else {
@@ -1118,6 +1437,7 @@ fn pseudo_random_unit() -> f64 {
 mod tests {
     use super::*;
     use crate::model::{EnvKind, EnvStatus, Environment, Usage, UsageWindow};
+    use crate::settings::{Settings, Strategy as SettingsStrategy};
 
     // -- fixtures -------------------------------------------------------------
 
@@ -1176,13 +1496,265 @@ mod tests {
 
     const T0: f64 = 1_800_000_000.0;
 
+    fn fixed_now() -> DateTime<Utc> {
+        DateTime::parse_from_rfc3339("2026-07-28T12:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc)
+    }
+
+    fn runtime_policy(revision: u64) -> crate::runtime::RuntimePolicy {
+        crate::runtime::RuntimePolicy::from_settings(
+            revision,
+            &Settings {
+                auto_switch_enabled: true,
+                threshold: 90,
+                cooldown_seconds: 300,
+                hysteresis_pct: 10,
+                unhealthy_ticks: 3,
+                strategy: SettingsStrategy::MostHeadroom,
+                grace_seconds: 60,
+                ..Settings::default()
+            },
+            fixed_now(),
+        )
+    }
+
+    #[test]
+    fn policy_change_disabled_and_active_pause_short_circuit_decisions() {
+        let now = fixed_now();
+        let disabled = crate::runtime::RuntimePolicy::from_settings(0, &Settings::default(), now);
+        let mut state = PollerLoopState::new(disabled);
+        assert_eq!(state.decision_at(now), Decision::Disabled);
+
+        let until = now + chrono::Duration::hours(1);
+        let paused = crate::runtime::RuntimePolicy::from_settings(
+            1,
+            &Settings {
+                auto_switch_enabled: true,
+                auto_switch_paused_until: Some(until),
+                ..Settings::default()
+            },
+            now,
+        );
+        assert!(state.apply_policy(paused, now));
+        assert_eq!(state.decision_at(now), Decision::Paused { until });
+        assert_eq!(
+            state.decision_at(until),
+            Decision::Monitoring,
+            "the pause boundary is exclusive"
+        );
+    }
+
+    #[test]
+    fn grace_uses_an_absolute_deadline_and_switches_at_the_exact_boundary() {
+        let now = fixed_now();
+        let mut state = PollerLoopState::new(runtime_policy(4));
+        let snap = snapshot(vec![
+            account(1, true, Some(95.0), None),
+            account(2, false, Some(10.0), None),
+        ]);
+        let deadline = now + chrono::Duration::seconds(60);
+
+        assert_eq!(
+            state.on_snapshot(snap, now),
+            Decision::Warning {
+                from: 1,
+                to: 2,
+                deadline
+            }
+        );
+        assert_eq!(
+            state.decision_at(deadline - chrono::Duration::milliseconds(1)),
+            Decision::Warning {
+                from: 1,
+                to: 2,
+                deadline
+            }
+        );
+        assert_eq!(
+            state.decision_at(deadline),
+            Decision::Switch {
+                from: 1,
+                to: 2,
+                policy_revision: 4
+            }
+        );
+    }
+
+    #[test]
+    fn policy_change_cancels_pending_and_requires_a_fresh_snapshot() {
+        let now = fixed_now();
+        let mut state = PollerLoopState::new(runtime_policy(1));
+        let snap = snapshot(vec![
+            account(1, true, Some(95.0), None),
+            account(2, false, Some(10.0), None),
+        ]);
+        state.on_snapshot(snap.clone(), now);
+
+        assert!(state.apply_policy(runtime_policy(2), now + chrono::Duration::seconds(10)));
+        assert!(state.daemon.pending.is_none());
+        assert!(state.requires_fresh_snapshot);
+        assert_eq!(
+            state.decision_at(now + chrono::Duration::minutes(5)),
+            Decision::Monitoring,
+            "an old-policy deadline cannot fire through the fresh-data barrier"
+        );
+
+        assert!(matches!(
+            state.on_snapshot(snap, now + chrono::Duration::minutes(5)),
+            Decision::Warning { .. }
+        ));
+        assert!(!state.requires_fresh_snapshot);
+    }
+
+    #[test]
+    fn policy_change_rejects_older_or_duplicate_revisions() {
+        let now = fixed_now();
+        let mut state = PollerLoopState::new(runtime_policy(7));
+
+        assert!(!state.apply_policy(runtime_policy(7), now));
+        assert!(!state.apply_policy(runtime_policy(6), now));
+        assert_eq!(state.policy.revision, 7);
+    }
+
+    #[test]
+    fn grace_strategy_change_restarts_with_a_new_target_and_deadline() {
+        let now = fixed_now();
+        let mut state = PollerLoopState::new(runtime_policy(1));
+        let snap = snapshot(vec![
+            account(1, true, Some(95.0), None),
+            account(2, false, Some(10.0), None),
+            account(3, false, Some(5.0), None),
+        ]);
+        assert!(matches!(
+            state.on_snapshot(snap.clone(), now),
+            Decision::Warning { to: 3, .. }
+        ));
+
+        let changed = crate::runtime::RuntimePolicy::from_settings(
+            2,
+            &Settings {
+                auto_switch_enabled: true,
+                strategy: SettingsStrategy::NextAvailable,
+                grace_seconds: 60,
+                ..Settings::default()
+            },
+            now,
+        );
+        state.apply_policy(changed, now + chrono::Duration::seconds(30));
+        let restarted_at = now + chrono::Duration::seconds(31);
+
+        assert_eq!(
+            state.on_snapshot(snap, restarted_at),
+            Decision::Warning {
+                from: 1,
+                to: 2,
+                deadline: restarted_at + chrono::Duration::seconds(60)
+            }
+        );
+    }
+
+    #[test]
+    fn grace_zero_switches_without_creating_a_pending_deadline() {
+        let now = fixed_now();
+        let mut settings = Settings {
+            auto_switch_enabled: true,
+            grace_seconds: 0,
+            ..Settings::default()
+        };
+        settings.threshold = 90;
+        let policy = crate::runtime::RuntimePolicy::from_settings(5, &settings, now);
+        let mut state = PollerLoopState::new(policy);
+        let snap = snapshot(vec![
+            account(1, true, Some(95.0), None),
+            account(2, false, Some(10.0), None),
+        ]);
+
+        assert_eq!(
+            state.on_snapshot(snap, now),
+            Decision::Switch {
+                from: 1,
+                to: 2,
+                policy_revision: 5
+            }
+        );
+        assert!(state.daemon.pending.is_none());
+    }
+
+    #[test]
+    fn grace_exact_cooldown_boundary_releases_the_candidate() {
+        let now = fixed_now();
+        let mut state = PollerLoopState::new(runtime_policy(1));
+        state.daemon.last_switch_at = Some(now);
+        let snap = snapshot(vec![
+            account(1, true, Some(95.0), None),
+            account(2, false, Some(10.0), None),
+        ]);
+        let until = now + chrono::Duration::seconds(300);
+
+        assert_eq!(
+            state.on_snapshot(snap.clone(), until - chrono::Duration::milliseconds(1)),
+            Decision::Cooldown { until }
+        );
+        assert!(matches!(
+            state.on_snapshot(snap, until),
+            Decision::Warning { .. }
+        ));
+    }
+
+    #[test]
+    fn policy_change_unknown_usage_is_degraded_and_failed_fetch_keeps_the_barrier() {
+        let now = fixed_now();
+        let mut state = PollerLoopState::new(runtime_policy(1));
+        let unknown = snapshot(vec![
+            account(1, true, None, None),
+            account(2, false, Some(10.0), None),
+        ]);
+
+        assert_eq!(
+            state.on_snapshot(unknown, now),
+            Decision::Degraded {
+                reason: crate::runtime::DegradedReason::UsageUnknown
+            }
+        );
+        state.apply_policy(runtime_policy(2), now);
+        assert_eq!(
+            state.on_fetch_failed(now),
+            Decision::Degraded {
+                reason: crate::runtime::DegradedReason::FetchFailed
+            }
+        );
+        assert!(state.requires_fresh_snapshot);
+    }
+
+    #[test]
+    fn policy_change_proven_exhaustion_carries_the_earliest_reset() {
+        let now = fixed_now();
+        let mut state = PollerLoopState::new(runtime_policy(1));
+        let snap = snapshot(vec![
+            account(1, true, Some(100.0), Some("2026-08-01T00:00:00Z")),
+            account(2, false, Some(100.0), Some("2026-08-02T00:00:00Z")),
+        ]);
+
+        assert_eq!(
+            state.on_snapshot(snap, now),
+            Decision::Exhausted {
+                earliest_reset: Some(
+                    DateTime::parse_from_rfc3339("2026-08-01T00:00:00Z")
+                        .unwrap()
+                        .with_timezone(&Utc)
+                )
+            }
+        );
+    }
+
     // -- basic hold / no-active-account ----------------------------------------
 
     #[test]
     fn hold_when_no_active_account() {
         let snap = snapshot(vec![account(1, false, Some(10.0), None)]);
-        let decision = decide(&snap, &cfg(), &DaemonState::default(), T0);
-        assert_eq!(decision, Decision::Hold);
+        let decision = decide(&snap, &cfg(), &LegacyDaemonState::default(), T0);
+        assert_eq!(decision, LegacyDecision::Hold);
     }
 
     #[test]
@@ -1191,8 +1763,8 @@ mod tests {
             account(1, true, Some(50.0), None),
             account(2, false, Some(10.0), None),
         ]);
-        let decision = decide(&snap, &cfg(), &DaemonState::default(), T0);
-        assert_eq!(decision, Decision::Hold);
+        let decision = decide(&snap, &cfg(), &LegacyDaemonState::default(), T0);
+        assert_eq!(decision, LegacyDecision::Hold);
     }
 
     #[test]
@@ -1202,11 +1774,11 @@ mod tests {
             account(2, false, Some(10.0), None),
         ]);
         let config = cfg();
-        let state = DaemonState {
+        let state = LegacyDaemonState {
             unhealthy_ticks: config.unhealthy_ticks - 1,
             ..Default::default()
         };
-        assert_eq!(decide(&snap, &config, &state, T0), Decision::Hold);
+        assert_eq!(decide(&snap, &config, &state, T0), LegacyDecision::Hold);
     }
 
     // -- rule 1: unknown usage is never auto-skipped or treated as zero -------
@@ -1218,8 +1790,8 @@ mod tests {
             account(2, false, None, None),       // unknown usage — must not win by default
             account(3, false, Some(20.0), None), // headroom 80 — the real winner
         ]);
-        let decision = decide(&snap, &cfg(), &DaemonState::default(), T0);
-        assert_eq!(decision, Decision::Switch { from: 1, to: 3 });
+        let decision = decide(&snap, &cfg(), &LegacyDaemonState::default(), T0);
+        assert_eq!(decision, LegacyDecision::Switch { from: 1, to: 3 });
     }
 
     #[test]
@@ -1229,13 +1801,13 @@ mod tests {
             account(2, false, Some(20.0), None),
         ]);
         let config = cfg();
-        let state = DaemonState {
+        let state = LegacyDaemonState {
             unhealthy_ticks: config.unhealthy_ticks,
             ..Default::default()
         };
         assert_eq!(
             decide(&snap, &config, &state, T0),
-            Decision::Switch { from: 1, to: 2 }
+            LegacyDecision::Switch { from: 1, to: 2 }
         );
     }
 
@@ -1250,8 +1822,8 @@ mod tests {
         // to be at their limit either — this must never resolve to
         // Exhausted (that would be a false "give up").
         assert_eq!(
-            decide(&snap, &cfg(), &DaemonState::default(), T0),
-            Decision::Hold
+            decide(&snap, &cfg(), &LegacyDaemonState::default(), T0),
+            LegacyDecision::Hold
         );
     }
 
@@ -1264,11 +1836,11 @@ mod tests {
             account(2, false, Some(10.0), None),
         ]);
         let config = cfg();
-        let state = DaemonState {
+        let state = LegacyDaemonState {
             last_switch_at: Some(T0 - 10.0),
             ..Default::default()
         };
-        assert_eq!(decide(&snap, &config, &state, T0), Decision::Hold);
+        assert_eq!(decide(&snap, &config, &state, T0), LegacyDecision::Hold);
     }
 
     #[test]
@@ -1278,13 +1850,13 @@ mod tests {
             account(2, false, Some(10.0), None),
         ]);
         let config = cfg();
-        let state = DaemonState {
+        let state = LegacyDaemonState {
             last_switch_at: Some(T0 - config.cooldown_seconds - 1.0),
             ..Default::default()
         };
         assert_eq!(
             decide(&snap, &config, &state, T0),
-            Decision::Switch { from: 1, to: 2 }
+            LegacyDecision::Switch { from: 1, to: 2 }
         );
     }
 
@@ -1296,13 +1868,13 @@ mod tests {
         ]);
         let config = cfg();
         // Exactly cooldown_seconds ago: no longer "within" the window.
-        let state = DaemonState {
+        let state = LegacyDaemonState {
             last_switch_at: Some(T0 - config.cooldown_seconds),
             ..Default::default()
         };
         assert_eq!(
             decide(&snap, &config, &state, T0),
-            Decision::Switch { from: 1, to: 2 }
+            LegacyDecision::Switch { from: 1, to: 2 }
         );
     }
 
@@ -1316,13 +1888,13 @@ mod tests {
             account(2, false, Some(85.0), None), // utilisation 85 > floor 80: still blocked
             account(3, false, Some(50.0), None), // headroom 50 — should win instead
         ]);
-        let state = DaemonState {
+        let state = LegacyDaemonState {
             last_switch_from: Some(2),
             ..Default::default()
         };
         assert_eq!(
             decide(&snap, &config, &state, T0),
-            Decision::Switch { from: 1, to: 3 }
+            LegacyDecision::Switch { from: 1, to: 3 }
         );
     }
 
@@ -1333,13 +1905,13 @@ mod tests {
             account(1, true, Some(95.0), None),
             account(2, false, Some(75.0), None), // utilisation 75 <= floor 80: eligible again
         ]);
-        let state = DaemonState {
+        let state = LegacyDaemonState {
             last_switch_from: Some(2),
             ..Default::default()
         };
         assert_eq!(
             decide(&snap, &config, &state, T0),
-            Decision::Switch { from: 1, to: 2 }
+            LegacyDecision::Switch { from: 1, to: 2 }
         );
     }
 
@@ -1351,7 +1923,7 @@ mod tests {
             account(2, false, Some(85.0), None), // still hysteresis-blocked
             account(3, false, None, None),       // unrelated, unknown — fine to remain eligible
         ]);
-        let state = DaemonState {
+        let state = LegacyDaemonState {
             last_switch_from: Some(2),
             ..Default::default()
         };
@@ -1359,7 +1931,7 @@ mod tests {
         // unknown, so pick_target can't prove it's the best target either —
         // this must stay Hold, not Exhausted (rule 4/1 interaction) and
         // must never silently re-pick account 2.
-        assert_eq!(decide(&snap, &config, &state, T0), Decision::Hold);
+        assert_eq!(decide(&snap, &config, &state, T0), LegacyDecision::Hold);
     }
 
     #[test]
@@ -1369,13 +1941,13 @@ mod tests {
             account(1, true, Some(95.0), None),
             account(2, false, Some(85.0), None), // hysteresis-blocked, but has real headroom
         ]);
-        let state = DaemonState {
+        let state = LegacyDaemonState {
             last_switch_from: Some(2),
             ..Default::default()
         };
         // Not a valid *target* this tick, but the situation is not
         // exhausted — a real option exists, just temporarily blocked.
-        assert_eq!(decide(&snap, &config, &state, T0), Decision::Hold);
+        assert_eq!(decide(&snap, &config, &state, T0), LegacyDecision::Hold);
     }
 
     // -- rule 4: all-exhausted ----------------------------------------------------
@@ -1386,10 +1958,10 @@ mod tests {
             account(1, true, Some(100.0), Some("2026-08-01T00:00:00Z")),
             account(2, false, Some(100.0), Some("2026-08-02T00:00:00Z")),
         ]);
-        let decision = decide(&snap, &cfg(), &DaemonState::default(), T0);
+        let decision = decide(&snap, &cfg(), &LegacyDaemonState::default(), T0);
         assert_eq!(
             decision,
-            Decision::Exhausted {
+            LegacyDecision::Exhausted {
                 earliest_reset: Some("2026-08-01T00:00:00+00:00".to_string())
             }
         );
@@ -1401,10 +1973,10 @@ mod tests {
             account(1, true, Some(100.0), None), // at limit, no reset time known
             account(2, false, Some(100.0), Some("2026-08-02T00:00:00Z")),
         ]);
-        let decision = decide(&snap, &cfg(), &DaemonState::default(), T0);
+        let decision = decide(&snap, &cfg(), &LegacyDaemonState::default(), T0);
         assert_eq!(
             decision,
-            Decision::Exhausted {
+            LegacyDecision::Exhausted {
                 earliest_reset: None
             }
         );
@@ -1417,8 +1989,8 @@ mod tests {
             account(2, false, None, None), // unknown — can't prove it's also at its limit
         ]);
         assert_eq!(
-            decide(&snap, &cfg(), &DaemonState::default(), T0),
-            Decision::Hold
+            decide(&snap, &cfg(), &LegacyDaemonState::default(), T0),
+            LegacyDecision::Hold
         );
     }
 
@@ -1429,11 +2001,11 @@ mod tests {
             account(2, false, Some(100.0), Some("2026-08-02T00:00:00Z")),
         ]);
         let config = cfg();
-        let mut state = DaemonState::default();
+        let mut state = LegacyDaemonState::default();
         for tick in 0..5 {
             let decision = decide(&snap, &config, &state, T0 + tick as f64 * 60.0);
             assert!(
-                matches!(decision, Decision::Exhausted { .. }),
+                matches!(decision, LegacyDecision::Exhausted { .. }),
                 "tick {tick} was {decision:?}"
             );
             state.pending = None; // what `run` would do after an Exhausted tick
@@ -1460,23 +2032,23 @@ mod tests {
             ..cfg()
         };
         for n in 0..config.unhealthy_ticks {
-            let state = DaemonState {
+            let state = LegacyDaemonState {
                 unhealthy_ticks: n,
                 ..Default::default()
             };
             assert_eq!(
                 decide(&snap, &config, &state, T0),
-                Decision::Hold,
+                LegacyDecision::Hold,
                 "unhealthy_ticks={n}"
             );
         }
-        let state = DaemonState {
+        let state = LegacyDaemonState {
             unhealthy_ticks: config.unhealthy_ticks,
             ..Default::default()
         };
         assert_eq!(
             decide(&snap, &config, &state, T0),
-            Decision::Switch { from: 1, to: 2 }
+            LegacyDecision::Switch { from: 1, to: 2 }
         );
     }
 
@@ -1493,8 +2065,8 @@ mod tests {
             ..PollerConfig::default()
         };
         assert_eq!(
-            decide(&snap, &config, &DaemonState::default(), T0),
-            Decision::Switch { from: 1, to: 2 }
+            decide(&snap, &config, &LegacyDaemonState::default(), T0),
+            LegacyDecision::Switch { from: 1, to: 2 }
         );
     }
 
@@ -1510,18 +2082,18 @@ mod tests {
         };
 
         // Tick 1: nothing pending yet -> full countdown starts.
-        let decision = decide(&snap, &config, &DaemonState::default(), T0);
+        let decision = decide(&snap, &config, &LegacyDaemonState::default(), T0);
         assert_eq!(
             decision,
-            Decision::Warn {
+            LegacyDecision::Warn {
                 account: 2,
                 seconds_left: 60.0
             }
         );
 
         // Caller records the pending countdown (mirrors what `run` does).
-        let state = DaemonState {
-            pending: Some(PendingSwitch {
+        let state = LegacyDaemonState {
+            pending: Some(LegacyPendingSwitch {
                 from: 1,
                 to: 2,
                 decided_at: T0,
@@ -1533,7 +2105,7 @@ mod tests {
         let decision = decide(&snap, &config, &state, T0 + 30.0);
         assert_eq!(
             decision,
-            Decision::Warn {
+            LegacyDecision::Warn {
                 account: 2,
                 seconds_left: 30.0
             }
@@ -1541,12 +2113,12 @@ mod tests {
 
         // Tick 3, grace fully elapsed: switch.
         let decision = decide(&snap, &config, &state, T0 + 60.0);
-        assert_eq!(decision, Decision::Switch { from: 1, to: 2 });
+        assert_eq!(decision, LegacyDecision::Switch { from: 1, to: 2 });
 
         // Comfortably past grace: still switches (not stuck waiting for an
         // exact tick boundary).
         let decision = decide(&snap, &config, &state, T0 + 120.0);
-        assert_eq!(decision, Decision::Switch { from: 1, to: 2 });
+        assert_eq!(decision, LegacyDecision::Switch { from: 1, to: 2 });
     }
 
     #[test]
@@ -1561,21 +2133,21 @@ mod tests {
             account(2, false, Some(50.0), None),
             account(3, false, Some(10.0), None), // headroom 90 — best
         ]);
-        let decision = decide(&snap1, &config, &DaemonState::default(), T0);
+        let decision = decide(&snap1, &config, &LegacyDaemonState::default(), T0);
         assert_eq!(
             decision,
-            Decision::Warn {
+            LegacyDecision::Warn {
                 account: 3,
                 seconds_left: 60.0
             }
         );
 
-        let pending = PendingSwitch {
+        let pending = LegacyPendingSwitch {
             from: 1,
             to: 3,
             decided_at: T0,
         };
-        let state = DaemonState {
+        let state = LegacyDaemonState {
             pending: Some(pending),
             ..Default::default()
         };
@@ -1591,7 +2163,7 @@ mod tests {
         // inheriting the old target's elapsed time.
         assert_eq!(
             decision,
-            Decision::Warn {
+            LegacyDecision::Warn {
                 account: 2,
                 seconds_left: 60.0
             }
@@ -1609,12 +2181,12 @@ mod tests {
             grace_seconds: 60.0,
             ..PollerConfig::default()
         };
-        let pending = PendingSwitch {
+        let pending = LegacyPendingSwitch {
             from: 1,
             to: 2,
             decided_at: T0,
         };
-        let state = DaemonState {
+        let state = LegacyDaemonState {
             pending: Some(pending),
             ..Default::default()
         };
@@ -1625,7 +2197,7 @@ mod tests {
         ]);
         assert_eq!(
             decide(&recovered, &config, &state, T0 + 10.0),
-            Decision::Hold
+            LegacyDecision::Hold
         );
     }
 
@@ -1644,8 +2216,8 @@ mod tests {
             ..PollerConfig::default()
         };
         assert_eq!(
-            decide(&snap, &config, &DaemonState::default(), T0),
-            Decision::Switch { from: 1, to: 2 }
+            decide(&snap, &config, &LegacyDaemonState::default(), T0),
+            LegacyDecision::Switch { from: 1, to: 2 }
         );
 
         let config = PollerConfig {
@@ -1654,8 +2226,8 @@ mod tests {
             ..PollerConfig::default()
         };
         assert_eq!(
-            decide(&snap, &config, &DaemonState::default(), T0),
-            Decision::Switch { from: 1, to: 3 }
+            decide(&snap, &config, &LegacyDaemonState::default(), T0),
+            LegacyDecision::Switch { from: 1, to: 3 }
         );
     }
 
@@ -1672,10 +2244,10 @@ mod tests {
         // Only the active account is "relevant" (the disabled one is
         // excluded from is_switchable), and it's known at-limit with a
         // reset time -> Exhausted, not blocked forever by the disabled seat.
-        let decision = decide(&snap, &cfg(), &DaemonState::default(), T0);
+        let decision = decide(&snap, &cfg(), &LegacyDaemonState::default(), T0);
         assert_eq!(
             decision,
-            Decision::Exhausted {
+            LegacyDecision::Exhausted {
                 earliest_reset: Some("2026-08-01T00:00:00+00:00".to_string())
             }
         );
