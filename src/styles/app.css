@@ -1,0 +1,1112 @@
+@import "./tokens.css";
+
+/* ─────────── app chrome ─────────── */
+
+html,
+body,
+#root {
+  height: 100%;
+  width: 100%;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--ink);
+  font-family: var(--sans);
+  font-size: 15px;
+  line-height: 1.55;
+  -webkit-font-smoothing: antialiased;
+}
+
+h1,
+h2,
+h3 {
+  text-wrap: balance;
+  margin: 0;
+  font-weight: 560;
+  letter-spacing: -0.01em;
+}
+
+:focus-visible {
+  outline: 2px solid var(--interact);
+  outline-offset: 2px;
+  border-radius: 2px;
+}
+
+.num {
+  font-family: var(--mono);
+  font-variant-numeric: tabular-nums;
+}
+
+/* ─────────── window shell (was .win / .winbody in the wireframe) ─────────── */
+
+.win {
+  width: 100%;
+  height: 100%;
+  min-height: 0;
+  background: var(--bg);
+  display: grid;
+  grid-template-rows: minmax(0, 1fr);
+}
+
+.win.has-banner {
+  grid-template-rows: auto minmax(0, 1fr);
+}
+
+.winbody {
+  display: grid;
+  grid-template-columns: 168px minmax(0, 1fr);
+  grid-template-rows: minmax(0, 1fr);
+  min-height: 0;
+  height: 100%;
+}
+
+/* ─────────── sample-data banner ─────────── */
+
+/*
+ * Not a quota state, so it deliberately does not borrow --caution/--danger —
+ * those are reserved for utilisation. Unmissable comes from full-width
+ * placement and inverted contrast instead of hue. Never dismissible: there is
+ * no close affordance here by design.
+ */
+.sample-banner {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  padding: 7px 14px;
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.01em;
+  color: var(--bg);
+  background: var(--ink);
+  text-align: center;
+}
+
+.nav {
+  height: 100%;
+  min-height: 0;
+  border-right: 1px solid var(--line-soft);
+  padding: 14px 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  background: var(--surface);
+}
+.nav .grp {
+  font-size: 10px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--faint);
+  padding: 12px 8px 4px;
+}
+.nav b,
+.nav span {
+  display: block;
+  padding: 6px 8px;
+  border-radius: var(--r);
+  font-size: 13px;
+  font-weight: 400;
+  color: var(--muted);
+}
+.nav b {
+  background: var(--raised);
+  color: var(--ink);
+  font-weight: 500;
+}
+.nav button.navlink {
+  all: unset;
+  display: block;
+  box-sizing: border-box;
+  width: 100%;
+  padding: 6px 8px;
+  border-radius: var(--r);
+  font-size: 13px;
+  font-weight: 400;
+  color: var(--muted);
+  cursor: pointer;
+}
+.nav button.navlink:hover {
+  background: var(--surface);
+  color: var(--ink);
+}
+.nav button.navlink.is-active {
+  background: var(--raised);
+  color: var(--ink);
+  font-weight: 500;
+}
+
+.pane {
+  height: 100%;
+  min-height: 0;
+  /* Reading measure: at very wide windows, an un-capped table flings its
+     right-hand columns far from the row they describe. Left-aligned by
+     default (block layout), not centred — this isn't a marketing page. */
+  max-width: 1180px;
+  padding: 22px 24px;
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+  min-width: 0;
+  overflow-y: auto;
+  box-sizing: border-box;
+}
+
+.pane-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 16px;
+}
+.pane-head h3 {
+  font-size: 15px;
+}
+.pane-head .sub {
+  font-size: 12px;
+  color: var(--faint);
+}
+
+/* ─────────── data primitives ─────────── */
+
+table.accts {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
+}
+table.accts th {
+  text-align: left;
+  font-size: 10px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--faint);
+  font-weight: 500;
+  padding: 0 10px 8px 0;
+  border-bottom: 1px solid var(--line-soft);
+  white-space: nowrap;
+}
+table.accts th.r,
+table.accts td.r {
+  text-align: right;
+}
+table.accts td {
+  padding: 11px 10px 11px 0;
+  border-bottom: 1px solid var(--line-soft);
+  vertical-align: middle;
+}
+table.accts tr:last-child td {
+  border-bottom: 0;
+}
+table.accts tr.is-active td {
+  background: var(--surface);
+}
+
+.who {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  min-width: 0;
+}
+.mark {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  flex: none;
+  background: var(--line);
+}
+.mark.on {
+  background: var(--ink);
+}
+.alias {
+  font-weight: 550;
+}
+.mail {
+  /* --faint fails the WCAG AA 4.5:1 body-text minimum in both themes; this
+     is a masked email a user reads, not decoration, so it gets --muted. */
+  color: var(--muted);
+  font-size: 12px;
+  font-family: var(--mono);
+}
+
+.meter {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+}
+.track {
+  width: 92px;
+  height: 5px;
+  background: var(--raised);
+  border-radius: 1px;
+  overflow: hidden;
+  flex: none;
+}
+.fill {
+  height: 100%;
+  background: var(--ok-fill);
+  display: block;
+}
+.fill.caution {
+  background: var(--caution-fill);
+}
+.fill.danger {
+  background: var(--danger-fill);
+}
+.pct {
+  font-family: var(--mono);
+  font-variant-numeric: tabular-nums;
+  font-size: 12px;
+  color: var(--muted);
+  min-width: 34px;
+  text-align: right;
+}
+.pct.caution {
+  color: var(--caution);
+}
+.pct.danger {
+  color: var(--danger);
+  font-weight: 600;
+}
+
+.pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 10px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  padding: 2px 6px;
+  border: 1px solid var(--line);
+  border-radius: 2px;
+  color: var(--muted);
+  white-space: nowrap;
+}
+.pill.caution {
+  color: var(--caution);
+  border-color: var(--caution);
+}
+.pill.danger {
+  color: var(--danger);
+  border-color: var(--danger);
+}
+.pill.on {
+  color: var(--ink);
+  border-color: var(--ink);
+}
+
+.btn {
+  font: inherit;
+  font-size: 12px;
+  padding: 5px 11px;
+  border-radius: var(--r);
+  border: 1px solid var(--line);
+  background: transparent;
+  color: var(--ink);
+  cursor: pointer;
+}
+.btn:hover {
+  background: var(--raised);
+}
+.btn.primary {
+  border-color: var(--interact);
+  color: var(--interact);
+}
+.btn.ghost {
+  border-color: transparent;
+  color: var(--muted);
+}
+
+.stat-row {
+  display: flex;
+  gap: 28px;
+  flex-wrap: wrap;
+}
+.stat .lab {
+  font-size: 10px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--faint);
+}
+.stat .val {
+  font-family: var(--mono);
+  font-variant-numeric: tabular-nums;
+  font-size: 19px;
+}
+.stat .val.caution {
+  color: var(--caution);
+}
+.stat .val.danger {
+  color: var(--danger);
+}
+.stat .foot {
+  font-size: 11px;
+  color: var(--faint);
+  font-family: var(--mono);
+}
+
+hr.rule {
+  border: 0;
+  border-top: 1px solid var(--line-soft);
+  margin: 0;
+}
+
+/* ─────────── settings primitives (kept for future screens) ─────────── */
+
+.field {
+  display: grid;
+  grid-template-columns: 220px minmax(0, 1fr);
+  gap: 20px;
+  padding: 13px 0;
+  border-bottom: 1px solid var(--line-soft);
+  align-items: start;
+}
+.field:last-child {
+  border-bottom: 0;
+}
+.field .k {
+  font-size: 13px;
+}
+.field .k i {
+  display: block;
+  font-style: normal;
+  font-size: 11.5px;
+  color: var(--faint);
+  line-height: 1.45;
+  margin-top: 2px;
+}
+.field .v {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+  font-size: 13px;
+}
+
+.seg {
+  display: inline-flex;
+  border: 1px solid var(--line);
+  border-radius: var(--r);
+  overflow: hidden;
+  width: fit-content;
+}
+.seg span {
+  padding: 4px 11px;
+  font-size: 12px;
+  color: var(--muted);
+  border-right: 1px solid var(--line);
+}
+.seg span:last-child {
+  border-right: 0;
+}
+.seg span.on {
+  background: var(--raised);
+  color: var(--ink);
+}
+
+.toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+}
+.sw {
+  width: 30px;
+  height: 17px;
+  border-radius: 9px;
+  background: var(--raised);
+  border: 1px solid var(--line);
+  position: relative;
+  flex: none;
+}
+.sw::after {
+  content: "";
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 11px;
+  height: 11px;
+  border-radius: 50%;
+  background: var(--muted);
+}
+.sw.on {
+  background: var(--interact);
+  border-color: var(--interact);
+}
+.sw.on::after {
+  left: auto;
+  right: 2px;
+  background: var(--bg);
+}
+
+/* ─────────── placeholder screen ─────────── */
+
+.placeholder {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 40px 0;
+  color: var(--muted);
+  font-size: 13px;
+}
+.placeholder h3 {
+  font-size: 15px;
+  color: var(--ink);
+}
+
+/* ─────────── charts (History) ─────────── */
+
+.chart-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+  gap: 20px;
+}
+.chart {
+  border: 1px solid var(--line-soft);
+  border-radius: var(--r);
+  padding: 14px 14px 8px;
+}
+.chart-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  margin-bottom: 12px;
+}
+.chart-head .t {
+  font-size: 13px;
+  font-weight: 550;
+}
+.chart-head .v {
+  font-size: 12px;
+  color: var(--muted);
+}
+.chart svg {
+  width: 100%;
+  height: 84px;
+  display: block;
+}
+.chart .xax {
+  display: flex;
+  justify-content: space-between;
+  font-family: var(--mono);
+  font-size: 10px;
+  color: var(--faint);
+  padding-top: 5px;
+}
+.thresh-line {
+  stroke: var(--line);
+  stroke-width: 1;
+  stroke-dasharray: 3 4;
+}
+.chart-line {
+  stroke: var(--ok);
+  stroke-width: 1.5;
+  stroke-linejoin: round;
+  stroke-linecap: round;
+}
+.chart-line.caution {
+  stroke: var(--caution);
+}
+.chart-line.danger {
+  stroke: var(--danger);
+}
+.chart-area {
+  fill: var(--ok-fill);
+  opacity: 0.1;
+}
+.chart-area.caution {
+  fill: var(--caution-fill);
+}
+.chart-area.danger {
+  fill: var(--danger-fill);
+}
+.chart-dot {
+  fill: var(--ok);
+}
+.chart-dot.caution {
+  fill: var(--caution);
+}
+.chart-dot.danger {
+  fill: var(--danger);
+}
+
+/* ─────────── realm (Environments) ─────────── */
+
+.realm {
+  border: 1px solid var(--line-soft);
+  border-radius: var(--r);
+  overflow: hidden;
+}
+.realm-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 11px 14px;
+  background: var(--surface);
+  border-bottom: 1px solid var(--line-soft);
+}
+.realm-head .t {
+  font-size: 13px;
+  font-weight: 550;
+}
+.realm-head .p {
+  font-size: 11px;
+  color: var(--faint);
+}
+.realm-head .sp {
+  margin-left: auto;
+}
+.realm-body {
+  padding: 4px 14px;
+}
+.realm-body.asleep,
+.realm-body.no-install {
+  padding: 20px 14px;
+  display: flex;
+  align-items: center;
+  gap: 14px;
+}
+.realm-body.asleep p,
+.realm-body.no-install p {
+  margin: 0;
+  font-size: 12.5px;
+  color: var(--muted);
+  max-width: 52ch;
+}
+.realm-foot {
+  border-top: 1px solid var(--line-soft);
+  padding: 9px 14px;
+  font-size: 12px;
+  color: var(--muted);
+  display: flex;
+  align-items: center;
+}
+
+/* ─────────── banner (Degraded states) ─────────── */
+
+.banner {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  padding: 9px 14px;
+  font-size: 12px;
+  border-bottom: 1px solid var(--line-soft);
+}
+.banner.caution {
+  color: var(--caution);
+}
+.banner.danger {
+  color: var(--danger);
+}
+.banner .sp {
+  margin-left: auto;
+}
+
+/* ─────────── empty / first run ─────────── */
+
+.empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  text-align: center;
+  gap: 14px;
+  padding: 54px 20px;
+  max-width: 44ch;
+  margin: 0 auto;
+}
+.empty h3 {
+  font-size: 16px;
+}
+.empty p {
+  margin: 0;
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.steps {
+  display: flex;
+  flex-direction: column;
+  gap: 0;
+  width: 100%;
+  text-align: left;
+  margin-top: 6px;
+}
+.step {
+  display: grid;
+  grid-template-columns: 22px minmax(0, 1fr);
+  gap: 12px;
+  padding: 13px 0;
+  border-bottom: 1px solid var(--line-soft);
+}
+.step:last-child {
+  border-bottom: 0;
+}
+.step .i {
+  font-family: var(--mono);
+  font-size: 12px;
+  color: var(--faint);
+  padding-top: 1px;
+}
+.step .t {
+  font-size: 13px;
+}
+.step .t i {
+  display: block;
+  font-style: normal;
+  color: var(--faint);
+  font-size: 12px;
+  margin-top: 2px;
+}
+
+.term {
+  font-family: var(--mono);
+  font-size: 12px;
+  background: var(--surface);
+  border: 1px solid var(--line-soft);
+  border-radius: var(--r);
+  padding: 9px 11px;
+  color: var(--muted);
+  overflow-x: auto;
+  white-space: nowrap;
+  width: 100%;
+}
+.term b {
+  color: var(--ink);
+  font-weight: 400;
+}
+
+/* ─────────── slider (Settings threshold) ─────────── */
+
+.slider {
+  display: flex;
+  align-items: center;
+  gap: 11px;
+}
+.slider-input {
+  appearance: none;
+  -webkit-appearance: none;
+  width: 190px;
+  height: 3px;
+  border-radius: 2px;
+  outline: none;
+  cursor: pointer;
+}
+.slider-input::-webkit-slider-thumb {
+  appearance: none;
+  -webkit-appearance: none;
+  width: 11px;
+  height: 11px;
+  border-radius: 50%;
+  background: var(--ink);
+  cursor: pointer;
+  margin-top: 0;
+  border: 0;
+}
+.slider-input::-moz-range-thumb {
+  width: 11px;
+  height: 11px;
+  border-radius: 50%;
+  background: var(--ink);
+  border: 0;
+  cursor: pointer;
+}
+.slider-input::-moz-range-track {
+  height: 3px;
+  border-radius: 2px;
+  background: transparent;
+}
+.slider-input:focus-visible {
+  outline: 2px solid var(--interact);
+  outline-offset: 2px;
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  .sw::after {
+    transition: left 0.12s ease, right 0.12s ease;
+  }
+}
+
+/* ─────────── tray popover ─────────── */
+/*
+ * The popover window (see src/popover.tsx, src/components/PopoverPanel.tsx)
+ * is its own Vite/Tauri entry, but loads this same stylesheet so its markup
+ * can reuse every primitive above (.pill, .btn, .banner, .sw, .meter via
+ * UsageMeter, .who, .mark, .alias) untouched. Only the popover-exclusive
+ * shell classes are added below.
+ */
+
+.pop {
+  display: flex;
+  flex-direction: column;
+  width: 340px;
+  background: var(--bg);
+  color: var(--ink);
+  border-radius: 6px;
+  box-shadow: 0 10px 34px oklch(0 0 0 / 0.4);
+  overflow: hidden;
+}
+
+.pop-head {
+  padding: 13px 14px 12px;
+  border-bottom: 1px solid var(--line-soft);
+}
+.pop-head .who {
+  margin-bottom: 11px;
+}
+
+.pop-win {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+}
+.pop-win .row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-size: 12px;
+}
+.pop-win .row .lab {
+  color: var(--faint);
+  font-family: var(--mono);
+  width: 22px;
+  flex: none;
+}
+.pop-win .row .rst {
+  color: var(--faint);
+  font-family: var(--mono);
+  font-size: 11px;
+  margin-left: auto;
+  white-space: nowrap;
+}
+
+.pop-list {
+  padding: 6px;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+
+/* Rows are real <button>s for keyboard access, so browser chrome is reset
+   the same way .nav button.navlink resets it above. */
+.pop-item {
+  all: unset;
+  box-sizing: border-box;
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  width: 100%;
+  padding: 7px 8px;
+  border-radius: var(--r);
+  font-size: 13px;
+  cursor: pointer;
+}
+.pop-item:hover:not(:disabled) {
+  background: var(--surface);
+}
+.pop-item:focus-visible {
+  outline: 2px solid var(--interact);
+  outline-offset: -2px;
+}
+.pop-item:disabled {
+  cursor: default;
+}
+/* The auto-switcher's next stop, surfaced only while a limit banner is armed. */
+.pop-item.next {
+  background: var(--surface);
+}
+/* UsageMeter's own .meter is reused unmodified; this just pins it right. */
+.pop-item .meter {
+  margin-left: auto;
+}
+.pop-item.dim {
+  color: var(--faint);
+}
+.pop-item.dim .alias {
+  font-weight: 400;
+}
+
+.pop-foot {
+  border-top: 1px solid var(--line-soft);
+  padding: 9px 12px;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  font-size: 12px;
+  color: var(--muted);
+}
+.pop-foot .sp {
+  margin-left: auto;
+}
+
+.kbd {
+  font-family: var(--mono);
+  font-size: 10px;
+  border: 1px solid var(--line);
+  border-radius: 2px;
+  padding: 1px 4px;
+  color: var(--faint);
+}
+
+/* The sample-data banner and quota banners sit flush above .pop-head inside
+   the same rounded shell, so square off their top corners only. */
+.pop > .sample-banner:first-child,
+.pop > .banner:first-child {
+  border-radius: 6px 6px 0 0;
+}
+
+/* Unknown usage: a reading we do not have, distinct from a reading of zero. */
+.pct-unknown { color: var(--muted); letter-spacing: 0.08em; }
+
+/* ─────────── accounts row actions (Switch / Enable / Disable) ─────────── */
+
+.acct-actions {
+  display: flex;
+  gap: 6px;
+  justify-content: flex-end;
+}
+
+/* ─────────── accounts: expandable row (row itself is the click target) ─────────── */
+
+table.accts tbody tr.acct-row {
+  cursor: pointer;
+}
+table.accts tbody tr.acct-row:hover td {
+  background: var(--surface);
+}
+/* tr.is-active td already sits on --surface, so its hover needs the next
+   step up (--raised) to stay visible instead of being swallowed by it. */
+table.accts tbody tr.acct-row.is-active:hover td {
+  background: var(--raised);
+}
+
+.acct-caret {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: none;
+  color: var(--faint);
+  transition: transform 120ms ease;
+}
+.acct-caret.is-open {
+  transform: rotate(90deg);
+}
+@media (prefers-reduced-motion: reduce) {
+  .acct-caret {
+    transition: none;
+  }
+}
+
+/* ─────────── accounts: add row (Add account / Add token) ─────────── */
+
+.add-row {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.add-row-actions {
+  display: flex;
+  gap: 9px;
+  align-items: center;
+}
+.add-hint {
+  margin: 0;
+  font-size: 11.5px;
+  color: var(--faint);
+  max-width: 64ch;
+  line-height: 1.5;
+}
+.add-hint b {
+  color: var(--muted);
+  font-weight: 600;
+}
+
+/* ─────────── accounts: interactive sign-in (SignInFlow) ─────────── */
+/*
+ * Not a modal — sits inline above the other two add-paths, matching the rest
+ * of this screen. No --caution/--danger here: nothing in this flow is a
+ * quota state, so its error banner and waiting copy stay chrome-neutral.
+ */
+.signin-flow {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 10px;
+}
+
+.signin-wait {
+  display: flex;
+  gap: 11px;
+  padding: 13px 14px;
+  border: 1px solid var(--line-soft);
+  border-radius: var(--r);
+  background: var(--surface);
+  max-width: 440px;
+}
+.signin-wait-copy {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.signin-wait-copy p {
+  margin: 0;
+  font-size: 12px;
+  color: var(--muted);
+  line-height: 1.5;
+}
+.signin-wait-copy p:first-child {
+  color: var(--ink);
+}
+.signin-wait-copy code {
+  font-family: var(--mono);
+  font-size: 11.5px;
+}
+
+.signin-wait-dots {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  flex: none;
+  padding-top: 3px;
+}
+.signin-wait-dots span {
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: var(--faint);
+}
+@media (prefers-reduced-motion: no-preference) {
+  .signin-wait-dots span {
+    animation: signin-pulse 1.1s ease-in-out infinite;
+  }
+  .signin-wait-dots span:nth-child(2) {
+    animation-delay: 0.15s;
+  }
+  .signin-wait-dots span:nth-child(3) {
+    animation-delay: 0.3s;
+  }
+  @keyframes signin-pulse {
+    0%,
+    80%,
+    100% {
+      opacity: 0.3;
+    }
+    40% {
+      opacity: 1;
+    }
+  }
+}
+
+/* Small inline form for pasting a setup-token or API key. Deliberately not a
+   modal, matching the rest of this screen — it just expands under the
+   buttons that opened it. */
+.token-form {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 13px 14px;
+  border: 1px solid var(--line-soft);
+  border-radius: var(--r);
+  background: var(--surface);
+  max-width: 420px;
+}
+.token-form .row {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.token-form label {
+  font-size: 10px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--faint);
+}
+.token-form .actions {
+  display: flex;
+  gap: 8px;
+  margin-top: 2px;
+}
+
+.input {
+  font: inherit;
+  font-size: 13px;
+  padding: 6px 9px;
+  border-radius: var(--r);
+  border: 1px solid var(--line);
+  background: var(--bg);
+  color: var(--ink);
+  width: 100%;
+}
+.input:focus-visible {
+  outline: 2px solid var(--interact);
+  outline-offset: 1px;
+}
+.input.mono {
+  font-family: var(--mono);
+  letter-spacing: 0.04em;
+}
+.input:disabled {
+  color: var(--faint);
+  cursor: not-allowed;
+}
+
+/* ─────────── accounts: row expansion (in place, no modal) ─────────── */
+
+tr.acct-details-row td {
+  padding: 0;
+  border-bottom: 1px solid var(--line-soft);
+}
+.acct-details {
+  padding: 14px 10px 16px 21px;
+  background: var(--surface);
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+.acct-details-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+  gap: 12px 20px;
+}
+.acct-details-field {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.acct-details-field .lab {
+  font-size: 10px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--faint);
+}
+.acct-details-field .val {
+  font-size: 13px;
+  color: var(--ink);
+}
+.acct-details-models {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.acct-details-sub {
+  font-size: 10px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--faint);
+}
+.acct-details-model-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+.acct-details-model-name {
+  font-size: 12.5px;
+  min-width: 90px;
+}
+.acct-details-reset {
+  font-size: 11px;
+  color: var(--faint);
+  margin-left: auto;
+}

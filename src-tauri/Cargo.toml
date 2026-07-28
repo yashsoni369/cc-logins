@@ -1,0 +1,88 @@
+[package]
+name = "claude-swap-gui"
+version = "0.1.0"
+description = "Tray application for switching between multiple Claude Code accounts"
+authors = ["Yash Soni"]
+edition = "2021"
+rust-version = "1.77"
+license = "MIT"
+
+# Portions of the credential, path and usage logic are ported from
+# claude-swap (MIT) — https://github.com/realiti4/claude-swap
+
+[lib]
+name = "claude_swap_gui_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = ["tray-icon", "image-png"] }
+tauri-plugin-opener = "2"
+tauri-plugin-autostart = "2"
+tauri-plugin-notification = "2"
+# Two instances would mean two auto-switch daemons racing for the same
+# credential lock. Exactly one process may own the tray.
+tauri-plugin-single-instance = "2"
+
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "sync"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+
+chrono = { version = "0.4", features = ["serde"] }
+sha2 = "0.10"
+base64 = "0.22"
+dirs = "5"
+# Used by login.rs (interactive_login) to create the isolated CLAUDE_CONFIG_DIR
+# temp directory at runtime — previously only a [dev-dependencies] entry,
+# which covered the test suite but not a real (non-test) build.
+tempfile = "3"
+
+# Tray icon bitmaps are rasterised at runtime: Windows tray icons carry no
+# text label, so the utilisation number is drawn into the image itself.
+tiny-skia = "0.11"
+
+# Local usage history. Bundled so no system SQLite is required.
+rusqlite = { version = "0.32", features = ["bundled", "chrono"] }
+
+log = "0.4"
+env_logger = "0.11"
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.59", features = [
+  "Win32_Foundation",
+  "Win32_Storage_FileSystem",
+  "Win32_System_IO",
+  "Win32_Security_Cryptography",
+] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+security-framework = "3"
+
+[dev-dependencies]
+tempfile = "3"
+
+[profile.release]
+opt-level = "s"
+lto = true
+codegen-units = 1
+# Unwind, deliberately, despite the smaller binary `abort` would give.
+#
+# `poller.rs` builds its "one bad tick must not kill the daemon" guarantee on
+# `std::panic::catch_unwind` around the decision logic, tray rendering and
+# history recording. Under `panic = "abort"` the process terminates before any
+# of those guards can run, so that entire architecture was dead code in every
+# release build. `abort` also skips all destructors, which is how a temp
+# directory holding a real credential could survive a crash.
+#
+# Unwinding makes lock poisoning real, so every `Mutex` used across a possible
+# panic recovers from `PoisonError` rather than unwrapping.
+panic = "unwind"
+strip = true

@@ -1,0 +1,114 @@
+/*
+  Design tokens for Claude Account Switcher.
+
+  COLOR ENCODING:
+  - Color only encodes quota state (ok/caution/danger) and interactive affordances.
+  - Never brand, never decoration. Monochrome at rest means healthy is the norm.
+
+  STATE RAMP:
+  - --ok: Account healthy; below 75% utilization.
+  - --caution: Approaching limit; 75%–89% utilization.
+  - --danger: At or past limit; 90%+ utilization.
+  - --interact: Interactive affordances only (buttons, links, focus rings).
+
+  FILL VARIANTS:
+  - --ok-fill, --caution-fill, --danger-fill: For bar/meter fills in charts and progress.
+  - Base variants (--ok, --caution, --danger): For text and text-like elements.
+
+  LIGHT & DARK THEMES:
+  - Both @media (prefers-color-scheme: light) and :root[data-theme="light/dark"] MUST be maintained.
+  - data-theme attribute overrides the media query in both directions.
+*/
+
+:root {
+  /* instrument face — dark */
+  --bg:        oklch(0.130 0 0);
+  --surface:   oklch(0.175 0 0);
+  --raised:    oklch(0.225 0 0);
+  --line:      oklch(0.300 0 0);
+  --line-soft: oklch(0.235 0 0);
+  --ink:       oklch(0.945 0.006 90);
+  --muted:     oklch(0.640 0.005 90);
+  --faint:     oklch(0.480 0.004 90);
+
+  /* the only color in the system — quota state */
+  --ok:        oklch(0.700 0.022 150);
+  --caution:   oklch(0.790 0.145 75);
+  --danger:    oklch(0.640 0.190 27);
+  --interact:  oklch(0.720 0.085 235);
+
+  --ok-fill:      oklch(0.560 0.018 150);
+  --caution-fill: oklch(0.700 0.140 75);
+  --danger-fill:  oklch(0.580 0.185 27);
+
+  --sans: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  --mono: ui-monospace, "SF Mono", "Cascadia Mono", "Segoe UI Mono", Menlo, Consolas, monospace;
+
+  --z-base: 1;
+  --z-sticky: 10;
+  --z-overlay: 20;
+
+  --r: 3px;
+}
+
+@media (prefers-color-scheme: light) {
+  :root {
+    --bg:        oklch(0.975 0.003 250);
+    --surface:   oklch(0.945 0.003 250);
+    --raised:    oklch(0.900 0.004 250);
+    --line:      oklch(0.845 0.005 250);
+    --line-soft: oklch(0.895 0.004 250);
+    --ink:       oklch(0.220 0.006 250);
+    --muted:     oklch(0.470 0.006 250);
+    --faint:     oklch(0.600 0.005 250);
+
+    --ok:        oklch(0.500 0.030 150);
+    /* Darkened from 0.560 -> 0.500 L: at 0.560 this measured 4.48:1 against
+       --bg, just under the WCAG AA 4.5:1 body-text minimum. --caution is a
+       state colour carrying meaning, so it must clear the same bar as text. */
+    --caution:   oklch(0.500 0.140 65);
+    --danger:    oklch(0.500 0.190 27);
+    --interact:  oklch(0.500 0.120 250);
+
+    --ok-fill:      oklch(0.640 0.028 150);
+    --caution-fill: oklch(0.680 0.150 70);
+    --danger-fill:  oklch(0.560 0.190 27);
+  }
+}
+
+:root[data-theme="light"] {
+  --bg:        oklch(0.975 0.003 250);
+  --surface:   oklch(0.945 0.003 250);
+  --raised:    oklch(0.900 0.004 250);
+  --line:      oklch(0.845 0.005 250);
+  --line-soft: oklch(0.895 0.004 250);
+  --ink:       oklch(0.220 0.006 250);
+  --muted:     oklch(0.470 0.006 250);
+  --faint:     oklch(0.600 0.005 250);
+  --ok:        oklch(0.500 0.030 150);
+  /* Kept in sync with the @media block above — see note there. */
+  --caution:   oklch(0.500 0.140 65);
+  --danger:    oklch(0.500 0.190 27);
+  --interact:  oklch(0.500 0.120 250);
+  --ok-fill:      oklch(0.640 0.028 150);
+  --caution-fill: oklch(0.680 0.150 70);
+  --danger-fill:  oklch(0.560 0.190 27);
+}
+
+:root[data-theme="dark"] {
+  --bg:        oklch(0.130 0 0);
+  --surface:   oklch(0.175 0 0);
+  --raised:    oklch(0.225 0 0);
+  --line:      oklch(0.300 0 0);
+  --line-soft: oklch(0.235 0 0);
+  --ink:       oklch(0.945 0.006 90);
+  --muted:     oklch(0.640 0.005 90);
+  --faint:     oklch(0.480 0.004 90);
+  --ok:        oklch(0.700 0.022 150);
+  --caution:   oklch(0.790 0.145 75);
+  --danger:    oklch(0.640 0.190 27);
+  --interact:  oklch(0.720 0.085 235);
+  --ok-fill:      oklch(0.560 0.018 150);
+  --caution-fill: oklch(0.700 0.140 75);
+  --danger-fill:  oklch(0.580 0.185 27);
+}

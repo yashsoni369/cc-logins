@@ -1,0 +1,66 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "Claude Account Switcher",
+  "version": "0.1.0",
+  "identifier": "dev.apex36.claude-account-switcher",
+  "build": {
+    "beforeDevCommand": "pnpm dev",
+    "devUrl": "http://localhost:1420",
+    "beforeBuildCommand": "pnpm build",
+    "frontendDist": "../dist"
+  },
+  "app": {
+    "withGlobalTauri": false,
+    "windows": [
+      {
+        "label": "main",
+        "title": "Claude Account Switcher",
+        "width": 1000,
+        "height": 660,
+        "minWidth": 720,
+        "minHeight": 480,
+        "resizable": true,
+        "center": true,
+        "decorations": true,
+        "visible": true,
+        "theme": null
+      },
+      {
+        "label": "popover",
+        "url": "popover.html",
+        "width": 340,
+        "height": 480,
+        "resizable": false,
+        "decorations": false,
+        "alwaysOnTop": true,
+        "skipTaskbar": true,
+        "visible": false,
+        "shadow": true,
+        "theme": null
+      }
+    ],
+    "security": {
+      "csp": "default-src 'self'; img-src 'self' data: asset: http://asset.localhost; style-src 'self' 'unsafe-inline'; connect-src 'self' ipc: http://ipc.localhost"
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": ["nsis", "app", "dmg", "deb", "appimage"],
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.icns",
+      "icons/icon.ico"
+    ],
+    "category": "DeveloperTool",
+    "shortDescription": "Switch between multiple Claude Code accounts",
+    "longDescription": "A tray application that shows which Claude Code account is active, how much 5-hour and 7-day quota each account has left, and switches between them manually or automatically before a limit lands. It never routes model traffic and has no server.",
+    "copyright": "MIT. Portions ported from claude-swap (MIT), realiti4/claude-swap.",
+    "windows": {
+      "nsis": {
+        "installMode": "currentUser"
+      }
+    }
+  }
+}

@@ -1,0 +1,23 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Claude Account Switcher — Popover</title>
+    <script>
+      // Keep in sync with index.html's copy of this script — see the
+      // comment there and src/lib/useTheme.ts for why this exists.
+      (function () {
+        try {
+          var cached = localStorage.getItem("cswap:resolved-theme");
+          if (cached === "day") document.documentElement.setAttribute("data-theme", "light");
+          else if (cached === "night") document.documentElement.setAttribute("data-theme", "dark");
+        } catch (e) {}
+      })();
+    </script>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/popover.tsx"></script>
+  </body>
+</html>

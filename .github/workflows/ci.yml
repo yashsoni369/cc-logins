@@ -1,0 +1,124 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# Cancel superseded runs on the same ref so pushing twice in a row doesn't
+# burn double the CI minutes.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  # Fast, Rust-independent feedback on the frontend: type errors and the
+  # production Vite build. Runs on ubuntu only — there is nothing
+  # platform-specific here.
+  frontend:
+    name: Frontend (typecheck + build)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10.14.0
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - run: pnpm install --frozen-lockfile
+
+      - name: Typecheck
+        run: pnpm exec tsc --noEmit
+
+      - name: Build
+        run: pnpm build
+
+  # The Rust side is compiled per-OS because claude-swap-gui carries real
+  # platform-specific code (windows-sys / DPAPI-adjacent Win32 calls,
+  # security-framework on macOS, libc on unix) behind #[cfg(...)], so a
+  # clippy/test run on only one OS would leave the other two platforms'
+  # branches uncompiled and unchecked.
+  rust:
+    name: Rust (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      # Tauri's Linux bundle links against webkit2gtk and friends; without
+      # these headers even `cargo check` fails on ubuntu, let alone building
+      # the tray/webview integration.
+      - name: Install Linux system dependencies
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev \
+            libappindicator3-dev \
+            librsvg2-dev \
+            libayatana-appindicator3-dev \
+            libssl-dev \
+            libxdo-dev \
+            build-essential \
+            curl \
+            wget \
+            file
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10.14.0
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - run: pnpm install --frozen-lockfile
+
+      # tauri-build's build.rs reads the frontend bundle (`frontendDist` in
+      # tauri.conf.json) while generating the Rust side, so `cargo` steps
+      # below need a real `dist/` to exist first, on every OS in the matrix.
+      - name: Build frontend (for tauri-build)
+        run: pnpm build
+
+      - name: cargo fmt --check
+        if: matrix.os == 'ubuntu-latest'
+        working-directory: src-tauri
+        run: cargo fmt --all -- --check
+
+      - name: cargo clippy
+        working-directory: src-tauri
+        run: cargo clippy --all-targets --all-features -- -D warnings
+
+      # Deliberately plain `cargo test`, not `cargo test --lib`: this also
+      # runs the integration tests in `tests/` —
+      # `differential.rs` (needs the `cswap` CLI on PATH) and
+      # `lock_interop.rs` (needs a Python with `claude_swap` importable).
+      # Neither is installed in this CI environment on purpose. Both are
+      # written to detect that and skip cleanly (a printed skip message, not
+      # a hard failure) rather than to fail when the dependency is absent —
+      # that is intentional, documented behaviour, not something to "fix" by
+      # installing `cswap`/Python here. See the doc comments at the top of
+      # each file before changing this step.
+      - name: cargo test (unit + integration; differential/lock_interop skip without cswap/Python)
+        working-directory: src-tauri
+        run: cargo test --all-features

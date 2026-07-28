@@ -1,0 +1,28 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Claude Account Switcher</title>
+    <script>
+      // Prevents a flash of the wrong theme: applies the last-known resolved
+      // theme (cached by src/lib/useTheme.ts) before the app bundle loads.
+      // No cache yet, or the cache is unreadable — leave data-theme unset so
+      // tokens.css's default (dark, or the prefers-color-scheme media query)
+      // governs, exactly "system". The backend-persisted setting, loaded
+      // async by useTheme(), remains the source of truth and may reapply a
+      // different value once it arrives.
+      (function () {
+        try {
+          var cached = localStorage.getItem("cswap:resolved-theme");
+          if (cached === "day") document.documentElement.setAttribute("data-theme", "light");
+          else if (cached === "night") document.documentElement.setAttribute("data-theme", "dark");
+        } catch (e) {}
+      })();
+    </script>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>
