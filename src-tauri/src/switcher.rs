@@ -114,6 +114,7 @@ use crate::oauth;
 use crate::oauth_quarantine::OAuthQuarantine;
 use crate::oauth_refresh::{
     self, AccountIdentity, CompareAndStore, GenerationStore, RefreshCoordinator, StoredGeneration,
+    ValidatedCredential,
 };
 use crate::paths;
 
@@ -210,6 +211,12 @@ pub enum SwitchError {
 
     #[error("JSON error: {0}")]
     Json(#[from] serde_json::Error),
+
+    #[error(transparent)]
+    Refresh(#[from] oauth_refresh::RefreshCoordinatorError),
+
+    #[error("account {0}'s credential changed while activation was being validated")]
+    TargetGenerationChanged(String),
 
     #[error("no accounts are managed yet")]
     NoAccountsManaged,
@@ -509,6 +516,18 @@ struct GuiGenerationStore {
     timeout: Duration,
 }
 
+fn production_refresh_coordinator(timeout: Duration) -> RefreshCoordinator {
+    RefreshCoordinator::new(
+        Arc::new(oauth::ReqwestOAuthNetwork),
+        Arc::new(GuiGenerationStore::new(timeout)),
+        Arc::new(oauth_refresh::FileRefreshLeases::new(
+            paths::backup_root(),
+            timeout,
+        )),
+        Arc::new(oauth_refresh::SystemClock),
+    )
+}
+
 impl GuiGenerationStore {
     fn new(timeout: Duration) -> Self {
         Self { timeout }
@@ -662,15 +681,7 @@ fn clear_replaced_quarantine(email: &str, organization_uuid: Option<&str>, crede
 /// cached prior measurement; see the port report.)
 pub async fn read_snapshot() -> Result<Snapshot, SwitchError> {
     let accounts = read_accounts()?;
-    let coordinator = RefreshCoordinator::new(
-        Arc::new(oauth::ReqwestOAuthNetwork),
-        Arc::new(GuiGenerationStore::new(Duration::from_secs(10))),
-        Arc::new(oauth_refresh::FileRefreshLeases::new(
-            paths::backup_root(),
-            Duration::from_secs(10),
-        )),
-        Arc::new(oauth_refresh::SystemClock),
-    );
+    let coordinator = production_refresh_coordinator(Duration::from_secs(10));
 
     // Phase 1 — read every credential up front, then DROP the store before any
     // network call happens.
@@ -860,40 +871,78 @@ fn acquire_cswap_and_vault_locks(
 /// Holds BOTH the `cswap`-compat lock (when that CLI's store exists) and our
 /// own vault lock for the whole mutation — see
 /// [`acquire_cswap_and_vault_locks`] for why two locks and why this order.
-/// No network call is made anywhere in this function (rules 2 and 5 fall out
-/// for free). Order of operations, matching upstream's `_perform_switch`:
+/// OAuth freshening is the only network phase and completes before those
+/// mutation locks are acquired. Order of operations:
 ///
-/// 1. Read the active credential (local I/O only).
-/// 2. **Back up the outgoing login** — the account currently live (resolved
+/// 1. Re-resolve the target and freshen its latest stored generation.
+/// 2. Acquire mutation locks, re-resolve the target, and require the exact
+///    validated full-content generation plus a valid config backup.
+/// 3. Read and **back up the outgoing login** — the account currently live (resolved
 ///    from `~/.claude.json`'s `oauthAccount`, not from a possibly-stale
 ///    `activeAccountNumber`) has its credential and config snapshot written
-///    to its backup slot *before* anything about the target is written or
-///    even validated. An unmanaged/unattributable live credential (no
+///    to its backup slot before anything about the target is installed. An unmanaged/unattributable live credential (no
 ///    resolvable slot) is preserved via
 ///    [`CredentialStore::write_unclaimed_credential`] instead of a normal
 ///    slot backup, so a fresh-machine or drifted-login switch still never
 ///    silently destroys it.
-/// 3. Validate and read the target's stored credential + config backup.
 /// 4. **Install** the target credential (composed with the machine's live
 ///    shared OAuth fields, mirroring `_prepare_credentials_for_activation`)
 ///    and splice its `oauthAccount` block into the global config.
 /// 5. Update `sequence.json`'s `activeAccountNumber`.
-///
-/// A failure at step 3 or 4 leaves step 2's backup in place and never reaches
-/// the write in step 4, so a switch that can't complete fails without ever
-/// touching the live login — see the
-/// `backup_happens_before_target_validation…` test.
 ///
 /// Not reproduced from upstream: cross-file transactional rollback (Python's
 /// `SwitchTransaction`), self-switch no-op short-circuiting, `--force`
 /// direct-activation, and foreign-credential provenance classification
 /// (network-based ownership resolution before backing up divergent live
 /// bytes). See the port report.
-pub fn switch_to(target: &Account) -> Result<(), SwitchError> {
-    switch_to_with_timeout(target, crate::locking::DEFAULT_TIMEOUT)
+pub async fn switch_to(target: &Account) -> Result<(), SwitchError> {
+    let timeout = crate::locking::DEFAULT_TIMEOUT;
+    let coordinator = production_refresh_coordinator(timeout);
+    switch_to_with_coordinator(target, &coordinator, timeout).await
 }
 
-fn switch_to_with_timeout(target: &Account, timeout: Duration) -> Result<(), SwitchError> {
+async fn switch_to_with_coordinator(
+    target: &Account,
+    coordinator: &RefreshCoordinator,
+    timeout: Duration,
+) -> Result<(), SwitchError> {
+    // A refresh winner may land between network validation and acquisition of
+    // the complete mutation lock set. Re-resolve and retry from that winner;
+    // never activate the stale callback's bytes.
+    for _ in 0..3 {
+        let identity = target_identity_with_timeout(target.number, timeout)?;
+        let validated = coordinator.freshen_for_activation(&identity).await?;
+        match switch_to_validated_with_timeout(target, &validated, timeout) {
+            Err(SwitchError::TargetGenerationChanged(_)) => continue,
+            result => return result,
+        }
+    }
+    Err(SwitchError::TargetGenerationChanged(
+        target.number.to_string(),
+    ))
+}
+
+fn target_identity_with_timeout(
+    target_number: u32,
+    timeout: Duration,
+) -> Result<AccountIdentity, SwitchError> {
+    let _lock = crate::locking::acquire_or_err(vault_lock_path(), timeout)?;
+    let account = read_accounts()?
+        .into_iter()
+        .find(|account| account.number == target_number)
+        .ok_or_else(|| SwitchError::UnknownAccount(target_number.to_string()))?;
+    Ok(AccountIdentity {
+        number: target_number.to_string(),
+        email: account.email.clone(),
+        stable_key: account.stable_key(),
+    })
+}
+
+fn switch_to_validated_with_timeout(
+    target: &Account,
+    validated: &ValidatedCredential,
+    timeout: Duration,
+) -> Result<(), SwitchError> {
     let num = target.number.to_string();
 
     // Rule 1: lock before touching anything, for the whole mutation. This
@@ -905,6 +954,10 @@ fn switch_to_with_timeout(target: &Account, timeout: Duration) -> Result<(), Swi
 
     // Source of truth for the target's email is the registry, not whatever
     // the caller's (possibly stale) `Account` says.
+    let target_account = accounts_from_sequence(&data)
+        .into_iter()
+        .find(|account| account.number == target.number)
+        .ok_or_else(|| SwitchError::UnknownAccount(num.clone()))?;
     let email = data
         .get("accounts")
         .and_then(Value::as_object)
@@ -915,6 +968,32 @@ fn switch_to_with_timeout(target: &Account, timeout: Duration) -> Result<(), Swi
         .ok_or_else(|| SwitchError::UnknownAccount(num.clone()))?;
 
     let mut store = CredentialStore::new(GuiStoreHost);
+
+    // Validate every target artifact, including the exact credential
+    // generation returned by the network phase, before reading or backing up
+    // the outgoing login. This is the mutation boundary's core invariant.
+    if validated.identity.number != num
+        || validated.identity.email != email
+        || validated.identity.stable_key != target_account.stable_key()
+    {
+        return Err(SwitchError::TargetGenerationChanged(num));
+    }
+    let target_creds = store.read_account_credentials(&num, &email);
+    if target_creds.is_empty() {
+        return Err(SwitchError::NoStoredCredentials(num));
+    }
+    if oauth_refresh::credential_generation(&target_creds) != validated.generation
+        || target_creds != validated.credentials
+    {
+        return Err(SwitchError::TargetGenerationChanged(num));
+    }
+    let target_config_text = read_account_config(&num, &email)
+        .ok_or_else(|| SwitchError::NoStoredConfig(num.clone()))?;
+    let target_config_value: Value = serde_json::from_str(&target_config_text)?;
+    let target_oauth = target_config_value
+        .get("oauthAccount")
+        .cloned()
+        .ok_or_else(|| SwitchError::InvalidBackupConfig(num.clone()))?;
 
     let active = store.read_active_credentials();
     let original_creds = active.value.ok_or(SwitchError::CredentialRead)?;
@@ -961,24 +1040,11 @@ fn switch_to_with_timeout(target: &Account, timeout: Duration) -> Result<(), Swi
         }
     }
 
-    // Step 3: validate and read the target's stored backups.
-    let target_creds = store.read_account_credentials(&num, &email);
-    if target_creds.is_empty() {
-        return Err(SwitchError::NoStoredCredentials(num));
-    }
-    let target_config_text = read_account_config(&num, &email)
-        .ok_or_else(|| SwitchError::NoStoredConfig(num.clone()))?;
-    let target_config_value: Value = serde_json::from_str(&target_config_text)?;
-    let target_oauth = target_config_value
-        .get("oauthAccount")
-        .cloned()
-        .ok_or_else(|| SwitchError::InvalidBackupConfig(num.clone()))?;
-
     // Step 4: install. Compose the target's stored login with the machine's
     // live shared OAuth fields (mcpOAuth, pluginSecrets, ...) so activation
     // doesn't regress those to the target's last-seen generation.
     let shared = shared_credential_fields(Some(&original_creds)).unwrap_or_default();
-    let prepared = merge_shared_credential_fields(&target_creds, &shared);
+    let prepared = merge_shared_credential_fields(&validated.credentials, &shared);
     store.write_credentials(&prepared)?;
     write_oauth_account(&target_oauth)?;
 
@@ -994,6 +1060,21 @@ fn switch_to_with_timeout(target: &Account, timeout: Duration) -> Result<(), Swi
     write_sequence_data(&data)?;
 
     Ok(())
+}
+
+#[cfg(test)]
+fn switch_to_with_timeout(target: &Account, timeout: Duration) -> Result<(), SwitchError> {
+    let identity = target_identity_with_timeout(target.number, timeout)?;
+    let stored = GuiGenerationStore::new(timeout)
+        .read(&identity)
+        .map_err(oauth_refresh::RefreshCoordinatorError::PersistenceFailed)?
+        .ok_or(oauth_refresh::RefreshCoordinatorError::Missing)?;
+    let validated = ValidatedCredential {
+        identity,
+        credentials: stored.credentials,
+        generation: stored.generation,
+    };
+    switch_to_validated_with_timeout(target, &validated, timeout)
 }
 
 /// Splice `oauth_account` into `~/.claude.json`'s `oauthAccount` key,
@@ -2268,8 +2349,54 @@ fn seven_day_reset_ts(account: &Account) -> Option<f64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::oauth::{OAuthFuture, OAuthNetwork, RefreshOutcome, UsageFetchError};
+    use crate::oauth_refresh::{Clock, LeaseGuard, RefreshLeaseProvider};
     use crate::test_support::{env_lock, EnvGuard, StoreRootGuard};
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use tempfile::TempDir;
+
+    struct ActivationNetwork {
+        successor: String,
+        refresh_calls: AtomicUsize,
+    }
+
+    impl OAuthNetwork for ActivationNetwork {
+        fn refresh<'a>(&'a self, _: &'a str) -> OAuthFuture<'a, RefreshOutcome> {
+            Box::pin(async move {
+                self.refresh_calls.fetch_add(1, Ordering::SeqCst);
+                RefreshOutcome {
+                    credentials: Some(self.successor.clone()),
+                    error: None,
+                    token_account: None,
+                }
+            })
+        }
+
+        fn fetch_usage<'a>(
+            &'a self,
+            _: &'a str,
+        ) -> OAuthFuture<'a, Result<Value, UsageFetchError>> {
+            Box::pin(async { panic!("activation validation must not fetch usage") })
+        }
+    }
+
+    struct ImmediateLease;
+    struct ImmediateLeaseGuard;
+    impl RefreshLeaseProvider for ImmediateLease {
+        fn acquire<'a>(
+            &'a self,
+            _: &'a str,
+        ) -> OAuthFuture<'a, Result<Box<dyn LeaseGuard>, String>> {
+            Box::pin(async { Ok(Box::new(ImmediateLeaseGuard) as Box<dyn LeaseGuard>) })
+        }
+    }
+
+    struct ActivationClock(f64);
+    impl Clock for ActivationClock {
+        fn now_ms(&self) -> f64 {
+            self.0
+        }
+    }
 
     // -- pick_target ----------------------------------------------------------
 
@@ -2698,14 +2825,8 @@ mod tests {
         assert_eq!(seq["activeAccountNumber"], 2);
     }
 
-    /// The backup-before-install ordering rule (rule 3), proven by making the
-    /// target invalid: if the outgoing account were only backed up *after*
-    /// validating/installing the target, this failure would leave Account-1's
-    /// login without a fresh backup. Instead the backup must already be there,
-    /// and the live login must be untouched.
     #[test]
-    fn backup_happens_before_target_validation_so_a_failed_switch_still_preserves_the_outgoing_login(
-    ) {
+    fn target_validation_failure_is_a_strict_no_op_before_outgoing_backup() {
         let _env = setup_env();
         seed_two_accounts();
         std::fs::remove_file(account_config_path("2", "bravo@example.com")).unwrap();
@@ -2716,8 +2837,8 @@ mod tests {
         let mut store = CredentialStore::new(GuiStoreHost);
         assert_eq!(
             store.read_account_credentials("1", "alpha@example.com"),
-            "original-active-creds-for-account-1",
-            "outgoing account must be backed up even though the switch ultimately failed"
+            "",
+            "an invalid target must abort before mutating the outgoing backup"
         );
 
         assert_eq!(
@@ -2728,6 +2849,81 @@ mod tests {
         let seq: Value =
             serde_json::from_str(&std::fs::read_to_string(accounts_file()).unwrap()).unwrap();
         assert_eq!(seq["activeAccountNumber"], 1);
+    }
+
+    #[test]
+    fn generation_change_after_freshening_aborts_before_outgoing_backup() {
+        let _env = setup_env();
+        seed_two_accounts();
+        let identity = bravo_identity();
+        let mut store = CredentialStore::new(GuiStoreHost);
+        let stale_credentials = store.read_account_credentials(&identity.number, &identity.email);
+        let validated = ValidatedCredential {
+            identity,
+            generation: oauth_refresh::credential_generation(&stale_credentials),
+            credentials: stale_credentials,
+        };
+        store
+            .write_account_credentials("2", "bravo@example.com", "newer-winner")
+            .unwrap();
+
+        let error =
+            switch_to_validated_with_timeout(&bravo_target(), &validated, Duration::from_secs(5))
+                .unwrap_err();
+        assert!(matches!(error, SwitchError::TargetGenerationChanged(ref n) if n == "2"));
+        assert_eq!(
+            store.read_account_credentials("1", "alpha@example.com"),
+            "",
+            "a stale validation must never back up or otherwise mutate the outgoing slot"
+        );
+        assert_eq!(
+            std::fs::read_to_string(paths::credentials_path()).unwrap(),
+            "original-active-creds-for-account-1"
+        );
+    }
+
+    #[tokio::test]
+    async fn switch_to_refreshes_an_expired_target_before_installing_it() {
+        let _env = setup_env();
+        seed_two_accounts();
+        let expired = oauth_creds_json("old-refresh", "old-access");
+        let mut expired_value: Value = serde_json::from_str(&expired).unwrap();
+        expired_value["claudeAiOauth"]["expiresAt"] = Value::from(1);
+        let expired = expired_value.to_string();
+        let successor = serde_json::json!({"claudeAiOauth": {
+            "accessToken": "fresh-access",
+            "refreshToken": "fresh-refresh",
+            "expiresAt": 9_999_999_999_999_f64
+        }})
+        .to_string();
+        let mut store = CredentialStore::new(GuiStoreHost);
+        store
+            .write_account_credentials("2", "bravo@example.com", &expired)
+            .unwrap();
+        let network = Arc::new(ActivationNetwork {
+            successor: successor.clone(),
+            refresh_calls: AtomicUsize::new(0),
+        });
+        let coordinator = RefreshCoordinator::new(
+            network.clone(),
+            Arc::new(GuiGenerationStore::new(Duration::from_secs(5))),
+            Arc::new(ImmediateLease),
+            Arc::new(ActivationClock(10_000.0)),
+        );
+
+        switch_to_with_coordinator(&bravo_target(), &coordinator, Duration::from_secs(5))
+            .await
+            .unwrap();
+
+        assert_eq!(network.refresh_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            store.read_account_credentials("2", "bravo@example.com"),
+            successor,
+            "the consumed refresh generation must be persisted before activation"
+        );
+        assert!(std::fs::read_to_string(paths::credentials_path())
+            .unwrap()
+            .contains("fresh-access"));
     }
 
     #[test]

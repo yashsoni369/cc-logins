@@ -273,6 +273,11 @@ impl RefreshCoordinator {
 }
 
 fn credential_is_expired(credentials: &str, now_ms: f64) -> Result<bool, RefreshCoordinatorError> {
+    // Current cswap treats managed API-key slots as activation-ready: they do
+    // not participate in OAuth expiry or refresh-token rotation.
+    if crate::credentials::looks_like_api_key(Some(credentials)) {
+        return Ok(false);
+    }
     let oauth =
         oauth::extract_oauth_data(credentials).ok_or(RefreshCoordinatorError::InvalidCredential)?;
     let expires_at = oauth.get("expiresAt").and_then(serde_json::Value::as_f64);
@@ -662,5 +667,24 @@ mod tests {
                 .unwrap_err(),
             RefreshCoordinatorError::Lease("busy".to_string())
         );
+    }
+
+    #[tokio::test]
+    async fn managed_api_key_is_validated_without_oauth_network_io() {
+        let api_key = "sk-ant-api03-abcdefghijklmnopqrstuvwxyz".to_string();
+        let store = Arc::new(FakeStore::with(api_key.clone()));
+        let network = Arc::new(ScriptedNetwork {
+            refreshes: Mutex::new(VecDeque::new()),
+            usages: Mutex::new(VecDeque::new()),
+            calls: Mutex::new(Vec::new()),
+        });
+
+        let validated = coordinator(store, Arc::clone(&network))
+            .freshen_for_activation(&identity())
+            .await
+            .unwrap();
+
+        assert_eq!(validated.credentials, api_key);
+        assert!(network.calls.lock().unwrap().is_empty());
     }
 }

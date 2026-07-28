@@ -64,6 +64,8 @@ pub enum IpcError {
     /// Refused to disable the currently-active account — auto-switch would
     /// have nowhere valid to land.
     CannotDisableActive(String),
+    /// The server proved this account's refresh-token lineage is dead.
+    ReloginRequired(String),
     /// A settings editor tried to overwrite a newer canonical revision.
     SettingsConflict {
         expected_revision: u64,
@@ -97,6 +99,17 @@ impl From<SwitchError> for IpcError {
         match &e {
             SwitchError::NoAccountsManaged => IpcError::NotConfigured,
             SwitchError::Locking(_) => IpcError::Busy(e.to_string()),
+            SwitchError::TargetGenerationChanged(_) => IpcError::Busy(e.to_string()),
+            SwitchError::Refresh(crate::oauth_refresh::RefreshCoordinatorError::Lease(_)) => {
+                IpcError::Busy(e.to_string())
+            }
+            SwitchError::Refresh(
+                crate::oauth_refresh::RefreshCoordinatorError::ReloginRequired,
+            ) => IpcError::ReloginRequired(e.to_string()),
+            SwitchError::Refresh(
+                crate::oauth_refresh::RefreshCoordinatorError::RefreshFailed(_)
+                | crate::oauth_refresh::RefreshCoordinatorError::Usage(_),
+            ) => IpcError::Unreachable(e.to_string()),
             // Credential-store problems: the store itself is unreadable,
             // missing, empty, or otherwise not trustworthy — as distinct
             // from a business-rule refusal below, where the store is fine
@@ -109,7 +122,12 @@ impl From<SwitchError> for IpcError {
             | SwitchError::EmptyActiveCredential(_)
             | SwitchError::Stash(_)
             | SwitchError::NoLiveCredential
-            | SwitchError::InvalidCredential(_) => IpcError::Credential(e.to_string()),
+            | SwitchError::InvalidCredential(_)
+            | SwitchError::Refresh(
+                crate::oauth_refresh::RefreshCoordinatorError::Missing
+                | crate::oauth_refresh::RefreshCoordinatorError::PersistenceFailed(_)
+                | crate::oauth_refresh::RefreshCoordinatorError::InvalidCredential,
+            ) => IpcError::Credential(e.to_string()),
             // Business-rule refusals: the requested mutation is invalid
             // given the current state, not an I/O or credential-store
             // failure. Each gets its own structural kind so the UI can
@@ -364,7 +382,7 @@ pub async fn switch_account(
     // doesn't leave the tray sitting on the outgoing account's stale number.
     crate::poller::publish_switching(&app);
 
-    switcher::switch_to(target)?;
+    switcher::switch_to(target).await?;
 
     // Bypass the cache: it holds the pre-switch state by definition, and
     // showing the user the state from before their own action is a lie.
@@ -1194,6 +1212,21 @@ mod tests {
         };
         let mapped: IpcError = SwitchError::Locking(underlying).into();
         assert!(matches!(mapped, IpcError::Busy(_)), "got {mapped:?}");
+    }
+
+    #[test]
+    fn manual_relogin_required_is_a_structured_ipc_error() {
+        let mapped: IpcError =
+            SwitchError::Refresh(crate::oauth_refresh::RefreshCoordinatorError::ReloginRequired)
+                .into();
+        assert!(matches!(mapped, IpcError::ReloginRequired(_)));
+        assert_eq!(
+            serde_json::to_value(mapped).unwrap(),
+            serde_json::json!({
+                "kind": "reloginRequired",
+                "detail": "account requires re-login"
+            })
+        );
     }
 
     #[test]

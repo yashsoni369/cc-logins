@@ -1174,7 +1174,7 @@ pub async fn run(
                 publish_daemon_status(&app, policy_revision, due.phase(), now);
                 let trusted = state.last_trusted_snapshot.clone();
                 if let Some(snapshot) = trusted {
-                    if perform_switch(&app, &snapshot, from, to) {
+                    if perform_switch(&app, &snapshot, from, to).await {
                         state.complete_switch(from, now);
                     } else {
                         state.daemon.pending = None;
@@ -1246,7 +1246,7 @@ pub async fn run(
         match &decision {
             Decision::Switch { from, to, .. } => {
                 let (from, to) = (*from, *to);
-                if perform_switch(&app, &snapshot, from, to) {
+                if perform_switch(&app, &snapshot, from, to).await {
                     state.complete_switch(from, now);
                     next_poll_at = tokio::time::Instant::now();
                     continue;
@@ -1322,17 +1322,16 @@ pub async fn run(
 }
 
 /// Perform a decided switch, gated by the caller having already checked
-/// `auto_switch_enabled`. Wrapped in `catch_unwind` (rule: never panic) and
-/// never called with any lock held — [`crate::switcher::switch_to`] takes
-/// its own internal file lock for the whole mutation, and nothing here holds
-/// anything else across it.
-fn perform_switch(app: &AppHandle, snapshot: &Snapshot, from: u32, to: u32) -> bool {
+/// `auto_switch_enabled`. The switch runs in its own Tokio task so a panic is
+/// returned as a `JoinError` instead of killing the daemon loop. Nothing here
+/// holds a lock across the async validation or mutation.
+async fn perform_switch(app: &AppHandle, snapshot: &Snapshot, from: u32, to: u32) -> bool {
     let Some(target) = find_account(snapshot, to).cloned() else {
         log::warn!("poller: decided to switch to account {to} but it is missing from the snapshot");
         return false;
     };
 
-    let result = std::panic::catch_unwind(AssertUnwindSafe(|| switcher::switch_to(&target)));
+    let result = tokio::spawn(async move { switcher::switch_to(&target).await }).await;
     match result {
         Ok(Ok(())) => {
             let _ = app.emit(
@@ -1349,8 +1348,8 @@ fn perform_switch(app: &AppHandle, snapshot: &Snapshot, from: u32, to: u32) -> b
             );
             false
         }
-        Err(_) => {
-            log::warn!("poller: switch_to({to}) panicked");
+        Err(error) => {
+            log::warn!("poller: switch_to({to}) task failed: {error}");
             false
         }
     }
