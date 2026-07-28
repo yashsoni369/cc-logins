@@ -603,7 +603,7 @@ pub fn decide(
 
     // Rule 4: no viable candidate. Only declare Exhausted when every
     // account that could plausibly be used — the active one, plus every
-    // non-disabled/non-expired account, hysteresis exclusion NOT applied
+    // manually switchable account, hysteresis exclusion NOT applied
     // here (a healthy-but-hysteresis-blocked account means we are merely
     // blocked this tick, not stuck) — is *known* to be at its limit.
     let relevant: Vec<&Account> = all_accounts
@@ -2461,15 +2461,18 @@ mod tests {
         );
     }
 
-    // -- disabled/expired accounts never targeted or counted -------------------------
+    // -- disabled/re-login accounts never targeted or counted ------------------------
 
     #[test]
-    fn disabled_and_expired_accounts_are_ignored_for_both_targeting_and_exhaustion() {
+    fn disabled_and_relogin_accounts_are_ignored_for_targeting_and_exhaustion() {
         let mut disabled = account(2, false, Some(0.0), None);
         disabled.usage_status = crate::model::UsageStatus::Disabled;
+        let mut dead = account(3, false, Some(0.0), None);
+        dead.usage_status = crate::model::UsageStatus::ReloginRequired;
         let snap = snapshot(vec![
             account(1, true, Some(100.0), Some("2026-08-01T00:00:00Z")),
             disabled,
+            dead,
         ]);
         // Only the active account is "relevant" (the disabled one is
         // excluded from is_switchable), and it's known at-limit with a

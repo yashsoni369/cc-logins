@@ -1972,11 +1972,10 @@ pub enum Strategy {
 /// `MostHeadroom` doesn't require beating a specific current account, only
 /// that some switchable candidate provably has real headroom, and
 /// `NextAvailable` scans from the front of `accounts` rather than from just
-/// after wherever "current" is. `Account::is_switchable` already excludes the
-/// active account itself, disabled slots, and expired logins, so none of
-/// those are ever returned. An account with `UNKNOWN` usage
-/// (`Account::headroom() == None`) is never treated as ineligible by
-/// `is_switchable` — see each strategy's handling of that case below.
+/// after wherever "current" is. `Account::is_automatic_target` excludes the
+/// active account, disabled/dead slots, stale or unavailable measurements,
+/// unknown headroom, and exhausted accounts. Manual switching retains a
+/// separate, more permissive validation path.
 pub fn pick_target(accounts: &[Account], strategy: Strategy) -> Option<&Account> {
     match strategy {
         Strategy::MostHeadroom => pick_most_headroom(accounts),
@@ -1995,7 +1994,7 @@ pub fn pick_target(accounts: &[Account], strategy: Strategy) -> Option<&Account>
 fn pick_most_headroom(accounts: &[Account]) -> Option<&Account> {
     let mut best: Option<(&Account, f64)> = None;
     for account in accounts {
-        if !account.is_switchable() {
+        if !account.is_automatic_target() {
             continue;
         }
         if let Some(headroom) = account.headroom() {
@@ -2019,13 +2018,10 @@ fn pick_most_headroom(accounts: &[Account]) -> Option<&Account> {
 /// be exhausted, or there are no switchable accounts at all.
 fn pick_next_available(accounts: &[Account]) -> Option<&Account> {
     for account in accounts {
-        if !account.is_switchable() {
+        if !account.is_automatic_target() {
             continue;
         }
-        match account.headroom() {
-            Some(headroom) if headroom <= 0.0 => continue, // known-exhausted: skip
-            _ => return Some(account),                     // unknown or real headroom: take it
-        }
+        return Some(account);
     }
     None
 }
@@ -2039,7 +2035,7 @@ fn pick_next_available(accounts: &[Account]) -> Option<&Account> {
 fn pick_consume_first(accounts: &[Account]) -> Option<&Account> {
     let mut candidates: Vec<(f64, f64, &Account)> = Vec::new();
     for account in accounts {
-        if !account.is_switchable() {
+        if !account.is_automatic_target() {
             continue;
         }
         let Some(headroom) = account.headroom() else {
@@ -2190,18 +2186,45 @@ mod tests {
     }
 
     #[test]
-    fn next_available_does_not_skip_unknown_usage_but_does_skip_known_exhaustion() {
+    fn next_available_requires_fresh_known_positive_headroom() {
         let accounts = vec![
             switchable_account(1, Some(100.0)), // known-exhausted: skip
-            switchable_account(2, None),        // unknown: must NOT be auto-skipped
+            switchable_account(2, None),        // unknown: untrusted for automation
             switchable_account(3, Some(10.0)),
         ];
         assert_eq!(
             pick_target(&accounts, Strategy::NextAvailable)
                 .unwrap()
                 .number,
-            2
+            3
         );
+    }
+
+    #[test]
+    fn every_strategy_excludes_non_ok_automatic_targets() {
+        for strategy in [
+            Strategy::MostHeadroom,
+            Strategy::NextAvailable,
+            Strategy::ConsumeFirst,
+        ] {
+            for status in [
+                UsageStatus::Stale,
+                UsageStatus::Unknown,
+                UsageStatus::Unavailable,
+                UsageStatus::Error,
+                UsageStatus::ReloginRequired,
+                UsageStatus::Disabled,
+            ] {
+                let mut untrusted = switchable_account(1, Some(0.0));
+                untrusted.usage_status = status;
+                let healthy = switchable_account(2, Some(20.0));
+                assert_eq!(
+                    pick_target(&[untrusted, healthy], strategy).unwrap().number,
+                    2,
+                    "status {status:?} must not be selected by {strategy:?}"
+                );
+            }
+        }
     }
 
     #[test]
