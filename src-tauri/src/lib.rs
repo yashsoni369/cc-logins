@@ -27,6 +27,7 @@ pub mod recovery_store;
 pub mod resilience;
 pub mod runtime;
 pub mod settings;
+pub mod switch_journal;
 pub mod switcher;
 pub mod tray;
 pub mod wsl;
