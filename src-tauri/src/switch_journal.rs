@@ -218,6 +218,18 @@ impl JournalStore {
         Ok(())
     }
 
+    /// Durably replace metadata without changing phase. Used after staging
+    /// regular-file outputs and protecting the outgoing generation, while
+    /// the transaction is still in `Prepared`.
+    pub fn rewrite_current(&self, journal: &SwitchJournal) -> Result<(), JournalError> {
+        let current = self.load()?.ok_or(JournalError::TransactionMismatch)?;
+        if current.transaction_id != journal.transaction_id || current.phase != journal.phase {
+            return Err(JournalError::TransactionMismatch);
+        }
+        validate(journal)?;
+        self.write(journal)
+    }
+
     pub fn remove(&self, transaction_id: &str) -> Result<(), JournalError> {
         if let Some(current) = self.load()? {
             if current.transaction_id != transaction_id {
@@ -358,6 +370,24 @@ mod tests {
         assert!(store.path().exists());
         store.remove("tx-1").unwrap();
         assert!(!store.path().exists());
+    }
+
+    #[test]
+    fn same_phase_metadata_rewrite_requires_matching_transaction_and_phase() {
+        let root = tempfile::tempdir().unwrap();
+        let (mut journal, _) = fixture(root.path());
+        let store = JournalStore::new(root.path());
+        store.prepare(&journal).unwrap();
+        journal.active_credential.staged_relative_path = Some(PathBuf::from("active.stage"));
+        store.rewrite_current(&journal).unwrap();
+        assert_eq!(store.load().unwrap().unwrap(), journal);
+
+        let mut wrong = journal.clone();
+        wrong.transaction_id = "tx-other".to_string();
+        assert!(matches!(
+            store.rewrite_current(&wrong),
+            Err(JournalError::TransactionMismatch)
+        ));
     }
 
     #[cfg(windows)]

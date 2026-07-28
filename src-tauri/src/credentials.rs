@@ -225,10 +225,6 @@ pub struct ActiveCredentials {
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase", tag = "presence", content = "value")]
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "consumed by the pending switch transaction slice")
-)]
 pub(crate) enum EntryState<T> {
     Absent,
     Present(T),
@@ -236,10 +232,6 @@ pub(crate) enum EntryState<T> {
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "consumed by the pending switch transaction slice")
-)]
 pub(crate) struct ActiveCredentialState {
     pub credentials_file: EntryState<Vec<u8>>,
     pub oauth_keychain: EntryState<String>,
@@ -920,10 +912,6 @@ mod macos_keychain {
 
 use macos_keychain::KeychainError;
 
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "consumed by the pending switch transaction slice")
-)]
 fn restore_keychain_entry(
     service: &str,
     account: &str,
@@ -1178,10 +1166,6 @@ impl<H: StoreHost> CredentialStore<H> {
     /// Snapshot exact presence and bytes for every active credential backend.
     /// Unlike [`Self::read_active_credentials`], this never normalizes absent
     /// and empty values or falls through between backends.
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "consumed by the pending switch transaction slice")
-    )]
     pub(crate) fn snapshot_active_state(
         &mut self,
     ) -> Result<ActiveCredentialState, CredentialError> {
@@ -1214,10 +1198,6 @@ impl<H: StoreHost> CredentialStore<H> {
 
     /// Restore every backend exactly, including absence. A failure is
     /// propagated so journal recovery can retain its artifacts and retry.
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "consumed by the pending switch transaction slice")
-    )]
     pub(crate) fn restore_active_state(
         &mut self,
         state: &ActiveCredentialState,
@@ -1257,10 +1237,6 @@ impl<H: StoreHost> CredentialStore<H> {
         Ok(())
     }
 
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "consumed by the pending switch transaction slice")
-    )]
     pub(crate) fn verify_active_state(
         &mut self,
         expected: &ActiveCredentialState,

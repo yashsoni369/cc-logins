@@ -101,6 +101,9 @@ impl From<SwitchError> for IpcError {
             SwitchError::Locking(_) | SwitchError::LiveStateLock(_) => {
                 IpcError::Busy(e.to_string())
             }
+            SwitchError::Transaction(
+                crate::switch_transaction::TransactionError::RecoveryRequired,
+            ) => IpcError::Busy(e.to_string()),
             SwitchError::TargetGenerationChanged(_) => IpcError::Busy(e.to_string()),
             SwitchError::Refresh(crate::oauth_refresh::RefreshCoordinatorError::Lease(_)) => {
                 IpcError::Busy(e.to_string())
@@ -117,6 +120,11 @@ impl From<SwitchError> for IpcError {
             // from a business-rule refusal below, where the store is fine
             // and the requested mutation just isn't valid right now.
             SwitchError::Credential(_)
+            | SwitchError::Transaction(
+                crate::switch_transaction::TransactionError::Credential(_)
+                | crate::switch_transaction::TransactionError::CredentialRead
+                | crate::switch_transaction::TransactionError::EmptyActiveCredential,
+            )
             | SwitchError::CredentialRead
             | SwitchError::NoStoredCredentials(_)
             | SwitchError::NoStoredConfig(_)
@@ -141,6 +149,7 @@ impl From<SwitchError> for IpcError {
             // the UI still gets the full, specific message via `e.to_string()`.
             SwitchError::UnknownAccount(_)
             | SwitchError::InvalidToken(_)
+            | SwitchError::Transaction(_)
             | SwitchError::Io(_)
             | SwitchError::Json(_) => IpcError::Internal(e.to_string()),
         }

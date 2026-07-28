@@ -105,8 +105,7 @@ use std::time::Duration;
 use serde_json::{Map, Value};
 
 use crate::credentials::{
-    self, merge_shared_credential_fields, shared_credential_fields, CredentialError,
-    CredentialStore, Platform as CredPlatform, StoreHost,
+    self, CredentialError, CredentialStore, Platform as CredPlatform, StoreHost,
 };
 use crate::model::{
     Account, EnvKind, EnvStatus, Environment, Snapshot, Usage, UsageStatus, UsageWindow,
@@ -206,6 +205,9 @@ pub enum SwitchError {
 
     #[error(transparent)]
     LiveStateLock(#[from] crate::switch_transaction::LiveStateLockError),
+
+    #[error(transparent)]
+    Transaction(#[from] crate::switch_transaction::TransactionError),
 
     #[error(transparent)]
     Credential(#[from] CredentialError),
@@ -895,7 +897,7 @@ fn switch_to_validated_with_timeout(
     // needs the complete cross-process lock set.
     let _locks = crate::switch_transaction::acquire_live_state_locks(timeout)?;
 
-    let mut data = read_sequence_data().ok_or(SwitchError::NoAccountsManaged)?;
+    let data = read_sequence_data().ok_or(SwitchError::NoAccountsManaged)?;
 
     // Source of truth for the target's email is the registry, not whatever
     // the caller's (possibly stale) `Account` says.
@@ -940,20 +942,9 @@ fn switch_to_validated_with_timeout(
         .cloned()
         .ok_or_else(|| SwitchError::InvalidBackupConfig(num.clone()))?;
 
-    let active = store.read_active_credentials();
-    let original_creds = active.value.ok_or(SwitchError::CredentialRead)?;
-
     let current_num = current_account_number(&data);
-
-    // Step 2: back up the outgoing login BEFORE anything about the target is
-    // written (rule 3).
-    match &current_num {
+    let outgoing = match &current_num {
         Some(cur_num) => {
-            if original_creds.is_empty() {
-                // An empty read (e.g. a settling Keychain) must never be
-                // written over the departing account's backup.
-                return Err(SwitchError::EmptyActiveCredential(cur_num.clone()));
-            }
             let cur_email = data
                 .get("accounts")
                 .and_then(Value::as_object)
@@ -962,48 +953,33 @@ fn switch_to_validated_with_timeout(
                 .and_then(Value::as_str)
                 .unwrap_or_default()
                 .to_string();
-
-            let config_text = std::fs::read_to_string(paths::global_config_path())?;
-
-            store.write_account_credentials(cur_num, &cur_email, &original_creds)?;
-            write_account_config(cur_num, &cur_email, &config_text)?;
-        }
-        None => {
-            if !original_creds.is_empty() {
-                // Live credential with no resolvable managed slot (fresh
-                // machine, or a login that drifted out from under cswap's
-                // records). Preserve it rather than silently overwrite it.
-                let mut context = Map::new();
-                context.insert(
-                    "reason".to_string(),
-                    Value::String("displaced-live-login".to_string()),
-                );
-                store
-                    .write_unclaimed_credential(&original_creds, context)
-                    .map_err(|e| SwitchError::Stash(e.to_string()))?;
+            crate::switch_transaction::OutgoingDestination::Managed {
+                number: cur_num.clone(),
+                email: cur_email.clone(),
+                config_backup_path: account_config_path(cur_num, &cur_email),
             }
         }
-    }
+        None => crate::switch_transaction::OutgoingDestination::Unclaimed,
+    };
 
-    // Step 4: install. Compose the target's stored login with the machine's
-    // live shared OAuth fields (mcpOAuth, pluginSecrets, ...) so activation
-    // doesn't regress those to the target's last-seen generation.
-    let shared = shared_credential_fields(Some(&original_creds)).unwrap_or_default();
-    let prepared = merge_shared_credential_fields(&validated.credentials, &shared);
-    store.write_credentials(&prepared)?;
-    write_oauth_account(&target_oauth)?;
-
-    // Step 5: record the new active slot.
-    data.insert(
-        "activeAccountNumber".to_string(),
-        Value::from(target.number),
-    );
-    data.insert(
-        "lastUpdated".to_string(),
-        Value::String(chrono::Utc::now().to_rfc3339()),
-    );
-    write_sequence_data(&data)?;
-
+    crate::switch_transaction::execute_locked(
+        &mut store,
+        crate::switch_transaction::SwitchPlan {
+            target: crate::switch_journal::JournalTarget {
+                number: num,
+                email,
+                stable_key: target_account.stable_key(),
+                credential_generation: validated.generation.clone(),
+            },
+            target_credentials: validated.credentials.clone(),
+            target_oauth,
+            sequence: data,
+            sequence_path: accounts_file(),
+            global_config_path: paths::global_config_path(),
+            outgoing,
+        },
+        &crate::switch_transaction::NoFaults,
+    )?;
     Ok(())
 }
 
@@ -1020,25 +996,6 @@ fn switch_to_with_timeout(target: &Account, timeout: Duration) -> Result<(), Swi
         generation: stored.generation,
     };
     switch_to_validated_with_timeout(target, &validated, timeout)
-}
-
-/// Splice `oauth_account` into `~/.claude.json`'s `oauthAccount` key,
-/// preserving every other key untouched (rule 6: the path itself comes from
-/// `paths::global_config_path`, never hand-rolled).
-fn write_oauth_account(oauth_account: &Value) -> Result<(), SwitchError> {
-    let path = paths::global_config_path();
-    let mut config: Map<String, Value> = if path.exists() {
-        match serde_json::from_str::<Value>(&std::fs::read_to_string(&path)?)? {
-            Value::Object(map) => map,
-            _ => Map::new(),
-        }
-    } else {
-        Map::new()
-    };
-    config.insert("oauthAccount".to_string(), oauth_account.clone());
-    let body = serde_json::to_string_pretty(&Value::Object(config))?;
-    atomic_write(&path, body.as_bytes())?;
-    Ok(())
 }
 
 // ---------------------------------------------------------------------------
