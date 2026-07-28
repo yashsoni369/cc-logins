@@ -99,7 +99,11 @@ fn detect_windows() -> Option<AmbientTheme> {
     let line = text.lines().find(|l| l.contains("SystemUsesLightTheme"))?;
     let hex = line.split_whitespace().last()?;
     let value = u32::from_str_radix(hex.trim_start_matches("0x"), 16).ok()?;
-    Some(if value != 0 { AmbientTheme::Light } else { AmbientTheme::Dark })
+    Some(if value != 0 {
+        AmbientTheme::Light
+    } else {
+        AmbientTheme::Dark
+    })
 }
 
 /// Quota state. Thresholds match the auto-switch defaults.
@@ -211,7 +215,12 @@ impl IconSpec {
     }
 
     pub fn unconfigured(theme: AmbientTheme) -> Self {
-        Self { utilisation: None, state: State::Unconfigured, spin: 0.0, theme }
+        Self {
+            utilisation: None,
+            state: State::Unconfigured,
+            spin: 0.0,
+            theme,
+        }
     }
 
     /// A cheap identity for the rendered result. The rasteriser is only re-run
@@ -270,7 +279,11 @@ pub fn render(spec: IconSpec, size: u32) -> Vec<u8> {
     let glyphs = glyphs_for(spec);
     if !glyphs.is_empty() {
         // Fit the glyph run to the space left by the ring.
-        let inner = if draw_ring { (size as f32 * 0.60) as u32 } else { size - 2 };
+        let inner = if draw_ring {
+            (size as f32 * 0.60) as u32
+        } else {
+            size - 2
+        };
         let run_w = glyphs.len() as u32 * GLYPH_W + (glyphs.len() as u32 - 1) * GLYPH_GAP;
         let scale = ((inner / run_w.max(1)).min(inner / GLYPH_H)).max(1);
 
@@ -325,8 +338,11 @@ fn draw_arc(pm: &mut Pixmap, spec: IconSpec, size: u32) {
     let cx = s / 2.0;
     let cy = s / 2.0;
 
-    let mut stroke = Stroke::default();
-    stroke.width = stroke_w;
+    // `mut` because `dash` is set per-branch below (stale draws dashed).
+    let mut stroke = Stroke {
+        width: stroke_w,
+        ..Default::default()
+    };
 
     // Track. Stale draws it dashed to signal that the reading is not current.
     if let Some(path) = arc_path(cx, cy, r, 0.0, 1.0) {
@@ -347,7 +363,10 @@ fn draw_arc(pm: &mut Pixmap, spec: IconSpec, size: u32) {
     let (start, sweep) = match spec.state {
         // A fixed 90-degree segment that the caller rotates each frame.
         State::Switching => (spec.spin, 0.25),
-        _ => (0.0, spec.utilisation.unwrap_or(0.0).clamp(0.0, 100.0) / 100.0),
+        _ => (
+            0.0,
+            spec.utilisation.unwrap_or(0.0).clamp(0.0, 100.0) / 100.0,
+        ),
     };
 
     if sweep > 0.001 {
@@ -439,15 +458,27 @@ mod tests {
 
     #[test]
     fn single_digit_utilisation_uses_one_glyph() {
-        assert_eq!(glyphs_for(IconSpec::resting(4.0, AmbientTheme::Dark)).len(), 1);
-        assert_eq!(glyphs_for(IconSpec::resting(13.0, AmbientTheme::Dark)).len(), 2);
+        assert_eq!(
+            glyphs_for(IconSpec::resting(4.0, AmbientTheme::Dark)).len(),
+            1
+        );
+        assert_eq!(
+            glyphs_for(IconSpec::resting(13.0, AmbientTheme::Dark)).len(),
+            2
+        );
         // 100% has to fit two glyphs, so it clamps to 99.
-        assert_eq!(glyphs_for(IconSpec::resting(100.0, AmbientTheme::Dark)).len(), 2);
+        assert_eq!(
+            glyphs_for(IconSpec::resting(100.0, AmbientTheme::Dark)).len(),
+            2
+        );
     }
 
     #[test]
     fn unconfigured_and_switching_use_symbols() {
-        assert_eq!(glyphs_for(IconSpec::unconfigured(AmbientTheme::Dark)), vec![DASH]);
+        assert_eq!(
+            glyphs_for(IconSpec::unconfigured(AmbientTheme::Dark)),
+            vec![DASH]
+        );
         let sw = IconSpec {
             utilisation: Some(50.0),
             state: State::Switching,
@@ -492,7 +523,10 @@ mod tests {
             let (r, g, b) = (ink.red(), ink.green(), ink.blue());
             let spread = [r, g, b].iter().cloned().fold(f32::MIN, f32::max)
                 - [r, g, b].iter().cloned().fold(f32::MAX, f32::min);
-            assert!(spread < 0.05, "{theme:?}: resting ink should be near-neutral, spread was {spread}");
+            assert!(
+                spread < 0.05,
+                "{theme:?}: resting ink should be near-neutral, spread was {spread}"
+            );
         }
     }
 
@@ -502,16 +536,28 @@ mod tests {
         // neutral, not the near-white bone used on a dark taskbar.
         let on_dark_taskbar = State::Ok.ink(AmbientTheme::Dark);
         let on_light_taskbar = State::Ok.ink(AmbientTheme::Light);
-        assert!(luma(on_dark_taskbar) > 0.8, "healthy ink on a dark taskbar should be near-white");
-        assert!(luma(on_light_taskbar) < 0.3, "healthy ink on a light taskbar should be near-black");
+        assert!(
+            luma(on_dark_taskbar) > 0.8,
+            "healthy ink on a dark taskbar should be near-white"
+        );
+        assert!(
+            luma(on_light_taskbar) < 0.3,
+            "healthy ink on a light taskbar should be near-black"
+        );
     }
 
     #[test]
     fn caution_and_critical_are_darkened_for_light_taskbars() {
         // Amber (#E8A53A) and the dark-taskbar red are both weak on white;
         // the light-taskbar variants must be meaningfully darker.
-        assert!(luma(State::Caution.ink(AmbientTheme::Light)) < luma(State::Caution.ink(AmbientTheme::Dark)));
-        assert!(luma(State::Critical.ink(AmbientTheme::Light)) < luma(State::Critical.ink(AmbientTheme::Dark)));
+        assert!(
+            luma(State::Caution.ink(AmbientTheme::Light))
+                < luma(State::Caution.ink(AmbientTheme::Dark))
+        );
+        assert!(
+            luma(State::Critical.ink(AmbientTheme::Light))
+                < luma(State::Critical.ink(AmbientTheme::Dark))
+        );
         // And still legibly lighter than pure black, i.e. not collapsed to ink.
         assert!(luma(State::Caution.ink(AmbientTheme::Light)) > 0.05);
         assert!(luma(State::Critical.ink(AmbientTheme::Light)) > 0.05);
@@ -534,7 +580,10 @@ mod tests {
                         + (a.green() - b.green()).powi(2)
                         + (a.blue() - b.blue()).powi(2))
                     .sqrt();
-                    assert!(dist > 0.08, "{theme:?}: states {i} and {j} are too close ({dist})");
+                    assert!(
+                        dist > 0.08,
+                        "{theme:?}: states {i} and {j} are too close ({dist})"
+                    );
                 }
             }
         }

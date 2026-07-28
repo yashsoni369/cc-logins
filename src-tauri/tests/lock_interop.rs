@@ -177,7 +177,13 @@ struct PyLockHolder {
 }
 
 impl PyLockHolder {
-    fn spawn(python: &Path, script: &Path, lock_path: &Path, mode: &str, timeout_secs: f64) -> Self {
+    fn spawn(
+        python: &Path,
+        script: &Path,
+        lock_path: &Path,
+        mode: &str,
+        timeout_secs: f64,
+    ) -> Self {
         let mut child = Command::new(python)
             .arg(script)
             .arg(lock_path)
@@ -262,7 +268,10 @@ fn self_consistency_second_lock_times_out_then_reacquires_after_drop() {
     let lock_path = dir.path().join(".lock");
 
     let mut first = FileLock::new(&lock_path);
-    assert!(first.acquire().unwrap(), "first acquire must succeed uncontended");
+    assert!(
+        first.acquire().unwrap(),
+        "first acquire must succeed uncontended"
+    );
 
     // A second FileLock over the same path must NOT succeed while the first
     // is held, and must fail via a clean, bounded timeout rather than hang.
@@ -270,8 +279,14 @@ fn self_consistency_second_lock_times_out_then_reacquires_after_drop() {
     let start = Instant::now();
     let acquired = second.acquire().unwrap();
     let elapsed = start.elapsed();
-    assert!(!acquired, "a held lock must exclude a second in-process FileLock on the same path");
-    assert!(elapsed < Duration::from_secs(5), "must fail via timeout, not hang (took {elapsed:?})");
+    assert!(
+        !acquired,
+        "a held lock must exclude a second in-process FileLock on the same path"
+    );
+    assert!(
+        elapsed < Duration::from_secs(5),
+        "must fail via timeout, not hang (took {elapsed:?})"
+    );
 
     // acquire_or_err must surface this as LockingError::Timeout.
     let err = acquire_or_err(&lock_path, Duration::from_millis(200)).unwrap_err();
@@ -282,7 +297,10 @@ fn self_consistency_second_lock_times_out_then_reacquires_after_drop() {
 
     // ...so a fresh acquire immediately succeeds.
     let mut third = FileLock::with_timeout(&lock_path, Duration::from_millis(300));
-    assert!(third.acquire().unwrap(), "lock must be re-acquirable once the holder drops");
+    assert!(
+        third.acquire().unwrap(),
+        "lock must be re-acquirable once the holder drops"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -309,7 +327,10 @@ fn cross_process_python_holds_then_our_lock_is_excluded_then_succeeds_after_rele
     let status = holder
         .read_line(Duration::from_secs(10))
         .expect("python helper must print a status line promptly");
-    assert_eq!(status, "ACQUIRED", "the real claude_swap.locking.FileLock must acquire uncontended");
+    assert_eq!(
+        status, "ACQUIRED",
+        "the real claude_swap.locking.FileLock must acquire uncontended"
+    );
 
     // Direction A + timeout behaviour: our lock must be excluded by the
     // Python holder, failing at approximately the configured timeout — not
@@ -336,13 +357,20 @@ fn cross_process_python_holds_then_our_lock_is_excluded_then_succeeds_after_rele
     // Release the Python side...
     holder.send_line("release");
     let released = holder.read_line(Duration::from_secs(10));
-    assert_eq!(released.as_deref(), Some("RELEASED"), "python must confirm it released the lock");
+    assert_eq!(
+        released.as_deref(),
+        Some("RELEASED"),
+        "python must confirm it released the lock"
+    );
 
     // ...and now our lock must acquire cleanly: this is the proof that both
     // sides agree on exactly which byte, at which offset, of which file is
     // locked — a one-directional test alone could not catch a mismatch here.
     let mut ours2 = FileLock::with_timeout(&lock_path, Duration::from_secs(5));
-    assert!(ours2.acquire().unwrap(), "our lock must succeed once the python holder releases");
+    assert!(
+        ours2.acquire().unwrap(),
+        "our lock must succeed once the python holder releases"
+    );
 }
 
 #[test]
@@ -383,7 +411,10 @@ fn cross_process_our_lock_excludes_python_then_python_succeeds_after_we_release(
     let status2 = holder2
         .read_line(Duration::from_secs(10))
         .expect("python helper must print a status line promptly");
-    assert_eq!(status2, "ACQUIRED", "python must acquire once our lock releases");
+    assert_eq!(
+        status2, "ACQUIRED",
+        "python must acquire once our lock releases"
+    );
     holder2.send_line("release");
     let released2 = holder2.read_line(Duration::from_secs(10));
     assert_eq!(released2.as_deref(), Some("RELEASED"));
@@ -412,7 +443,10 @@ fn crash_safety_os_releases_lock_when_holder_is_killed_without_releasing() {
     let status = holder
         .read_line(Duration::from_secs(10))
         .expect("python helper must print a status line promptly");
-    assert_eq!(status, "ACQUIRED", "python must actually hold the lock before we simulate its crash");
+    assert_eq!(
+        status, "ACQUIRED",
+        "python must actually hold the lock before we simulate its crash"
+    );
 
     // Simulate a crash: forcibly terminate the process (TerminateProcess on
     // Windows, SIGKILL on POSIX via std::process::Child::kill) so it gets NO
@@ -420,7 +454,10 @@ fn crash_safety_os_releases_lock_when_holder_is_killed_without_releasing() {
     // cooperative cleanup. If our lock only worked because cswap always
     // releases cleanly, this is exactly the scenario that would wedge this
     // app permanently.
-    holder.child.kill().expect("terminate python holder to simulate a crash");
+    holder
+        .child
+        .kill()
+        .expect("terminate python holder to simulate a crash");
     holder.child.wait().expect("reap the killed child");
 
     // The OS — not the process — owns releasing msvcrt.locking / flock locks
@@ -431,7 +468,10 @@ fn crash_safety_os_releases_lock_when_holder_is_killed_without_releasing() {
     let mut lock = FileLock::with_timeout(&lock_path, Duration::from_secs(5));
     let acquired = lock.acquire().unwrap();
     let elapsed = start.elapsed();
-    assert!(acquired, "lock must be acquirable once the holder crashes without releasing");
+    assert!(
+        acquired,
+        "lock must be acquirable once the holder crashes without releasing"
+    );
     assert!(
         elapsed < Duration::from_secs(2),
         "acquire should succeed promptly once the OS drops the crashed holder's lock, \

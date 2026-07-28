@@ -204,7 +204,10 @@ pub fn load(dir: &Path) -> Settings {
         Ok(text) => match serde_json::from_str::<Settings>(&text) {
             Ok(s) => s.sanitised(),
             Err(e) => {
-                log::warn!("settings at {} are unreadable ({e}); using defaults", path.display());
+                log::warn!(
+                    "settings at {} are unreadable ({e}); using defaults",
+                    path.display()
+                );
                 Settings::default()
             }
         },
@@ -274,29 +277,43 @@ mod tests {
 
     #[test]
     fn a_sub_floor_interval_is_clamped_up_to_the_measured_floor() {
-        let s = Settings { interval_seconds: 30, ..Default::default() }.sanitised();
+        let s = Settings {
+            interval_seconds: 30,
+            ..Default::default()
+        }
+        .sanitised();
         assert_eq!(s.interval_seconds, 180);
     }
 
     #[test]
     fn the_floor_itself_is_accepted_unchanged() {
-        let s = Settings { interval_seconds: 180, ..Default::default() }.sanitised();
+        let s = Settings {
+            interval_seconds: 180,
+            ..Default::default()
+        }
+        .sanitised();
         assert_eq!(s.interval_seconds, 180);
     }
 
     #[test]
     fn an_interval_above_the_ceiling_is_clamped_down_to_it() {
-        let s = Settings { interval_seconds: 999_999, ..Default::default() }.sanitised();
+        let s = Settings {
+            interval_seconds: 999_999,
+            ..Default::default()
+        }
+        .sanitised();
         assert_eq!(s.interval_seconds, 3600);
     }
 
     #[test]
     fn round_trips_through_disk() {
         let dir = tempfile::tempdir().unwrap();
-        let mut s = Settings::default();
-        s.auto_switch_enabled = true;
-        s.threshold = 85;
-        s.strategy = Strategy::ConsumeFirst;
+        let s = Settings {
+            auto_switch_enabled: true,
+            threshold: 85,
+            strategy: Strategy::ConsumeFirst,
+            ..Default::default()
+        };
 
         save(dir.path(), &s).unwrap();
         assert_eq!(load(dir.path()), s);

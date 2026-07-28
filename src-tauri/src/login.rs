@@ -279,9 +279,19 @@ fn linux_launch_plan(terminal: &str, config_dir: &Path) -> LaunchPlan {
         shell_quote_single(&config_dir.display().to_string())
     );
     let args = if terminal == "gnome-terminal" {
-        vec!["--".to_string(), "bash".to_string(), "-c".to_string(), shell_cmd]
+        vec![
+            "--".to_string(),
+            "bash".to_string(),
+            "-c".to_string(),
+            shell_cmd,
+        ]
     } else {
-        vec!["-e".to_string(), "bash".to_string(), "-c".to_string(), shell_cmd]
+        vec![
+            "-e".to_string(),
+            "bash".to_string(),
+            "-c".to_string(),
+            shell_cmd,
+        ]
     };
     LaunchPlan::Argv {
         program: terminal.to_string(),
@@ -587,13 +597,18 @@ pub async fn interactive_login() -> Result<LoginOutcome, LoginError> {
     let credentials = match poll_result {
         Ok(Ok(creds)) => creds,
         Ok(Err(e)) => {
-            log::info!("interactive login did not complete: {}", login_outcome_kind(&e));
+            log::info!(
+                "interactive login did not complete: {}",
+                login_outcome_kind(&e)
+            );
             return Err(e);
             // `temp_dir` drops here, deleting the temp config dir.
         }
         Err(_join_err) => {
             log::warn!("interactive login worker task did not finish cleanly");
-            return Err(LoginError::Io(io::Error::other("login worker task did not finish cleanly")));
+            return Err(LoginError::Io(io::Error::other(
+                "login worker task did not finish cleanly",
+            )));
             // `temp_dir` drops here too.
         }
     };
@@ -667,7 +682,9 @@ mod tests {
         let line = windows_command_line(dir);
         // The whole `VAR=value` assignment is quoted (not just the value),
         // so the quote characters never become part of the stored value.
-        assert!(line.contains("set \"CLAUDE_CONFIG_DIR=C:\\Users\\Jane Doe\\AppData\\Local\\Temp\\claude-login-xyz\""));
+        assert!(line.contains(
+            "set \"CLAUDE_CONFIG_DIR=C:\\Users\\Jane Doe\\AppData\\Local\\Temp\\claude-login-xyz\""
+        ));
     }
 
     #[test]
@@ -972,8 +989,14 @@ mod tests {
     fn login_error_kind_labels_are_content_free() {
         // Sanity check that the log-line labels never echo file contents —
         // each must be a fixed string, not derived from any credential body.
-        assert_eq!(login_outcome_kind(&LoginError::ClaudeNotInstalled), "claude-not-installed");
-        assert_eq!(login_outcome_kind(&LoginError::NoTerminalAvailable), "no-terminal-available");
+        assert_eq!(
+            login_outcome_kind(&LoginError::ClaudeNotInstalled),
+            "claude-not-installed"
+        );
+        assert_eq!(
+            login_outcome_kind(&LoginError::NoTerminalAvailable),
+            "no-terminal-available"
+        );
         assert_eq!(login_outcome_kind(&LoginError::Cancelled), "cancelled");
         assert_eq!(login_outcome_kind(&LoginError::TimedOut), "timed-out");
         assert_eq!(

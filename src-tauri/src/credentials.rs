@@ -293,7 +293,8 @@ pub fn merge_shared_credential_fields(
     }
     // Re-serializing a Map<String, Value> built entirely from previously
     // parsed JSON cannot fail; the fallback is defensive only.
-    serde_json::to_string(&Value::Object(composed)).unwrap_or_else(|_| target_credentials.to_string())
+    serde_json::to_string(&Value::Object(composed))
+        .unwrap_or_else(|_| target_credentials.to_string())
 }
 
 /// The value Claude Code stores in `customApiKeyResponses.approved`.
@@ -545,10 +546,7 @@ mod dpapi {
         // `LocalAlloc` under the hood) that must be released with `LocalFree`
         // — done immediately after copying it into a Rust `Vec` so no raw
         // pointer escapes this function.
-        fn call(
-            data: &[u8],
-            protect: bool,
-        ) -> Result<Vec<u8>, DpapiError> {
+        fn call(data: &[u8], protect: bool) -> Result<Vec<u8>, DpapiError> {
             let input = CRYPT_INTEGER_BLOB {
                 cbData: data.len() as u32,
                 pbData: data.as_ptr() as *mut u8,
@@ -584,13 +582,18 @@ mod dpapi {
                 let err = std::io::Error::last_os_error();
                 return Err(DpapiError(format!(
                     "{} failed: {err}",
-                    if protect { "CryptProtectData" } else { "CryptUnprotectData" }
+                    if protect {
+                        "CryptProtectData"
+                    } else {
+                        "CryptUnprotectData"
+                    }
                 )));
             }
             // SAFETY: `ok != 0` guarantees the API populated `output` with a
             // valid `pbData`/`cbData` pair before returning.
             let bytes =
-                unsafe { std::slice::from_raw_parts(output.pbData, output.cbData as usize) }.to_vec();
+                unsafe { std::slice::from_raw_parts(output.pbData, output.cbData as usize) }
+                    .to_vec();
             // SAFETY: `output.pbData` is the OS allocation from the successful
             // call above, never freed elsewhere, and not used again after
             // this point.
@@ -712,8 +715,10 @@ fn unwrap_dpapi(ciphertext: &[u8]) -> Result<Vec<u8>, String> {
 
 #[cfg(not(windows))]
 fn unwrap_dpapi(_ciphertext: &[u8]) -> Result<Vec<u8>, String> {
-    Err("this credential was DPAPI-protected on Windows and cannot be decoded on this platform"
-        .to_string())
+    Err(
+        "this credential was DPAPI-protected on Windows and cannot be decoded on this platform"
+            .to_string(),
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -815,7 +820,11 @@ mod macos_keychain {
             }
         }
 
-        pub fn set_password(service: &str, account: &str, password: &str) -> Result<(), KeychainError> {
+        pub fn set_password(
+            service: &str,
+            account: &str,
+            password: &str,
+        ) -> Result<(), KeychainError> {
             set_generic_password(service, account, password.as_bytes()).map_err(|e| {
                 KeychainError(format!(
                     "keychain add-generic-password failed for {service}/{account}: {e}"
@@ -842,10 +851,17 @@ mod macos_keychain {
             KeychainError("the Keychain is only available on macOS".to_string())
         }
 
-        pub fn get_password(_service: &str, _account: &str) -> Result<Option<String>, KeychainError> {
+        pub fn get_password(
+            _service: &str,
+            _account: &str,
+        ) -> Result<Option<String>, KeychainError> {
             Err(unsupported())
         }
-        pub fn set_password(_service: &str, _account: &str, _password: &str) -> Result<(), KeychainError> {
+        pub fn set_password(
+            _service: &str,
+            _account: &str,
+            _password: &str,
+        ) -> Result<(), KeychainError> {
             Err(unsupported())
         }
         pub fn delete_password(_service: &str, _account: &str) -> Result<(), KeychainError> {
@@ -991,7 +1007,9 @@ impl<H: StoreHost> CredentialStore<H> {
         let mut last_error: Option<KeychainError> = None;
         for attempt in 0..ACTIVE_READ_ATTEMPTS {
             let account = macos_keychain::keychain_account_name();
-            match self.kc_call(|| macos_keychain::get_password(CLAUDE_CODE_KEYCHAIN_SERVICE, &account)) {
+            match self
+                .kc_call(|| macos_keychain::get_password(CLAUDE_CODE_KEYCHAIN_SERVICE, &account))
+            {
                 Ok(value) => return (value, false),
                 Err(e) => {
                     last_error = Some(e);
@@ -1082,9 +1100,9 @@ impl<H: StoreHost> CredentialStore<H> {
     fn read_managed_key(&mut self) -> String {
         if self.use_keychain() {
             let account = macos_keychain::keychain_account_name();
-            let val = match self
-                .kc_call(|| macos_keychain::get_password(CLAUDE_CODE_MANAGED_KEYCHAIN_SERVICE, &account))
-            {
+            let val = match self.kc_call(|| {
+                macos_keychain::get_password(CLAUDE_CODE_MANAGED_KEYCHAIN_SERVICE, &account)
+            }) {
                 Ok(v) => v,
                 Err(e) => {
                     log::warn!("Managed-key Keychain read failed: {e}");
@@ -1200,17 +1218,26 @@ impl<H: StoreHost> CredentialStore<H> {
         if self.use_keychain() {
             let account = macos_keychain::keychain_account_name();
             match self.kc_call(|| {
-                macos_keychain::set_password(CLAUDE_CODE_MANAGED_KEYCHAIN_SERVICE, &account, api_key)
+                macos_keychain::set_password(
+                    CLAUDE_CODE_MANAGED_KEYCHAIN_SERVICE,
+                    &account,
+                    api_key,
+                )
             }) {
                 Ok(()) => wrote_to_keychain = true,
-                Err(e) => log::warn!("Managed-key Keychain write failed, falling back to config: {e}"),
+                Err(e) => {
+                    log::warn!("Managed-key Keychain write failed, falling back to config: {e}")
+                }
             }
         }
 
         let approved = approved_form(api_key);
         let mutate = |cfg: &mut Map<String, Value>| {
             if !matches!(cfg.get("customApiKeyResponses"), Some(Value::Object(_))) {
-                cfg.insert("customApiKeyResponses".to_string(), Value::Object(Map::new()));
+                cfg.insert(
+                    "customApiKeyResponses".to_string(),
+                    Value::Object(Map::new()),
+                );
             }
             let responses = cfg
                 .get_mut("customApiKeyResponses")
@@ -1238,7 +1265,10 @@ impl<H: StoreHost> CredentialStore<H> {
                 // Keychain holds the key; keep it out of plaintext config.
                 cfg.remove("primaryApiKey");
             } else {
-                cfg.insert("primaryApiKey".to_string(), Value::String(api_key.to_string()));
+                cfg.insert(
+                    "primaryApiKey".to_string(),
+                    Value::String(api_key.to_string()),
+                );
             }
         };
 
@@ -1305,7 +1335,9 @@ impl<H: StoreHost> CredentialStore<H> {
     fn write_oauth_credentials(&mut self, credentials: &str) -> Result<(), CredentialError> {
         if self.use_keychain() {
             let account = macos_keychain::keychain_account_name();
-            match self.kc_call(|| macos_keychain::set_password(CLAUDE_CODE_KEYCHAIN_SERVICE, &account, credentials)) {
+            match self.kc_call(|| {
+                macos_keychain::set_password(CLAUDE_CODE_KEYCHAIN_SERVICE, &account, credentials)
+            }) {
                 Ok(()) => {
                     self.refresh_stale_credentials_file(credentials);
                     self.last_active_credentials_backend = Some(Backend::Keychain);
@@ -1393,7 +1425,11 @@ impl<H: StoreHost> CredentialStore<H> {
         self.kc_call(|| macos_keychain::delete_password(SECURITY_SERVICE, &account))
     }
 
-    fn kc_delete_backup_prev(&mut self, account_num: &str, email: &str) -> Result<(), KeychainError> {
+    fn kc_delete_backup_prev(
+        &mut self,
+        account_num: &str,
+        email: &str,
+    ) -> Result<(), KeychainError> {
         let account = self.prev_backup_username(account_num, email);
         self.kc_call(|| macos_keychain::delete_password(SECURITY_SERVICE, &account))
     }
@@ -1405,7 +1441,12 @@ impl<H: StoreHost> CredentialStore<H> {
     }
 
     /// Atomically write a per-account backup `.enc` (versioned envelope) file.
-    fn write_backup_enc(&self, account_num: &str, email: &str, credentials: &str) -> io::Result<()> {
+    fn write_backup_enc(
+        &self,
+        account_num: &str,
+        email: &str,
+        credentials: &str,
+    ) -> io::Result<()> {
         self.atomic_envelope_write(&self.backup_enc_path(account_num, email), credentials)
     }
 
@@ -1654,10 +1695,13 @@ impl<H: StoreHost> CredentialStore<H> {
                 .map_err(|e| e.to_string())
         } else {
             let path = self.prev_backup_path(account_num, email);
-            self.atomic_envelope_write(&path, &current).map_err(|e| e.to_string())
+            self.atomic_envelope_write(&path, &current)
+                .map_err(|e| e.to_string())
         };
         if let Err(e) = result {
-            log::warn!("Failed to retain previous credential generation for account {account_num}: {e}");
+            log::warn!(
+                "Failed to retain previous credential generation for account {account_num}: {e}"
+            );
         }
     }
 
@@ -1749,13 +1793,18 @@ impl<H: StoreHost> CredentialStore<H> {
                     .unwrap_or(0);
                 let aside_name = format!(
                     "{}.corrupt-{ts}",
-                    path.file_name().and_then(|n| n.to_str()).unwrap_or("manifest")
+                    path.file_name()
+                        .and_then(|n| n.to_str())
+                        .unwrap_or("manifest")
                 );
                 let aside = path.with_file_name(aside_name);
                 match std::fs::rename(&path, &aside) {
                     Ok(()) => log::warn!(
                         "Unreadable unclaimed manifest preserved as {}",
-                        aside.file_name().and_then(|n| n.to_str()).unwrap_or_default()
+                        aside
+                            .file_name()
+                            .and_then(|n| n.to_str())
+                            .unwrap_or_default()
                     ),
                     Err(e) => log::warn!("Could not preserve corrupt unclaimed manifest: {e}"),
                 }
@@ -1933,7 +1982,14 @@ mod tests {
     #[test]
     fn approved_form_takes_last_20_chars() {
         let key = "sk-ant-api03-0123456789abcdefghijklmnop";
-        let expected: String = key.chars().rev().take(20).collect::<Vec<_>>().into_iter().rev().collect();
+        let expected: String = key
+            .chars()
+            .rev()
+            .take(20)
+            .collect::<Vec<_>>()
+            .into_iter()
+            .rev()
+            .collect();
         assert_eq!(approved_form(key), expected);
         assert_eq!(approved_form(key).chars().count(), 20);
         // Shorter-than-20 keys pass through whole, just trimmed.
@@ -1995,14 +2051,21 @@ mod tests {
     fn read_account_credentials_missing_is_empty_string() {
         let dir = tempfile::tempdir().unwrap();
         let mut store = file_backed_store(dir.path());
-        assert_eq!(store.read_account_credentials("7", "nobody@example.com"), "");
+        assert_eq!(
+            store.read_account_credentials("7", "nobody@example.com"),
+            ""
+        );
     }
 
     #[test]
     fn corrupt_enc_file_is_treated_as_missing_not_crash() {
         let dir = tempfile::tempdir().unwrap();
         let mut store = file_backed_store(dir.path());
-        std::fs::write(dir.path().join(".creds-1-x@example.com.enc"), "!!!not-base64!!!").unwrap();
+        std::fs::write(
+            dir.path().join(".creds-1-x@example.com.enc"),
+            "!!!not-base64!!!",
+        )
+        .unwrap();
         assert_eq!(store.read_account_credentials("1", "x@example.com"), "");
     }
 
@@ -2050,7 +2113,9 @@ mod tests {
         // A legacy raw-base64 blob never happens to parse as a JSON object;
         // the new envelope always does. That structural difference is the
         // entire detection mechanism — no separate file marker is needed.
-        assert!(serde_json::from_str::<Value>(&wrapped_text).unwrap().is_object());
+        assert!(serde_json::from_str::<Value>(&wrapped_text)
+            .unwrap()
+            .is_object());
         let legacy = BASE64_STANDARD.encode(b"distinguish-me");
         assert!(serde_json::from_str::<Value>(&legacy).is_err());
     }
@@ -2175,10 +2240,17 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let mut store = file_backed_store(dir.path());
 
-        store.write_account_credentials("1", "a@example.com", "gen-one").unwrap();
-        store.write_account_credentials("1", "a@example.com", "gen-two").unwrap();
+        store
+            .write_account_credentials("1", "a@example.com", "gen-one")
+            .unwrap();
+        store
+            .write_account_credentials("1", "a@example.com", "gen-two")
+            .unwrap();
 
-        assert_eq!(store.read_account_credentials("1", "a@example.com"), "gen-two");
+        assert_eq!(
+            store.read_account_credentials("1", "a@example.com"),
+            "gen-two"
+        );
         assert_eq!(store.read_previous_backup("1", "a@example.com"), "gen-one");
     }
 
@@ -2187,10 +2259,16 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let mut store = file_backed_store(dir.path());
 
-        store.write_account_credentials("1", "a@example.com", "gen-one").unwrap();
-        store.write_account_credentials("1", "a@example.com", "gen-two").unwrap();
+        store
+            .write_account_credentials("1", "a@example.com", "gen-one")
+            .unwrap();
+        store
+            .write_account_credentials("1", "a@example.com", "gen-two")
+            .unwrap();
         // Writing the same value again must not overwrite .prev with gen-two.
-        store.write_account_credentials("1", "a@example.com", "gen-two").unwrap();
+        store
+            .write_account_credentials("1", "a@example.com", "gen-two")
+            .unwrap();
 
         assert_eq!(store.read_previous_backup("1", "a@example.com"), "gen-one");
     }
@@ -2200,8 +2278,12 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let mut store = file_backed_store(dir.path());
 
-        store.write_account_credentials("1", "a@example.com", "gen-one").unwrap();
-        store.write_account_credentials("1", "a@example.com", "gen-two").unwrap();
+        store
+            .write_account_credentials("1", "a@example.com", "gen-one")
+            .unwrap();
+        store
+            .write_account_credentials("1", "a@example.com", "gen-two")
+            .unwrap();
         assert!(!store.read_previous_backup("1", "a@example.com").is_empty());
 
         store
@@ -2228,7 +2310,10 @@ mod tests {
         let mut store = file_backed_store(dir.path());
 
         let mut context = Map::new();
-        context.insert("reason".to_string(), Value::String("provenance-mismatch".to_string()));
+        context.insert(
+            "reason".to_string(),
+            Value::String("provenance-mismatch".to_string()),
+        );
 
         let entry_id = store
             .write_unclaimed_credential("mystery-token", context)
@@ -2281,7 +2366,10 @@ mod tests {
         fn set(dir: &Path) -> Self {
             let lock = env_lock();
             let env = EnvGuard::set("CLAUDE_CONFIG_DIR", dir.to_str().expect("utf8 temp path"));
-            Self { _env: env, _lock: lock }
+            Self {
+                _env: env,
+                _lock: lock,
+            }
         }
     }
 
@@ -2291,7 +2379,9 @@ mod tests {
         let _env = EnvVarScope::set(dir.path());
 
         let mut store = file_backed_store(dir.path());
-        store.write_credentials(r#"{"claudeAiOauth": {"accessToken": "tok"}}"#).unwrap();
+        store
+            .write_credentials(r#"{"claudeAiOauth": {"accessToken": "tok"}}"#)
+            .unwrap();
 
         let cred_file = dir.path().join(".credentials.json");
         assert!(cred_file.exists());
@@ -2306,15 +2396,26 @@ mod tests {
         let _env = EnvVarScope::set(dir.path());
 
         let mut store = file_backed_store(dir.path());
-        store.write_credentials("sk-ant-api03-abcdefghijklmnopqrstuvwxyz").unwrap();
+        store
+            .write_credentials("sk-ant-api03-abcdefghijklmnopqrstuvwxyz")
+            .unwrap();
 
         let global_config = dir.path().join(".claude.json");
-        let data: Value = serde_json::from_str(&std::fs::read_to_string(&global_config).unwrap()).unwrap();
-        assert_eq!(data["primaryApiKey"], "sk-ant-api03-abcdefghijklmnopqrstuvwxyz");
-        let approved = data["customApiKeyResponses"]["approved"].as_array().unwrap();
-        assert!(approved
-            .iter()
-            .any(|v| v == &Value::String(approved_form("sk-ant-api03-abcdefghijklmnopqrstuvwxyz"))));
+        let data: Value =
+            serde_json::from_str(&std::fs::read_to_string(&global_config).unwrap()).unwrap();
+        assert_eq!(
+            data["primaryApiKey"],
+            "sk-ant-api03-abcdefghijklmnopqrstuvwxyz"
+        );
+        let approved = data["customApiKeyResponses"]["approved"]
+            .as_array()
+            .unwrap();
+        assert!(
+            approved
+                .iter()
+                .any(|v| v
+                    == &Value::String(approved_form("sk-ant-api03-abcdefghijklmnopqrstuvwxyz")))
+        );
 
         // Mutual exclusion: activating a managed key must clear any OAuth file.
         assert!(!dir.path().join(".credentials.json").exists());
@@ -2326,14 +2427,22 @@ mod tests {
         let _env = EnvVarScope::set(dir.path());
 
         let mut store = file_backed_store(dir.path());
-        store.write_credentials(r#"{"claudeAiOauth": {"accessToken": "tok"}}"#).unwrap();
+        store
+            .write_credentials(r#"{"claudeAiOauth": {"accessToken": "tok"}}"#)
+            .unwrap();
         assert!(dir.path().join(".credentials.json").exists());
 
-        store.write_credentials("sk-ant-api03-abcdefghijklmnopqrstuvwxyz").unwrap();
+        store
+            .write_credentials("sk-ant-api03-abcdefghijklmnopqrstuvwxyz")
+            .unwrap();
         assert!(!dir.path().join(".credentials.json").exists());
 
         let global_config = dir.path().join(".claude.json");
-        let data: Value = serde_json::from_str(&std::fs::read_to_string(&global_config).unwrap()).unwrap();
-        assert_eq!(data["primaryApiKey"], "sk-ant-api03-abcdefghijklmnopqrstuvwxyz");
+        let data: Value =
+            serde_json::from_str(&std::fs::read_to_string(&global_config).unwrap()).unwrap();
+        assert_eq!(
+            data["primaryApiKey"],
+            "sk-ant-api03-abcdefghijklmnopqrstuvwxyz"
+        );
     }
 }

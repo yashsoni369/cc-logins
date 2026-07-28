@@ -39,7 +39,9 @@ pub static ENV_LOCK: Mutex<()> = Mutex::new(());
 /// effect (env-var mutation); it protects no invariant a panic could leave
 /// broken, so recovering the guard from a poisoned lock is safe.
 pub fn env_lock() -> MutexGuard<'static, ()> {
-    ENV_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+    ENV_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
 /// Panic unless `path` is inside a temp directory.
@@ -104,7 +106,9 @@ impl StoreRootGuard {
     /// returned guard lives, restoring whatever override (if any) was active
     /// before.
     pub fn set(path: std::path::PathBuf) -> Self {
-        let mut guard = STORE_ROOT_OVERRIDE.lock().unwrap_or_else(|p| p.into_inner());
+        let mut guard = STORE_ROOT_OVERRIDE
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
         let previous = guard.clone();
         *guard = Some(path);
         Self { previous }
@@ -113,14 +117,19 @@ impl StoreRootGuard {
 
 impl Drop for StoreRootGuard {
     fn drop(&mut self) {
-        let mut guard = STORE_ROOT_OVERRIDE.lock().unwrap_or_else(|p| p.into_inner());
+        let mut guard = STORE_ROOT_OVERRIDE
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
         *guard = self.previous.clone();
     }
 }
 
 /// The active test override, if any. Consulted by [`crate::paths::backup_root`].
 pub fn store_root_override() -> Option<std::path::PathBuf> {
-    STORE_ROOT_OVERRIDE.lock().unwrap_or_else(|p| p.into_inner()).clone()
+    STORE_ROOT_OVERRIDE
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .clone()
 }
 
 /// Saves an environment variable's prior value and restores it on drop, so a

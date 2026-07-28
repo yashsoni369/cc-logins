@@ -225,7 +225,11 @@ pub mod poll_policy {
         earliest_future_reset_ts: Option<f64>,
         limiting_reset_ts: Option<f64>,
     ) -> (f64, f64) {
-        let default = if outcome.is_active { MIN_INTERVAL_S } else { CANDIDATE_DEFAULT_INTERVAL_S };
+        let default = if outcome.is_active {
+            MIN_INTERVAL_S
+        } else {
+            CANDIDATE_DEFAULT_INTERVAL_S
+        };
         let ceiling = ACTIVE_MAX_INTERVAL_S;
         let base = outcome.prev_interval_s.unwrap_or(default);
 
@@ -427,7 +431,9 @@ fn account_reset_windows(account: &Account) -> Vec<(f64, Option<&str>)> {
 }
 
 fn parse_rfc3339_epoch(s: &str) -> Option<i64> {
-    DateTime::parse_from_rfc3339(s).ok().map(|dt| dt.timestamp())
+    DateTime::parse_from_rfc3339(s)
+        .ok()
+        .map(|dt| dt.timestamp())
 }
 
 /// Epoch when `account` becomes usable again — the *latest* reset among its
@@ -496,7 +502,12 @@ fn earliest_recovery_ts(accounts: &[&Account]) -> Option<i64> {
 /// `now` is epoch seconds, passed in rather than read from a clock so this
 /// function is fully deterministic and needs no fixture beyond its
 /// arguments.
-pub fn decide(snapshot: &Snapshot, config: &PollerConfig, state: &DaemonState, now: f64) -> Decision {
+pub fn decide(
+    snapshot: &Snapshot,
+    config: &PollerConfig,
+    state: &DaemonState,
+    now: f64,
+) -> Decision {
     let Some(active) = snapshot.active_account() else {
         return Decision::Hold;
     };
@@ -521,12 +532,18 @@ pub fn decide(snapshot: &Snapshot, config: &PollerConfig, state: &DaemonState, n
         }
     }
 
-    let all_accounts: Vec<Account> =
-        snapshot.environments.iter().flat_map(|e| e.accounts.iter().cloned()).collect();
+    let all_accounts: Vec<Account> = snapshot
+        .environments
+        .iter()
+        .flat_map(|e| e.accounts.iter().cloned())
+        .collect();
 
     // Rule 3: hysteresis pre-filter, scoped to `last_switch_from` only.
-    let candidates: Vec<Account> =
-        all_accounts.iter().filter(|a| hysteresis_ok(a, state, config)).cloned().collect();
+    let candidates: Vec<Account> = all_accounts
+        .iter()
+        .filter(|a| hysteresis_ok(a, state, config))
+        .cloned()
+        .collect();
 
     // Rule 1 lives in `pick_target`/`Account::headroom`: unknown usage is
     // never treated as zero and never auto-skipped.
@@ -534,21 +551,33 @@ pub fn decide(snapshot: &Snapshot, config: &PollerConfig, state: &DaemonState, n
         let to = target.number;
 
         if config.grace_seconds <= 0.0 {
-            return Decision::Switch { from: active_number, to };
+            return Decision::Switch {
+                from: active_number,
+                to,
+            };
         }
 
         return match &state.pending {
             Some(p) if p.to == to => {
                 let elapsed = (now - p.decided_at).max(0.0);
                 if elapsed >= config.grace_seconds {
-                    Decision::Switch { from: p.from, to: p.to }
+                    Decision::Switch {
+                        from: p.from,
+                        to: p.to,
+                    }
                 } else {
-                    Decision::Warn { account: to, seconds_left: config.grace_seconds - elapsed }
+                    Decision::Warn {
+                        account: to,
+                        seconds_left: config.grace_seconds - elapsed,
+                    }
                 }
             }
             // No countdown in progress, or it was counting down for a
             // different target — (re)start the countdown fresh.
-            _ => Decision::Warn { account: to, seconds_left: config.grace_seconds },
+            _ => Decision::Warn {
+                account: to,
+                seconds_left: config.grace_seconds,
+            },
         };
     }
 
@@ -557,10 +586,16 @@ pub fn decide(snapshot: &Snapshot, config: &PollerConfig, state: &DaemonState, n
     // non-disabled/non-expired account, hysteresis exclusion NOT applied
     // here (a healthy-but-hysteresis-blocked account means we are merely
     // blocked this tick, not stuck) — is *known* to be at its limit.
-    let relevant: Vec<&Account> = all_accounts.iter().filter(|a| a.active || a.is_switchable()).collect();
+    let relevant: Vec<&Account> = all_accounts
+        .iter()
+        .filter(|a| a.active || a.is_switchable())
+        .collect();
     let any_unknown = relevant.iter().any(|a| a.headroom().is_none());
-    let all_at_limit =
-        !relevant.is_empty() && !any_unknown && relevant.iter().all(|a| matches!(a.headroom(), Some(h) if h <= 0.0));
+    let all_at_limit = !relevant.is_empty()
+        && !any_unknown
+        && relevant
+            .iter()
+            .all(|a| matches!(a.headroom(), Some(h) if h <= 0.0));
 
     if all_at_limit {
         let earliest_reset = earliest_recovery_ts(&relevant)
@@ -634,7 +669,12 @@ pub fn publish_snapshot(app: &AppHandle, snapshot: &Snapshot) {
 /// [`publish_snapshot`] with the fresh snapshot once it completes. Same
 /// never-fails-the-caller contract as [`publish_snapshot`].
 pub fn publish_switching(app: &AppHandle) {
-    let spec = IconSpec { utilisation: None, state: TrayState::Switching, spin: 0.0, theme: ambient_theme_cached() };
+    let spec = IconSpec {
+        utilisation: None,
+        state: TrayState::Switching,
+        spin: 0.0,
+        theme: ambient_theme_cached(),
+    };
     paint_icon(app, spec);
 }
 
@@ -694,10 +734,15 @@ pub async fn run(app: AppHandle, config: PollerConfig) {
         // fetched here spends no extra budget against `poll_policy`'s floor.
         publish_snapshot(&app, &snapshot);
 
-        let active_known = snapshot.active_account().and_then(|a| a.headroom()).is_some();
+        let active_known = snapshot
+            .active_account()
+            .and_then(|a| a.headroom())
+            .is_some();
         state.unhealthy_ticks = next_unhealthy_ticks(state.unhealthy_ticks, active_known);
 
-        let decision = match std::panic::catch_unwind(AssertUnwindSafe(|| decide(&snapshot, &config, &state, now))) {
+        let decision = match std::panic::catch_unwind(AssertUnwindSafe(|| {
+            decide(&snapshot, &config, &state, now)
+        })) {
             Ok(d) => d,
             Err(_) => {
                 log::warn!("poller: decide() panicked; holding this tick");
@@ -718,8 +763,11 @@ pub async fn run(app: AppHandle, config: PollerConfig) {
             Decision::Warn { account, .. } => {
                 if state.pending.as_ref().map(|p| p.to) != Some(*account) {
                     if let Some(active) = snapshot.active_account() {
-                        state.pending =
-                            Some(PendingSwitch { from: active.number, to: *account, decided_at: now });
+                        state.pending = Some(PendingSwitch {
+                            from: active.number,
+                            to: *account,
+                            decided_at: now,
+                        });
                     }
                 }
             }
@@ -740,15 +788,22 @@ pub async fn run(app: AppHandle, config: PollerConfig) {
                     .as_deref()
                     .and_then(parse_rfc3339_epoch)
                     .map(|ts| (ts as f64 - now).max(config.interval_seconds))
-                    .unwrap_or_else(|| config.interval_seconds.max(poll_policy::ACTIVE_MAX_INTERVAL_S));
+                    .unwrap_or_else(|| {
+                        config
+                            .interval_seconds
+                            .max(poll_policy::ACTIVE_MAX_INTERVAL_S)
+                    });
                 sleep_override = Some(wait.min(6.0 * 3600.0));
             }
         }
 
         let active = snapshot.active_account();
         let new_binding_pct = active.and_then(|a| a.binding_utilisation());
-        let recent_failure =
-            snapshot.environments.iter().flat_map(|e| e.accounts.iter()).any(|a| a.usage_status == UsageStatus::Stale);
+        let recent_failure = snapshot
+            .environments
+            .iter()
+            .flat_map(|e| e.accounts.iter())
+            .any(|a| a.usage_status == UsageStatus::Stale);
         let limiting_reset = active.and_then(active_limiting_reset_ts);
         let earliest_future_reset = active.and_then(|a| active_earliest_future_reset_ts(a, now));
 
@@ -761,7 +816,13 @@ pub async fn run(app: AppHandle, config: PollerConfig) {
             recent_429: recent_failure,
         };
         let (next_poll_at, next_interval) = std::panic::catch_unwind(AssertUnwindSafe(|| {
-            poll_policy::plan_after_fetch(&outcome, now, pseudo_random_unit(), earliest_future_reset, limiting_reset)
+            poll_policy::plan_after_fetch(
+                &outcome,
+                now,
+                pseudo_random_unit(),
+                earliest_future_reset,
+                limiting_reset,
+            )
         }))
         .unwrap_or((now + interval_s, interval_s));
         interval_s = next_interval;
@@ -784,7 +845,14 @@ pub async fn run(app: AppHandle, config: PollerConfig) {
 /// never called with any lock held — [`crate::switcher::switch_to`] takes
 /// its own internal file lock for the whole mutation, and nothing here holds
 /// anything else across it.
-fn perform_switch(app: &AppHandle, snapshot: &Snapshot, from: u32, to: u32, state: &mut DaemonState, now: f64) {
+fn perform_switch(
+    app: &AppHandle,
+    snapshot: &Snapshot,
+    from: u32,
+    to: u32,
+    state: &mut DaemonState,
+    now: f64,
+) {
     let Some(target) = find_account(snapshot, to).cloned() else {
         log::warn!("poller: decided to switch to account {to} but it is missing from the snapshot");
         return;
@@ -833,18 +901,28 @@ async fn fetch_snapshot_guarded() -> Option<Snapshot> {
 }
 
 async fn sleep_for(seconds: f64) {
-    let seconds = if seconds.is_finite() { seconds.max(0.5) } else { poll_policy::MIN_INTERVAL_S };
+    let seconds = if seconds.is_finite() {
+        seconds.max(0.5)
+    } else {
+        poll_policy::MIN_INTERVAL_S
+    };
     tokio::time::sleep(Duration::from_secs_f64(seconds)).await;
 }
 
 fn window_visible(app: &AppHandle) -> bool {
     // Unknown defaults to visible: the safer failure mode is "poll a bit
     // more than necessary", not "go quiet because a query failed".
-    app.get_webview_window("main").and_then(|w| w.is_visible().ok()).unwrap_or(true)
+    app.get_webview_window("main")
+        .and_then(|w| w.is_visible().ok())
+        .unwrap_or(true)
 }
 
 fn find_account(snapshot: &Snapshot, number: u32) -> Option<&Account> {
-    snapshot.environments.iter().flat_map(|e| e.accounts.iter()).find(|a| a.number == number)
+    snapshot
+        .environments
+        .iter()
+        .flat_map(|e| e.accounts.iter())
+        .find(|a| a.number == number)
 }
 
 fn open_history(app: &AppHandle) -> Option<HistoryStore> {
@@ -987,7 +1065,10 @@ fn now_epoch_s() -> f64 {
 /// for anything security-sensitive.
 fn pseudo_random_unit() -> f64 {
     use std::time::{SystemTime, UNIX_EPOCH};
-    let nanos = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.subsec_nanos()).unwrap_or(0);
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.subsec_nanos())
+        .unwrap_or(0);
     (nanos as f64) / 1_000_000_000.0
 }
 
@@ -1003,10 +1084,19 @@ mod tests {
     // -- fixtures -------------------------------------------------------------
 
     fn window(pct: f64, resets_at: Option<&str>) -> UsageWindow {
-        UsageWindow { pct, resets_at: resets_at.map(str::to_string), ..Default::default() }
+        UsageWindow {
+            pct,
+            resets_at: resets_at.map(str::to_string),
+            ..Default::default()
+        }
     }
 
-    fn account(number: u32, active: bool, seven_day_pct: Option<f64>, resets_at: Option<&str>) -> Account {
+    fn account(
+        number: u32,
+        active: bool,
+        seven_day_pct: Option<f64>,
+        resets_at: Option<&str>,
+    ) -> Account {
         let usage = seven_day_pct.map(|p| Usage {
             five_hour: None,
             seven_day: Some(window(p, resets_at)),
@@ -1016,7 +1106,11 @@ mod tests {
             number,
             email: format!("acct{number}@example.com"),
             active,
-            usage_status: if usage.is_some() { crate::model::UsageStatus::Ok } else { crate::model::UsageStatus::Unknown },
+            usage_status: if usage.is_some() {
+                crate::model::UsageStatus::Ok
+            } else {
+                crate::model::UsageStatus::Unknown
+            },
             usage,
             ..Default::default()
         }
@@ -1036,7 +1130,10 @@ mod tests {
     }
 
     fn cfg() -> PollerConfig {
-        PollerConfig { grace_seconds: 0.0, ..PollerConfig::default() }
+        PollerConfig {
+            grace_seconds: 0.0,
+            ..PollerConfig::default()
+        }
     }
 
     const T0: f64 = 1_800_000_000.0;
@@ -1062,9 +1159,15 @@ mod tests {
 
     #[test]
     fn hold_when_active_usage_unknown_and_under_the_unhealthy_tick_count() {
-        let snap = snapshot(vec![account(1, true, None, None), account(2, false, Some(10.0), None)]);
+        let snap = snapshot(vec![
+            account(1, true, None, None),
+            account(2, false, Some(10.0), None),
+        ]);
         let config = cfg();
-        let state = DaemonState { unhealthy_ticks: config.unhealthy_ticks - 1, ..Default::default() };
+        let state = DaemonState {
+            unhealthy_ticks: config.unhealthy_ticks - 1,
+            ..Default::default()
+        };
         assert_eq!(decide(&snap, &config, &state, T0), Decision::Hold);
     }
 
@@ -1073,9 +1176,9 @@ mod tests {
     #[test]
     fn unknown_usage_candidate_is_not_chosen_over_a_known_one() {
         let snap = snapshot(vec![
-            account(1, true, Some(95.0), None),   // active, over threshold
-            account(2, false, None, None),        // unknown usage — must not win by default
-            account(3, false, Some(20.0), None),  // headroom 80 — the real winner
+            account(1, true, Some(95.0), None),  // active, over threshold
+            account(2, false, None, None),       // unknown usage — must not win by default
+            account(3, false, Some(20.0), None), // headroom 80 — the real winner
         ]);
         let decision = decide(&snap, &cfg(), &DaemonState::default(), T0);
         assert_eq!(decision, Decision::Switch { from: 1, to: 3 });
@@ -1083,10 +1186,19 @@ mod tests {
 
     #[test]
     fn unknown_usage_active_account_triggers_failover_after_enough_unhealthy_ticks() {
-        let snap = snapshot(vec![account(1, true, None, None), account(2, false, Some(20.0), None)]);
+        let snap = snapshot(vec![
+            account(1, true, None, None),
+            account(2, false, Some(20.0), None),
+        ]);
         let config = cfg();
-        let state = DaemonState { unhealthy_ticks: config.unhealthy_ticks, ..Default::default() };
-        assert_eq!(decide(&snap, &config, &state, T0), Decision::Switch { from: 1, to: 2 });
+        let state = DaemonState {
+            unhealthy_ticks: config.unhealthy_ticks,
+            ..Default::default()
+        };
+        assert_eq!(
+            decide(&snap, &config, &state, T0),
+            Decision::Switch { from: 1, to: 2 }
+        );
     }
 
     #[test]
@@ -1099,34 +1211,61 @@ mod tests {
         // No known-headroom candidate exists, but not everyone is *known*
         // to be at their limit either — this must never resolve to
         // Exhausted (that would be a false "give up").
-        assert_eq!(decide(&snap, &cfg(), &DaemonState::default(), T0), Decision::Hold);
+        assert_eq!(
+            decide(&snap, &cfg(), &DaemonState::default(), T0),
+            Decision::Hold
+        );
     }
 
     // -- rule 2: cooldown -------------------------------------------------------
 
     #[test]
     fn cooldown_blocks_a_switch_within_the_window() {
-        let snap = snapshot(vec![account(1, true, Some(95.0), None), account(2, false, Some(10.0), None)]);
+        let snap = snapshot(vec![
+            account(1, true, Some(95.0), None),
+            account(2, false, Some(10.0), None),
+        ]);
         let config = cfg();
-        let state = DaemonState { last_switch_at: Some(T0 - 10.0), ..Default::default() };
+        let state = DaemonState {
+            last_switch_at: Some(T0 - 10.0),
+            ..Default::default()
+        };
         assert_eq!(decide(&snap, &config, &state, T0), Decision::Hold);
     }
 
     #[test]
     fn cooldown_expires_and_allows_the_switch() {
-        let snap = snapshot(vec![account(1, true, Some(95.0), None), account(2, false, Some(10.0), None)]);
+        let snap = snapshot(vec![
+            account(1, true, Some(95.0), None),
+            account(2, false, Some(10.0), None),
+        ]);
         let config = cfg();
-        let state = DaemonState { last_switch_at: Some(T0 - config.cooldown_seconds - 1.0), ..Default::default() };
-        assert_eq!(decide(&snap, &config, &state, T0), Decision::Switch { from: 1, to: 2 });
+        let state = DaemonState {
+            last_switch_at: Some(T0 - config.cooldown_seconds - 1.0),
+            ..Default::default()
+        };
+        assert_eq!(
+            decide(&snap, &config, &state, T0),
+            Decision::Switch { from: 1, to: 2 }
+        );
     }
 
     #[test]
     fn cooldown_boundary_is_exclusive() {
-        let snap = snapshot(vec![account(1, true, Some(95.0), None), account(2, false, Some(10.0), None)]);
+        let snap = snapshot(vec![
+            account(1, true, Some(95.0), None),
+            account(2, false, Some(10.0), None),
+        ]);
         let config = cfg();
         // Exactly cooldown_seconds ago: no longer "within" the window.
-        let state = DaemonState { last_switch_at: Some(T0 - config.cooldown_seconds), ..Default::default() };
-        assert_eq!(decide(&snap, &config, &state, T0), Decision::Switch { from: 1, to: 2 });
+        let state = DaemonState {
+            last_switch_at: Some(T0 - config.cooldown_seconds),
+            ..Default::default()
+        };
+        assert_eq!(
+            decide(&snap, &config, &state, T0),
+            Decision::Switch { from: 1, to: 2 }
+        );
     }
 
     // -- rule 3: hysteresis ------------------------------------------------------
@@ -1139,8 +1278,14 @@ mod tests {
             account(2, false, Some(85.0), None), // utilisation 85 > floor 80: still blocked
             account(3, false, Some(50.0), None), // headroom 50 — should win instead
         ]);
-        let state = DaemonState { last_switch_from: Some(2), ..Default::default() };
-        assert_eq!(decide(&snap, &config, &state, T0), Decision::Switch { from: 1, to: 3 });
+        let state = DaemonState {
+            last_switch_from: Some(2),
+            ..Default::default()
+        };
+        assert_eq!(
+            decide(&snap, &config, &state, T0),
+            Decision::Switch { from: 1, to: 3 }
+        );
     }
 
     #[test]
@@ -1150,8 +1295,14 @@ mod tests {
             account(1, true, Some(95.0), None),
             account(2, false, Some(75.0), None), // utilisation 75 <= floor 80: eligible again
         ]);
-        let state = DaemonState { last_switch_from: Some(2), ..Default::default() };
-        assert_eq!(decide(&snap, &config, &state, T0), Decision::Switch { from: 1, to: 2 });
+        let state = DaemonState {
+            last_switch_from: Some(2),
+            ..Default::default()
+        };
+        assert_eq!(
+            decide(&snap, &config, &state, T0),
+            Decision::Switch { from: 1, to: 2 }
+        );
     }
 
     #[test]
@@ -1162,7 +1313,10 @@ mod tests {
             account(2, false, Some(85.0), None), // still hysteresis-blocked
             account(3, false, None, None),       // unrelated, unknown — fine to remain eligible
         ]);
-        let state = DaemonState { last_switch_from: Some(2), ..Default::default() };
+        let state = DaemonState {
+            last_switch_from: Some(2),
+            ..Default::default()
+        };
         // Only account 3 is left after excluding 2, but its usage is
         // unknown, so pick_target can't prove it's the best target either —
         // this must stay Hold, not Exhausted (rule 4/1 interaction) and
@@ -1177,7 +1331,10 @@ mod tests {
             account(1, true, Some(95.0), None),
             account(2, false, Some(85.0), None), // hysteresis-blocked, but has real headroom
         ]);
-        let state = DaemonState { last_switch_from: Some(2), ..Default::default() };
+        let state = DaemonState {
+            last_switch_from: Some(2),
+            ..Default::default()
+        };
         // Not a valid *target* this tick, but the situation is not
         // exhausted — a real option exists, just temporarily blocked.
         assert_eq!(decide(&snap, &config, &state, T0), Decision::Hold);
@@ -1194,7 +1351,9 @@ mod tests {
         let decision = decide(&snap, &cfg(), &DaemonState::default(), T0);
         assert_eq!(
             decision,
-            Decision::Exhausted { earliest_reset: Some("2026-08-01T00:00:00+00:00".to_string()) }
+            Decision::Exhausted {
+                earliest_reset: Some("2026-08-01T00:00:00+00:00".to_string())
+            }
         );
     }
 
@@ -1205,7 +1364,12 @@ mod tests {
             account(2, false, Some(100.0), Some("2026-08-02T00:00:00Z")),
         ]);
         let decision = decide(&snap, &cfg(), &DaemonState::default(), T0);
-        assert_eq!(decision, Decision::Exhausted { earliest_reset: None });
+        assert_eq!(
+            decision,
+            Decision::Exhausted {
+                earliest_reset: None
+            }
+        );
     }
 
     #[test]
@@ -1214,7 +1378,10 @@ mod tests {
             account(1, true, Some(100.0), Some("2026-08-01T00:00:00Z")),
             account(2, false, None, None), // unknown — can't prove it's also at its limit
         ]);
-        assert_eq!(decide(&snap, &cfg(), &DaemonState::default(), T0), Decision::Hold);
+        assert_eq!(
+            decide(&snap, &cfg(), &DaemonState::default(), T0),
+            Decision::Hold
+        );
     }
 
     #[test]
@@ -1227,7 +1394,10 @@ mod tests {
         let mut state = DaemonState::default();
         for tick in 0..5 {
             let decision = decide(&snap, &config, &state, T0 + tick as f64 * 60.0);
-            assert!(matches!(decision, Decision::Exhausted { .. }), "tick {tick} was {decision:?}");
+            assert!(
+                matches!(decision, Decision::Exhausted { .. }),
+                "tick {tick} was {decision:?}"
+            );
             state.pending = None; // what `run` would do after an Exhausted tick
         }
     }
@@ -1243,40 +1413,93 @@ mod tests {
 
     #[test]
     fn failover_does_not_trigger_before_the_configured_tick_count() {
-        let snap = snapshot(vec![account(1, true, None, None), account(2, false, Some(10.0), None)]);
-        let config = PollerConfig { unhealthy_ticks: 3, ..cfg() };
+        let snap = snapshot(vec![
+            account(1, true, None, None),
+            account(2, false, Some(10.0), None),
+        ]);
+        let config = PollerConfig {
+            unhealthy_ticks: 3,
+            ..cfg()
+        };
         for n in 0..config.unhealthy_ticks {
-            let state = DaemonState { unhealthy_ticks: n, ..Default::default() };
-            assert_eq!(decide(&snap, &config, &state, T0), Decision::Hold, "unhealthy_ticks={n}");
+            let state = DaemonState {
+                unhealthy_ticks: n,
+                ..Default::default()
+            };
+            assert_eq!(
+                decide(&snap, &config, &state, T0),
+                Decision::Hold,
+                "unhealthy_ticks={n}"
+            );
         }
-        let state = DaemonState { unhealthy_ticks: config.unhealthy_ticks, ..Default::default() };
-        assert_eq!(decide(&snap, &config, &state, T0), Decision::Switch { from: 1, to: 2 });
+        let state = DaemonState {
+            unhealthy_ticks: config.unhealthy_ticks,
+            ..Default::default()
+        };
+        assert_eq!(
+            decide(&snap, &config, &state, T0),
+            Decision::Switch { from: 1, to: 2 }
+        );
     }
 
     // -- rule 6: grace countdown ----------------------------------------------------
 
     #[test]
     fn grace_zero_switches_on_the_same_tick() {
-        let snap = snapshot(vec![account(1, true, Some(95.0), None), account(2, false, Some(10.0), None)]);
-        let config = PollerConfig { grace_seconds: 0.0, ..PollerConfig::default() };
-        assert_eq!(decide(&snap, &config, &DaemonState::default(), T0), Decision::Switch { from: 1, to: 2 });
+        let snap = snapshot(vec![
+            account(1, true, Some(95.0), None),
+            account(2, false, Some(10.0), None),
+        ]);
+        let config = PollerConfig {
+            grace_seconds: 0.0,
+            ..PollerConfig::default()
+        };
+        assert_eq!(
+            decide(&snap, &config, &DaemonState::default(), T0),
+            Decision::Switch { from: 1, to: 2 }
+        );
     }
 
     #[test]
     fn grace_warns_first_then_switches_once_elapsed() {
-        let snap = snapshot(vec![account(1, true, Some(95.0), None), account(2, false, Some(10.0), None)]);
-        let config = PollerConfig { grace_seconds: 60.0, ..PollerConfig::default() };
+        let snap = snapshot(vec![
+            account(1, true, Some(95.0), None),
+            account(2, false, Some(10.0), None),
+        ]);
+        let config = PollerConfig {
+            grace_seconds: 60.0,
+            ..PollerConfig::default()
+        };
 
         // Tick 1: nothing pending yet -> full countdown starts.
         let decision = decide(&snap, &config, &DaemonState::default(), T0);
-        assert_eq!(decision, Decision::Warn { account: 2, seconds_left: 60.0 });
+        assert_eq!(
+            decision,
+            Decision::Warn {
+                account: 2,
+                seconds_left: 60.0
+            }
+        );
 
         // Caller records the pending countdown (mirrors what `run` does).
-        let state = DaemonState { pending: Some(PendingSwitch { from: 1, to: 2, decided_at: T0 }), ..Default::default() };
+        let state = DaemonState {
+            pending: Some(PendingSwitch {
+                from: 1,
+                to: 2,
+                decided_at: T0,
+            }),
+            ..Default::default()
+        };
 
         // Tick 2, 30s later: half the countdown remains.
         let decision = decide(&snap, &config, &state, T0 + 30.0);
-        assert_eq!(decision, Decision::Warn { account: 2, seconds_left: 30.0 });
+        assert_eq!(
+            decision,
+            Decision::Warn {
+                account: 2,
+                seconds_left: 30.0
+            }
+        );
 
         // Tick 3, grace fully elapsed: switch.
         let decision = decide(&snap, &config, &state, T0 + 60.0);
@@ -1290,7 +1513,10 @@ mod tests {
 
     #[test]
     fn grace_countdown_restarts_when_the_target_changes_mid_countdown() {
-        let config = PollerConfig { grace_seconds: 60.0, ..PollerConfig::default() };
+        let config = PollerConfig {
+            grace_seconds: 60.0,
+            ..PollerConfig::default()
+        };
         // Initially account 3 has the most headroom.
         let snap1 = snapshot(vec![
             account(1, true, Some(95.0), None),
@@ -1298,10 +1524,23 @@ mod tests {
             account(3, false, Some(10.0), None), // headroom 90 — best
         ]);
         let decision = decide(&snap1, &config, &DaemonState::default(), T0);
-        assert_eq!(decision, Decision::Warn { account: 3, seconds_left: 60.0 });
+        assert_eq!(
+            decision,
+            Decision::Warn {
+                account: 3,
+                seconds_left: 60.0
+            }
+        );
 
-        let pending = PendingSwitch { from: 1, to: 3, decided_at: T0 };
-        let state = DaemonState { pending: Some(pending), ..Default::default() };
+        let pending = PendingSwitch {
+            from: 1,
+            to: 3,
+            decided_at: T0,
+        };
+        let state = DaemonState {
+            pending: Some(pending),
+            ..Default::default()
+        };
 
         // Now account 2 pulls ahead before the countdown finished.
         let snap2 = snapshot(vec![
@@ -1312,7 +1551,13 @@ mod tests {
         let decision = decide(&snap2, &config, &state, T0 + 40.0);
         // Restarts at the full grace period for the new target, not
         // inheriting the old target's elapsed time.
-        assert_eq!(decision, Decision::Warn { account: 2, seconds_left: 60.0 });
+        assert_eq!(
+            decision,
+            Decision::Warn {
+                account: 2,
+                seconds_left: 60.0
+            }
+        );
     }
 
     #[test]
@@ -1322,12 +1567,28 @@ mod tests {
         // that contract: once utilisation drops back under threshold,
         // decide() itself no longer asks for a Warn/Switch regardless of
         // what was pending.
-        let config = PollerConfig { grace_seconds: 60.0, ..PollerConfig::default() };
-        let pending = PendingSwitch { from: 1, to: 2, decided_at: T0 };
-        let state = DaemonState { pending: Some(pending), ..Default::default() };
+        let config = PollerConfig {
+            grace_seconds: 60.0,
+            ..PollerConfig::default()
+        };
+        let pending = PendingSwitch {
+            from: 1,
+            to: 2,
+            decided_at: T0,
+        };
+        let state = DaemonState {
+            pending: Some(pending),
+            ..Default::default()
+        };
 
-        let recovered = snapshot(vec![account(1, true, Some(40.0), None), account(2, false, Some(10.0), None)]);
-        assert_eq!(decide(&recovered, &config, &state, T0 + 10.0), Decision::Hold);
+        let recovered = snapshot(vec![
+            account(1, true, Some(40.0), None),
+            account(2, false, Some(10.0), None),
+        ]);
+        assert_eq!(
+            decide(&recovered, &config, &state, T0 + 10.0),
+            Decision::Hold
+        );
     }
 
     // -- strategy pass-through -------------------------------------------------------
@@ -1339,11 +1600,25 @@ mod tests {
             account(2, false, Some(10.0), None), // first in order, headroom 90
             account(3, false, Some(5.0), None),  // more headroom (95), but not first
         ]);
-        let config = PollerConfig { grace_seconds: 0.0, strategy: Strategy::NextAvailable, ..PollerConfig::default() };
-        assert_eq!(decide(&snap, &config, &DaemonState::default(), T0), Decision::Switch { from: 1, to: 2 });
+        let config = PollerConfig {
+            grace_seconds: 0.0,
+            strategy: Strategy::NextAvailable,
+            ..PollerConfig::default()
+        };
+        assert_eq!(
+            decide(&snap, &config, &DaemonState::default(), T0),
+            Decision::Switch { from: 1, to: 2 }
+        );
 
-        let config = PollerConfig { grace_seconds: 0.0, strategy: Strategy::MostHeadroom, ..PollerConfig::default() };
-        assert_eq!(decide(&snap, &config, &DaemonState::default(), T0), Decision::Switch { from: 1, to: 3 });
+        let config = PollerConfig {
+            grace_seconds: 0.0,
+            strategy: Strategy::MostHeadroom,
+            ..PollerConfig::default()
+        };
+        assert_eq!(
+            decide(&snap, &config, &DaemonState::default(), T0),
+            Decision::Switch { from: 1, to: 3 }
+        );
     }
 
     // -- disabled/expired accounts never targeted or counted -------------------------
@@ -1352,14 +1627,19 @@ mod tests {
     fn disabled_and_expired_accounts_are_ignored_for_both_targeting_and_exhaustion() {
         let mut disabled = account(2, false, Some(0.0), None);
         disabled.usage_status = crate::model::UsageStatus::Disabled;
-        let snap = snapshot(vec![account(1, true, Some(100.0), Some("2026-08-01T00:00:00Z")), disabled]);
+        let snap = snapshot(vec![
+            account(1, true, Some(100.0), Some("2026-08-01T00:00:00Z")),
+            disabled,
+        ]);
         // Only the active account is "relevant" (the disabled one is
         // excluded from is_switchable), and it's known at-limit with a
         // reset time -> Exhausted, not blocked forever by the disabled seat.
         let decision = decide(&snap, &cfg(), &DaemonState::default(), T0);
         assert_eq!(
             decision,
-            Decision::Exhausted { earliest_reset: Some("2026-08-01T00:00:00+00:00".to_string()) }
+            Decision::Exhausted {
+                earliest_reset: Some("2026-08-01T00:00:00+00:00".to_string())
+            }
         );
     }
 
@@ -1381,22 +1661,35 @@ mod tests {
 
         #[test]
         fn no_movement_backs_off_by_half_again_capped_at_ceiling() {
-            let outcome = FetchOutcome { prev_interval_s: Some(ACTIVE_MAX_INTERVAL_S), ..base_outcome() };
+            let outcome = FetchOutcome {
+                prev_interval_s: Some(ACTIVE_MAX_INTERVAL_S),
+                ..base_outcome()
+            };
             let (_, interval) = plan_after_fetch(&outcome, 0.0, 0.5, None, None);
-            assert_eq!(interval, ACTIVE_MAX_INTERVAL_S, "must not exceed the ceiling");
+            assert_eq!(
+                interval, ACTIVE_MAX_INTERVAL_S,
+                "must not exceed the ceiling"
+            );
         }
 
         #[test]
         fn movement_halves_the_interval_floored_at_min() {
-            let outcome = FetchOutcome { prev_interval_s: Some(200.0), new_binding_pct: Some(55.0), ..base_outcome() };
+            let outcome = FetchOutcome {
+                prev_interval_s: Some(200.0),
+                new_binding_pct: Some(55.0),
+                ..base_outcome()
+            };
             let (_, interval) = plan_after_fetch(&outcome, 0.0, 0.5, None, None);
             assert_eq!(interval, 100.0f64.max(MIN_INTERVAL_S));
         }
 
         #[test]
         fn movement_never_drops_below_the_floor() {
-            let outcome =
-                FetchOutcome { prev_interval_s: Some(MIN_INTERVAL_S), new_binding_pct: Some(55.0), ..base_outcome() };
+            let outcome = FetchOutcome {
+                prev_interval_s: Some(MIN_INTERVAL_S),
+                new_binding_pct: Some(55.0),
+                ..base_outcome()
+            };
             let (_, interval) = plan_after_fetch(&outcome, 0.0, 0.5, None, None);
             assert_eq!(interval, MIN_INTERVAL_S);
         }
@@ -1427,15 +1720,22 @@ mod tests {
 
         #[test]
         fn recent_429_floors_the_interval_even_on_the_first_backoff() {
-            let outcome = FetchOutcome { prev_interval_s: Some(MIN_INTERVAL_S), recent_429: true, ..base_outcome() };
+            let outcome = FetchOutcome {
+                prev_interval_s: Some(MIN_INTERVAL_S),
+                recent_429: true,
+                ..base_outcome()
+            };
             let (_, interval) = plan_after_fetch(&outcome, 0.0, 0.5, None, None);
             assert!(interval >= POST_429_MIN_INTERVAL_S);
         }
 
         #[test]
         fn recent_429_grows_multiplicatively_and_caps_at_the_429_ceiling() {
-            let outcome =
-                FetchOutcome { prev_interval_s: Some(POST_429_MAX_INTERVAL_S), recent_429: true, ..base_outcome() };
+            let outcome = FetchOutcome {
+                prev_interval_s: Some(POST_429_MAX_INTERVAL_S),
+                recent_429: true,
+                ..base_outcome()
+            };
             let (_, interval) = plan_after_fetch(&outcome, 0.0, 0.5, None, None);
             assert_eq!(interval, POST_429_MAX_INTERVAL_S);
         }
@@ -1445,9 +1745,18 @@ mod tests {
             let outcome = base_outcome();
             let (low, interval_low) = plan_after_fetch(&outcome, 1000.0, 0.0, None, None);
             let (high, interval_high) = plan_after_fetch(&outcome, 1000.0, 1.0, None, None);
-            assert_eq!(interval_low, interval_high, "jitter must not change the learned interval");
-            assert!(low < 1000.0 + interval_low, "min jitter sample pulls the schedule earlier");
-            assert!(high > 1000.0 + interval_high * 0.99, "max jitter sample pushes the schedule later");
+            assert_eq!(
+                interval_low, interval_high,
+                "jitter must not change the learned interval"
+            );
+            assert!(
+                low < 1000.0 + interval_low,
+                "min jitter sample pulls the schedule earlier"
+            );
+            assert!(
+                high > 1000.0 + interval_high * 0.99,
+                "max jitter sample pushes the schedule later"
+            );
         }
 
         #[test]
@@ -1455,15 +1764,25 @@ mod tests {
             // An account known to be at its limit cannot change before its
             // reset, so a reset further out than the normal schedule pushes
             // the next poll out to it — no point polling in between.
-            let outcome = FetchOutcome { new_binding_pct: Some(100.0), ..base_outcome() };
-            let (next_poll, interval) = plan_after_fetch(&outcome, 0.0, 0.5, None, Some(1_000_000.0));
-            assert!(interval < 1_000_000.0, "sanity: the reset is far beyond the normal cadence");
+            let outcome = FetchOutcome {
+                new_binding_pct: Some(100.0),
+                ..base_outcome()
+            };
+            let (next_poll, interval) =
+                plan_after_fetch(&outcome, 0.0, 0.5, None, Some(1_000_000.0));
+            assert!(
+                interval < 1_000_000.0,
+                "sanity: the reset is far beyond the normal cadence"
+            );
             assert_eq!(next_poll, 1_000_000.0);
         }
 
         #[test]
         fn known_at_limit_does_not_move_the_schedule_earlier_than_planned() {
-            let outcome = FetchOutcome { new_binding_pct: Some(100.0), ..base_outcome() };
+            let outcome = FetchOutcome {
+                new_binding_pct: Some(100.0),
+                ..base_outcome()
+            };
             let (next_poll, interval) = plan_after_fetch(&outcome, 0.0, 0.5, None, Some(1.0));
             // reset_ts (1.0) is earlier than the planned poll -> ignored,
             // the normal interval-based schedule wins.
@@ -1472,14 +1791,23 @@ mod tests {
 
         #[test]
         fn unknown_utilisation_never_consults_the_at_limit_reset_clamp() {
-            let outcome = FetchOutcome { new_binding_pct: None, ..base_outcome() };
+            let outcome = FetchOutcome {
+                new_binding_pct: None,
+                ..base_outcome()
+            };
             let (next_poll, _) = plan_after_fetch(&outcome, 1000.0, 0.5, None, Some(1.0));
-            assert!(next_poll > 1000.0, "must not clamp to a reset time when utilisation is unknown");
+            assert!(
+                next_poll > 1000.0,
+                "must not clamp to a reset time when utilisation is unknown"
+            );
         }
 
         #[test]
         fn earliest_future_reset_pulls_the_next_poll_in_with_slack() {
-            let outcome = FetchOutcome { new_binding_pct: Some(50.0), ..base_outcome() };
+            let outcome = FetchOutcome {
+                new_binding_pct: Some(50.0),
+                ..base_outcome()
+            };
             let (next_poll, interval) = plan_after_fetch(&outcome, 0.0, 0.5, Some(10.0), None);
             assert_eq!(next_poll, 10.0 + RESET_SLACK_S);
             assert!(interval > 0.0);
@@ -1531,8 +1859,14 @@ mod tests {
         #[test]
         fn theme_passes_through_unchanged() {
             let snap = snapshot(vec![account(1, true, Some(10.0), None)]);
-            assert_eq!(tray_spec_for(&snap, AmbientTheme::Light).theme, AmbientTheme::Light);
-            assert_eq!(tray_spec_for(&snap, AmbientTheme::Dark).theme, AmbientTheme::Dark);
+            assert_eq!(
+                tray_spec_for(&snap, AmbientTheme::Light).theme,
+                AmbientTheme::Light
+            );
+            assert_eq!(
+                tray_spec_for(&snap, AmbientTheme::Dark).theme,
+                AmbientTheme::Dark
+            );
         }
     }
 
@@ -1551,7 +1885,11 @@ mod tests {
         fn identical_spec_suppresses_a_repeat_redraw() {
             let spec = IconSpec::resting(50.0, AmbientTheme::Dark);
             let key = spec.cache_key();
-            assert_eq!(should_redraw(&spec, Some(key)), None, "a no-op repeat must not redraw");
+            assert_eq!(
+                should_redraw(&spec, Some(key)),
+                None,
+                "a no-op repeat must not redraw"
+            );
         }
 
         #[test]
@@ -1559,7 +1897,11 @@ mod tests {
             let before = IconSpec::resting(50.0, AmbientTheme::Dark);
             let after = IconSpec::resting(51.0, AmbientTheme::Dark);
             let result = should_redraw(&after, Some(before.cache_key()));
-            assert_eq!(result, Some(after.cache_key()), "a real change must still trigger a redraw");
+            assert_eq!(
+                result,
+                Some(after.cache_key()),
+                "a real change must still trigger a redraw"
+            );
         }
 
         #[test]
@@ -1569,10 +1911,17 @@ mod tests {
             // utilisation happens to match the account being switched away
             // from.
             let resting = IconSpec::resting(50.0, AmbientTheme::Dark);
-            let switching =
-                IconSpec { utilisation: None, state: TrayState::Switching, spin: 0.0, theme: AmbientTheme::Dark };
+            let switching = IconSpec {
+                utilisation: None,
+                state: TrayState::Switching,
+                spin: 0.0,
+                theme: AmbientTheme::Dark,
+            };
             assert_ne!(resting.cache_key(), switching.cache_key());
-            assert_eq!(should_redraw(&switching, Some(resting.cache_key())), Some(switching.cache_key()));
+            assert_eq!(
+                should_redraw(&switching, Some(resting.cache_key())),
+                Some(switching.cache_key())
+            );
         }
     }
 }

@@ -78,8 +78,7 @@ fn home_dir() -> PathBuf {
         if let Some(profile) = env_non_empty("USERPROFILE") {
             return PathBuf::from(profile);
         }
-        if let (Some(drive), Some(path)) = (env_non_empty("HOMEDRIVE"), env_non_empty("HOMEPATH"))
-        {
+        if let (Some(drive), Some(path)) = (env_non_empty("HOMEDRIVE"), env_non_empty("HOMEPATH")) {
             return PathBuf::from(format!("{drive}{path}"));
         }
         if let Some(home) = env_non_empty("HOME") {
@@ -907,7 +906,10 @@ mod tests {
         // ignore it and use the real home dir.
         let _cfg_guard = EnvGuard::set("CLAUDE_CONFIG_DIR", custom.path().to_str().unwrap());
 
-        assert_eq!(default_global_config_path(), home.path().join(".claude.json"));
+        assert_eq!(
+            default_global_config_path(),
+            home.path().join(".claude.json")
+        );
     }
 
     #[test]

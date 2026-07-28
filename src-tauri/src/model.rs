@@ -149,8 +149,7 @@ impl Account {
                 // Trim before hashing: a stray space around an address is the
                 // same account, and without this a padded email forks the
                 // history series.
-                let digest =
-                    Sha256::digest(self.email.trim().to_ascii_lowercase().as_bytes());
+                let digest = Sha256::digest(self.email.trim().to_ascii_lowercase().as_bytes());
                 format!("email:{digest:x}")
             }
         }
@@ -167,7 +166,9 @@ impl Account {
 
     /// Every window that gates this account, as `(label, pct)`.
     pub fn binding_windows(&self) -> Vec<(String, f64)> {
-        let Some(u) = &self.usage else { return Vec::new() };
+        let Some(u) = &self.usage else {
+            return Vec::new();
+        };
         let mut out = Vec::new();
         if let Some(w) = &u.five_hour {
             out.push(("5h".to_string(), w.pct));
@@ -191,7 +192,9 @@ impl Account {
         self.binding_windows()
             .into_iter()
             .map(|(_, p)| p)
-            .fold(None, |acc: Option<f64>, p| Some(acc.map_or(p, |a| a.max(p))))
+            .fold(None, |acc: Option<f64>, p| {
+                Some(acc.map_or(p, |a| a.max(p)))
+            })
     }
 
     /// Remaining percentage before this account hits a limit.
@@ -279,7 +282,11 @@ impl Snapshot {
             .find(|e| e.kind == EnvKind::Native)
             .and_then(|e| e.accounts.iter().find(|a| a.active))
             .map(|a| a.number);
-        Self { schema_version: 1, active_account_number, environments }
+        Self {
+            schema_version: 1,
+            active_account_number,
+            environments,
+        }
     }
 
     /// The account whose credentials are live in the native environment.
@@ -296,7 +303,10 @@ mod tests {
     use super::*;
 
     fn win(pct: f64) -> UsageWindow {
-        UsageWindow { pct, ..Default::default() }
+        UsageWindow {
+            pct,
+            ..Default::default()
+        }
     }
 
     fn acct(pcts: (f64, f64), scoped: &[f64]) -> Account {
@@ -309,7 +319,11 @@ mod tests {
                 scoped: Some(
                     scoped
                         .iter()
-                        .map(|p| UsageWindow { pct: *p, name: Some("Fable".into()), ..Default::default() })
+                        .map(|p| UsageWindow {
+                            pct: *p,
+                            name: Some("Fable".into()),
+                            ..Default::default()
+                        })
                         .collect(),
                 ),
             }),
@@ -334,7 +348,11 @@ mod tests {
     #[test]
     fn unknown_usage_is_none_not_zero() {
         // Zero would make an unmeasurable account look like the best target.
-        let a = Account { number: 1, email: "a@b.com".into(), ..Default::default() };
+        let a = Account {
+            number: 1,
+            email: "a@b.com".into(),
+            ..Default::default()
+        };
         assert_eq!(a.binding_utilisation(), None);
         assert_eq!(a.headroom(), None);
     }
@@ -359,7 +377,7 @@ mod tests {
 
     #[test]
     fn masking_keeps_the_domain() {
-        assert_eq!(mask_email("yash@apex36.io"), "y•••@apex36.io");
+        assert_eq!(mask_email("user@example.com"), "u•••@example.com");
         assert_eq!(mask_email("setup-token-4"), "setup-token-4");
         assert_eq!(mask_email("@weird.com"), "@weird.com");
     }
@@ -398,12 +416,14 @@ mod tests {
         assert_eq!(accounts.len(), 3);
 
         for a in accounts {
-            let parsed: Account =
-                serde_json::from_value(a.clone()).expect("account deserialises");
+            let parsed: Account = serde_json::from_value(a.clone()).expect("account deserialises");
             assert!(!parsed.email.is_empty());
             // Every account in the fixture carries a scoped per-model window.
             let scoped = parsed.usage.as_ref().and_then(|u| u.scoped.as_ref());
-            assert!(scoped.is_some_and(|s| !s.is_empty()), "scoped windows present");
+            assert!(
+                scoped.is_some_and(|s| !s.is_empty()),
+                "scoped windows present"
+            );
         }
 
         // The active account in the capture is slot 3 at 7d 81%.

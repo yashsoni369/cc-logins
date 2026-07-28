@@ -168,10 +168,16 @@ pub struct HistorySummary {
 #[derive(Debug, Error)]
 pub enum HistoryError {
     #[error("failed to create history data directory {path}: {source}")]
-    Io { path: PathBuf, source: std::io::Error },
+    Io {
+        path: PathBuf,
+        source: std::io::Error,
+    },
 
     #[error("failed to open history database at {path}: {source}")]
-    Open { path: PathBuf, source: rusqlite::Error },
+    Open {
+        path: PathBuf,
+        source: rusqlite::Error,
+    },
 
     #[error("history database error: {0}")]
     Sqlite(#[from] rusqlite::Error),
@@ -293,12 +299,16 @@ pub struct HistoryStore {
 impl HistoryStore {
     /// Open (creating if needed) `history.sqlite3` under `data_dir`.
     pub fn open(data_dir: &Path) -> Result<Self> {
-        std::fs::create_dir_all(data_dir)
-            .map_err(|source| HistoryError::Io { path: data_dir.to_path_buf(), source })?;
+        std::fs::create_dir_all(data_dir).map_err(|source| HistoryError::Io {
+            path: data_dir.to_path_buf(),
+            source,
+        })?;
 
         let db_path = data_dir.join("history.sqlite3");
-        let conn = Connection::open(&db_path)
-            .map_err(|source| HistoryError::Open { path: db_path.clone(), source })?;
+        let conn = Connection::open(&db_path).map_err(|source| HistoryError::Open {
+            path: db_path.clone(),
+            source,
+        })?;
 
         // WAL rather than the default rollback journal: the poller (writer)
         // and the History screen (reader) run concurrently from the same
@@ -308,7 +318,9 @@ impl HistoryStore {
 
         migrate(&conn)?;
 
-        Ok(Self { conn: Mutex::new(conn) })
+        Ok(Self {
+            conn: Mutex::new(conn),
+        })
     }
 
     /// Record every measured account in `snapshot`.
@@ -349,11 +361,17 @@ impl HistoryStore {
 
         for env in &snapshot.environments {
             for account in &env.accounts {
-                let Some(usage) = &account.usage else { continue };
-                let Some(raw_timestamp) = &account.usage_fetched_at else { continue };
+                let Some(usage) = &account.usage else {
+                    continue;
+                };
+                let Some(raw_timestamp) = &account.usage_fetched_at else {
+                    continue;
+                };
 
                 let timestamp = match DateTime::parse_from_rfc3339(raw_timestamp) {
-                    Ok(dt) => dt.with_timezone(&Utc).to_rfc3339_opts(SecondsFormat::Secs, true),
+                    Ok(dt) => dt
+                        .with_timezone(&Utc)
+                        .to_rfc3339_opts(SecondsFormat::Secs, true),
                     Err(err) => {
                         log::warn!(
                             "history: skipping {} — unparseable usageFetchedAt {raw_timestamp:?}: {err}",
@@ -372,7 +390,13 @@ impl HistoryStore {
                     "INSERT OR IGNORE INTO samples \
                      (account_key, timestamp, five_hour_pct, seven_day_pct, binding_pct) \
                      VALUES (?1, ?2, ?3, ?4, ?5)",
-                    params![account_key, timestamp, five_hour_pct, seven_day_pct, binding],
+                    params![
+                        account_key,
+                        timestamp,
+                        five_hour_pct,
+                        seven_day_pct,
+                        binding
+                    ],
                 )?;
 
                 if changes > 0 {
@@ -435,7 +459,13 @@ impl HistoryStore {
                  ORDER BY timestamp ASC",
             )?;
             let rows = stmt.query_map(params![account_key, since_ts, until_ts], |row| {
-                Ok((row.get::<_, String>(0)?, ScopedSample { name: row.get(1)?, pct: row.get(2)? }))
+                Ok((
+                    row.get::<_, String>(0)?,
+                    ScopedSample {
+                        name: row.get(1)?,
+                        pct: row.get(2)?,
+                    },
+                ))
             })?;
             for row in rows {
                 let (ts, scoped) = row?;
@@ -581,7 +611,14 @@ impl HistoryStore {
             // `stmt` would drop while still borrowed.
             let rows = stmt
                 .query_map(params![cutoff_ts], |row| {
-                    Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?, row.get(5)?))
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                        row.get(5)?,
+                    ))
                 })?
                 .collect::<std::result::Result<Vec<_>, _>>()?;
             rows
@@ -602,8 +639,14 @@ impl HistoryStore {
             )?;
         }
 
-        let deleted = tx.execute("DELETE FROM samples WHERE timestamp < ?1", params![cutoff_ts])?;
-        tx.execute("DELETE FROM scoped_samples WHERE timestamp < ?1", params![cutoff_ts])?;
+        let deleted = tx.execute(
+            "DELETE FROM samples WHERE timestamp < ?1",
+            params![cutoff_ts],
+        )?;
+        tx.execute(
+            "DELETE FROM scoped_samples WHERE timestamp < ?1",
+            params![cutoff_ts],
+        )?;
 
         tx.commit()?;
         Ok(deleted)
@@ -673,7 +716,8 @@ fn busiest_weekday_since(conn: &Connection, since: DateTime<Utc>) -> Result<Opti
     let mut count: HashMap<Weekday, i64> = HashMap::new();
 
     {
-        let mut stmt = conn.prepare("SELECT timestamp, binding_pct FROM samples WHERE timestamp >= ?1")?;
+        let mut stmt =
+            conn.prepare("SELECT timestamp, binding_pct FROM samples WHERE timestamp >= ?1")?;
         let rows = stmt.query_map(params![since_ts], |row| {
             Ok((row.get::<_, String>(0)?, row.get::<_, f64>(1)?))
         })?;
@@ -690,7 +734,11 @@ fn busiest_weekday_since(conn: &Connection, since: DateTime<Utc>) -> Result<Opti
         let mut stmt =
             conn.prepare("SELECT day, avg_pct, sample_count FROM daily_rollups WHERE day >= ?1")?;
         let rows = stmt.query_map(params![since_day], |row| {
-            Ok((row.get::<_, String>(0)?, row.get::<_, f64>(1)?, row.get::<_, i64>(2)?))
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, f64>(1)?,
+                row.get::<_, i64>(2)?,
+            ))
         })?;
         for row in rows {
             let (day, avg_pct, day_count) = row?;
@@ -765,7 +813,10 @@ mod tests {
                     active: false,
                     usage_status: UsageStatus::Ok,
                     usage: Some(Usage {
-                        five_hour: Some(UsageWindow { pct: five_hour_pct, ..Default::default() }),
+                        five_hour: Some(UsageWindow {
+                            pct: five_hour_pct,
+                            ..Default::default()
+                        }),
                         seven_day: Some(UsageWindow {
                             pct: seven_day_pct,
                             expected_pct: Some(42.0),
@@ -805,7 +856,9 @@ mod tests {
         let (_dir, store) = store();
         let conn = store.conn.lock().unwrap_or_else(|p| p.into_inner());
 
-        let version: i32 = conn.query_row("PRAGMA user_version", [], |r| r.get(0)).unwrap();
+        let version: i32 = conn
+            .query_row("PRAGMA user_version", [], |r| r.get(0))
+            .unwrap();
         assert_eq!(version, CURRENT_SCHEMA_VERSION);
 
         let mut names: Vec<String> = conn
@@ -825,7 +878,14 @@ mod tests {
         // or wipe existing data.
         let dir = tempfile::tempdir().unwrap();
         let first = HistoryStore::open(dir.path()).unwrap();
-        let snap = snapshot_for(Some("org-1"), "a@x.com", "2026-07-01T00:00:00Z", 10.0, 20.0, &[]);
+        let snap = snapshot_for(
+            Some("org-1"),
+            "a@x.com",
+            "2026-07-01T00:00:00Z",
+            10.0,
+            20.0,
+            &[],
+        );
         first.record(&snap).unwrap();
         drop(first);
 
@@ -835,7 +895,11 @@ mod tests {
             // Wide window: the fixtures use fixed calendar timestamps, so a
             // `now ± 1 day` range silently stops matching them as the real
             // clock moves past the fixture date.
-            .series(&key, Utc::now() - Duration::days(3650), Utc::now() + Duration::days(1))
+            .series(
+                &key,
+                Utc::now() - Duration::days(3650),
+                Utc::now() + Duration::days(1),
+            )
             .unwrap();
         assert_eq!(series.len(), 1);
     }
@@ -849,16 +913,43 @@ mod tests {
     /// path end-to-end instead of a since-removed local function.
     #[test]
     fn stable_key_prefers_org_uuid_and_hashes_email_otherwise() {
-        let with_org = snapshot_for(Some("org-123"), "a@x.com", "2026-07-01T00:00:00Z", 0.0, 0.0, &[]);
-        assert_eq!(with_org.environments[0].accounts[0].stable_key(), "org:org-123");
+        let with_org = snapshot_for(
+            Some("org-123"),
+            "a@x.com",
+            "2026-07-01T00:00:00Z",
+            0.0,
+            0.0,
+            &[],
+        );
+        assert_eq!(
+            with_org.environments[0].accounts[0].stable_key(),
+            "org:org-123"
+        );
 
-        let no_org = snapshot_for(None, "Person@Example.com", "2026-07-01T00:00:00Z", 0.0, 0.0, &[]);
+        let no_org = snapshot_for(
+            None,
+            "Person@Example.com",
+            "2026-07-01T00:00:00Z",
+            0.0,
+            0.0,
+            &[],
+        );
         let key = no_org.environments[0].accounts[0].stable_key();
         assert!(key.starts_with("email:"));
-        assert_ne!(key, "email:Person@Example.com", "must not store the raw email as the key");
+        assert_ne!(
+            key, "email:Person@Example.com",
+            "must not store the raw email as the key"
+        );
 
         // Case-insensitive: same account, different casing, same key.
-        let lower = snapshot_for(None, "person@example.com", "2026-07-01T00:00:00Z", 0.0, 0.0, &[]);
+        let lower = snapshot_for(
+            None,
+            "person@example.com",
+            "2026-07-01T00:00:00Z",
+            0.0,
+            0.0,
+            &[],
+        );
         assert_eq!(key, lower.environments[0].accounts[0].stable_key());
     }
 
@@ -867,8 +958,22 @@ mod tests {
     /// space around a stored address would silently fork the history series.
     #[test]
     fn stable_key_trims_padded_email() {
-        let padded = snapshot_for(None, "  Person@Example.COM  ", "2026-07-01T00:00:00Z", 0.0, 0.0, &[]);
-        let clean = snapshot_for(None, "person@example.com", "2026-07-01T00:00:00Z", 0.0, 0.0, &[]);
+        let padded = snapshot_for(
+            None,
+            "  Person@Example.COM  ",
+            "2026-07-01T00:00:00Z",
+            0.0,
+            0.0,
+            &[],
+        );
+        let clean = snapshot_for(
+            None,
+            "person@example.com",
+            "2026-07-01T00:00:00Z",
+            0.0,
+            0.0,
+            &[],
+        );
         assert_eq!(
             padded.environments[0].accounts[0].stable_key(),
             clean.environments[0].accounts[0].stable_key()
@@ -880,7 +985,14 @@ mod tests {
     #[test]
     fn recording_the_same_measurement_repeatedly_is_a_no_op() {
         let (_dir, store) = store();
-        let snap = snapshot_for(Some("org-1"), "a@x.com", "2026-07-01T12:00:00Z", 16.0, 81.0, &[("Fable", 22.0)]);
+        let snap = snapshot_for(
+            Some("org-1"),
+            "a@x.com",
+            "2026-07-01T12:00:00Z",
+            16.0,
+            81.0,
+            &[("Fable", 22.0)],
+        );
 
         let first = store.record(&snap).unwrap();
         assert_eq!(first, 1, "first sighting of a measurement is recorded");
@@ -889,7 +1001,10 @@ mod tests {
         // snapshot, same usageFetchedAt, every time.
         for _ in 0..60 {
             let again = store.record(&snap).unwrap();
-            assert_eq!(again, 0, "repeat of an already-seen timestamp must not insert a new row");
+            assert_eq!(
+                again, 0,
+                "repeat of an already-seen timestamp must not insert a new row"
+            );
         }
 
         let key = snap.environments[0].accounts[0].stable_key();
@@ -897,21 +1012,46 @@ mod tests {
             // Wide window: the fixtures use fixed calendar timestamps, so a
             // `now ± 1 day` range silently stops matching them as the real
             // clock moves past the fixture date.
-            .series(&key, Utc::now() - Duration::days(3650), Utc::now() + Duration::days(1))
+            .series(
+                &key,
+                Utc::now() - Duration::days(3650),
+                Utc::now() + Duration::days(1),
+            )
             .unwrap();
-        assert_eq!(series.len(), 1, "60 repeats of one measurement must still be exactly one row");
+        assert_eq!(
+            series.len(),
+            1,
+            "60 repeats of one measurement must still be exactly one row"
+        );
         assert_eq!(series[0].binding_pct, 81.0);
-        assert_eq!(series[0].scoped, vec![ScopedSample { name: "Fable".into(), pct: 22.0 }]);
+        assert_eq!(
+            series[0].scoped,
+            vec![ScopedSample {
+                name: "Fable".into(),
+                pct: 22.0
+            }]
+        );
 
         // A genuinely new measurement (different timestamp) is a new row.
-        let snap2 = snapshot_for(Some("org-1"), "a@x.com", "2026-07-01T12:05:00Z", 18.0, 83.0, &[("Fable", 23.0)]);
+        let snap2 = snapshot_for(
+            Some("org-1"),
+            "a@x.com",
+            "2026-07-01T12:05:00Z",
+            18.0,
+            83.0,
+            &[("Fable", 23.0)],
+        );
         let second = store.record(&snap2).unwrap();
         assert_eq!(second, 1);
         let series = store
             // Wide window: the fixtures use fixed calendar timestamps, so a
             // `now ± 1 day` range silently stops matching them as the real
             // clock moves past the fixture date.
-            .series(&key, Utc::now() - Duration::days(3650), Utc::now() + Duration::days(1))
+            .series(
+                &key,
+                Utc::now() - Duration::days(3650),
+                Utc::now() + Duration::days(1),
+            )
             .unwrap();
         assert_eq!(series.len(), 2);
     }
@@ -919,11 +1059,25 @@ mod tests {
     #[test]
     fn accounts_without_usage_or_timestamp_are_skipped_not_errored() {
         let (_dir, store) = store();
-        let mut snap = snapshot_for(Some("org-1"), "a@x.com", "2026-07-01T00:00:00Z", 1.0, 2.0, &[]);
+        let mut snap = snapshot_for(
+            Some("org-1"),
+            "a@x.com",
+            "2026-07-01T00:00:00Z",
+            1.0,
+            2.0,
+            &[],
+        );
         snap.environments[0].accounts[0].usage = None;
         assert_eq!(store.record(&snap).unwrap(), 0);
 
-        let mut snap2 = snapshot_for(Some("org-1"), "a@x.com", "2026-07-01T00:00:00Z", 1.0, 2.0, &[]);
+        let mut snap2 = snapshot_for(
+            Some("org-1"),
+            "a@x.com",
+            "2026-07-01T00:00:00Z",
+            1.0,
+            2.0,
+            &[],
+        );
         snap2.environments[0].accounts[0].usage_fetched_at = None;
         assert_eq!(store.record(&snap2).unwrap(), 0);
 
@@ -937,8 +1091,14 @@ mod tests {
     #[test]
     fn series_returns_only_rows_within_the_requested_range_in_order() {
         let (_dir, store) = store();
-        let key_holder =
-            snapshot_for(Some("org-1"), "a@x.com", "2026-07-01T00:00:00Z", 0.0, 0.0, &[]);
+        let key_holder = snapshot_for(
+            Some("org-1"),
+            "a@x.com",
+            "2026-07-01T00:00:00Z",
+            0.0,
+            0.0,
+            &[],
+        );
         let key = key_holder.environments[0].accounts[0].stable_key();
 
         for (ts, five, seven) in [
@@ -951,8 +1111,12 @@ mod tests {
             store.record(&snap).unwrap();
         }
 
-        let since = DateTime::parse_from_rfc3339("2026-07-02T00:00:00Z").unwrap().with_timezone(&Utc);
-        let until = DateTime::parse_from_rfc3339("2026-07-03T23:59:59Z").unwrap().with_timezone(&Utc);
+        let since = DateTime::parse_from_rfc3339("2026-07-02T00:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let until = DateTime::parse_from_rfc3339("2026-07-03T23:59:59Z")
+            .unwrap()
+            .with_timezone(&Utc);
         let series = store.series(&key, since, until).unwrap();
 
         assert_eq!(series.len(), 2);
@@ -966,8 +1130,14 @@ mod tests {
     #[test]
     fn daily_rollup_computes_min_max_avg_per_day_from_raw_samples() {
         let (_dir, store) = store();
-        let key_holder =
-            snapshot_for(Some("org-1"), "a@x.com", "2026-07-01T00:00:00Z", 0.0, 0.0, &[]);
+        let key_holder = snapshot_for(
+            Some("org-1"),
+            "a@x.com",
+            "2026-07-01T00:00:00Z",
+            0.0,
+            0.0,
+            &[],
+        );
         let key = key_holder.environments[0].accounts[0].stable_key();
 
         let today = Utc::now().format("%Y-%m-%d").to_string();
@@ -994,8 +1164,14 @@ mod tests {
     #[test]
     fn prune_downsamples_old_raw_rows_into_daily_rollups_then_deletes_them() {
         let (_dir, store) = store();
-        let key_holder =
-            snapshot_for(Some("org-1"), "a@x.com", "2026-07-01T00:00:00Z", 0.0, 0.0, &[]);
+        let key_holder = snapshot_for(
+            Some("org-1"),
+            "a@x.com",
+            "2026-07-01T00:00:00Z",
+            0.0,
+            0.0,
+            &[],
+        );
         let key = key_holder.environments[0].accounts[0].stable_key();
 
         // Two old measurements (40 days ago) on the same day, one recent one.
@@ -1027,7 +1203,10 @@ mod tests {
 
         // ...but a rollup for that day now exists with the correct math.
         let rollup = store.daily_rollup(&key, 90).unwrap();
-        let old = rollup.iter().find(|d| d.day == old_day_str).expect("old day rolled up");
+        let old = rollup
+            .iter()
+            .find(|d| d.day == old_day_str)
+            .expect("old day rolled up");
         assert_eq!(old.sample_count, 2);
         assert_eq!(old.min_pct, 30.0);
         assert_eq!(old.max_pct, 70.0);
@@ -1036,7 +1215,10 @@ mod tests {
         // The recent sample is untouched and still shows up in the same
         // combined daily_rollup() read.
         let today_str = Utc::now().format("%Y-%m-%d").to_string();
-        let recent = rollup.iter().find(|d| d.day == today_str).expect("recent day still raw");
+        let recent = rollup
+            .iter()
+            .find(|d| d.day == today_str)
+            .expect("recent day still raw");
         assert_eq!(recent.sample_count, 1);
         assert_eq!(recent.max_pct, 40.0);
     }
@@ -1083,4 +1265,3 @@ mod tests {
         assert!(summary.busiest_weekday.is_some());
     }
 }
-

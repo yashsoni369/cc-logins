@@ -33,7 +33,10 @@ fn cswap_json(subcommand: &str) -> Option<Value> {
         ALLOWED.contains(&subcommand),
         "differential tests are read-only; '{subcommand}' is not an allowed subcommand"
     );
-    let out = Command::new("cswap").args([subcommand, "--json"]).output().ok()?;
+    let out = Command::new("cswap")
+        .args([subcommand, "--json"])
+        .output()
+        .ok()?;
     if !out.status.success() {
         return None;
     }
@@ -61,7 +64,10 @@ fn fixture() -> Value {
 fn every_account_the_cli_reports_deserialises_into_our_model() {
     let Some(v) = live_or_skip() else { return };
     let accounts = v["accounts"].as_array().expect("accounts array");
-    assert!(!accounts.is_empty(), "expected at least one managed account");
+    assert!(
+        !accounts.is_empty(),
+        "expected at least one managed account"
+    );
 
     for raw in accounts {
         let parsed: Result<Account, _> = serde_json::from_value(raw.clone());
@@ -85,8 +91,7 @@ fn our_model_does_not_silently_drop_fields_the_cli_emits() {
 
     let mut dropped: Vec<String> = Vec::new();
     for raw in accounts {
-        let parsed: Account =
-            serde_json::from_value(raw.clone()).expect("account deserialises");
+        let parsed: Account = serde_json::from_value(raw.clone()).expect("account deserialises");
         let round_tripped = serde_json::to_value(&parsed).expect("account re-serialises");
 
         collect_missing("", raw, &round_tripped, &mut dropped);
@@ -105,9 +110,15 @@ fn our_model_does_not_silently_drop_fields_the_cli_emits() {
 /// Absent-vs-null is treated as equivalent: `skip_serializing_if` legitimately
 /// omits a key whose value was null.
 fn collect_missing(path: &str, original: &Value, actual: &Value, out: &mut Vec<String>) {
-    let Value::Object(orig) = original else { return };
+    let Value::Object(orig) = original else {
+        return;
+    };
     for (k, v) in orig {
-        let child = if path.is_empty() { k.clone() } else { format!("{path}.{k}") };
+        let child = if path.is_empty() {
+            k.clone()
+        } else {
+            format!("{path}.{k}")
+        };
         match actual.get(k) {
             None => {
                 if !v.is_null() {
@@ -192,9 +203,14 @@ fn the_active_account_is_unique_and_matches_status() {
     let Some(v) = live_or_skip() else { return };
     let accounts = v["accounts"].as_array().expect("accounts array");
 
-    let actives: Vec<&Value> =
-        accounts.iter().filter(|a| a["active"].as_bool() == Some(true)).collect();
-    assert!(actives.len() <= 1, "more than one account claims to be active: {actives:?}");
+    let actives: Vec<&Value> = accounts
+        .iter()
+        .filter(|a| a["active"].as_bool() == Some(true))
+        .collect();
+    assert!(
+        actives.len() <= 1,
+        "more than one account claims to be active: {actives:?}"
+    );
 
     if let Some(active) = actives.first() {
         assert_eq!(
@@ -208,7 +224,9 @@ fn the_active_account_is_unique_and_matches_status() {
     if let Some(status) = cswap_json("status") {
         if let (Some(from_list), Some(from_status)) = (
             v["activeAccountNumber"].as_u64(),
-            status["activeAccountNumber"].as_u64().or_else(|| status["number"].as_u64()),
+            status["activeAccountNumber"]
+                .as_u64()
+                .or_else(|| status["number"].as_u64()),
         ) {
             assert_eq!(
                 from_list, from_status,

@@ -113,7 +113,9 @@ fn format_crash_report(message: &str, location: &str, thread: &str, backtrace: &
     // would simply kill the process with no report written at all, on top
     // of the crash the hook was trying to describe in the first place.
     let timestamp = std::panic::catch_unwind(|| {
-        chrono::Local::now().format("%Y-%m-%d %H:%M:%S%.3f").to_string()
+        chrono::Local::now()
+            .format("%Y-%m-%d %H:%M:%S%.3f")
+            .to_string()
     })
     .unwrap_or_else(|_| "unknown time".to_string());
 
@@ -137,7 +139,9 @@ fn format_crash_report(message: &str, location: &str, thread: &str, backtrace: &
 /// [`format_crash_report`]) — silently failing to log is strictly better
 /// than that.
 fn append_report(path: &Path, entry: &str) {
-    let _guard = CRASH_WRITE_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    let _guard = CRASH_WRITE_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
 
     if let Some(parent) = path.parent() {
         let _ = std::fs::create_dir_all(parent);
@@ -165,7 +169,10 @@ pub fn install() {
     std::panic::set_hook(Box::new(move |info| {
         let message = panic_message(info);
         let location = panic_location(info);
-        let thread = std::thread::current().name().unwrap_or("<unnamed>").to_string();
+        let thread = std::thread::current()
+            .name()
+            .unwrap_or("<unnamed>")
+            .to_string();
 
         // `force_capture` ignores `RUST_BACKTRACE` and always captures. A
         // release build with `strip = true` (see Cargo.toml) will often

@@ -106,7 +106,9 @@ use crate::credentials::{
     self, merge_shared_credential_fields, shared_credential_fields, CredentialError,
     CredentialStore, Platform as CredPlatform, StoreHost,
 };
-use crate::model::{Account, EnvKind, EnvStatus, Environment, Snapshot, Usage, UsageStatus, UsageWindow};
+use crate::model::{
+    Account, EnvKind, EnvStatus, Environment, Snapshot, Usage, UsageStatus, UsageWindow,
+};
 use crate::oauth;
 use crate::paths;
 
@@ -142,7 +144,8 @@ fn account_config_path(account_num: &str, email: &str) -> PathBuf {
 /// it can also address an account config backup inside the `cswap` CLI's
 /// store (see [`import_from_cswap`]).
 fn account_config_path_at(root: &Path, account_num: &str, email: &str) -> PathBuf {
-    root.join("configs").join(format!(".claude-config-{account_num}-{email}.json"))
+    root.join("configs")
+        .join(format!(".claude-config-{account_num}-{email}.json"))
 }
 
 /// [`StoreHost`] for this crate's [`CredentialStore`]: platform is detected
@@ -212,7 +215,9 @@ pub enum SwitchError {
     )]
     NoLiveCredential,
 
-    #[error("this login is already registered as account {0}; refusing to create a duplicate slot")]
+    #[error(
+        "this login is already registered as account {0}; refusing to create a duplicate slot"
+    )]
     AlreadyRegistered(String),
 
     #[error("invalid token: {0}")]
@@ -236,7 +241,10 @@ fn atomic_write(target: &Path, contents: &[u8]) -> std::io::Result<()> {
     let dir = target.parent().unwrap_or_else(|| Path::new("."));
     std::fs::create_dir_all(dir)?;
 
-    let file_name = target.file_name().and_then(|n| n.to_str()).unwrap_or("switcher");
+    let file_name = target
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("switcher");
     let tmp_path = dir.join(format!(
         ".{file_name}.{}.{}.tmp",
         std::process::id(),
@@ -304,7 +312,10 @@ fn write_sequence_data(data: &Map<String, Value>) -> Result<(), SwitchError> {
 }
 
 fn write_account_config(account_num: &str, email: &str, config_text: &str) -> std::io::Result<()> {
-    atomic_write(&account_config_path(account_num, email), config_text.as_bytes())
+    atomic_write(
+        &account_config_path(account_num, email),
+        config_text.as_bytes(),
+    )
 }
 
 fn read_account_config(account_num: &str, email: &str) -> Option<String> {
@@ -378,7 +389,11 @@ fn accounts_from_sequence(data: &Map<String, Value>) -> Vec<Account> {
     let order: Vec<String> = match data.get("sequence").and_then(Value::as_array) {
         Some(seq) => seq
             .iter()
-            .filter_map(|v| v.as_u64().map(|n| n.to_string()).or_else(|| v.as_str().map(str::to_string)))
+            .filter_map(|v| {
+                v.as_u64()
+                    .map(|n| n.to_string())
+                    .or_else(|| v.as_str().map(str::to_string))
+            })
             .collect(),
         None => {
             let mut nums: Vec<String> = accounts_map.keys().cloned().collect();
@@ -397,13 +412,21 @@ fn accounts_from_sequence(data: &Map<String, Value>) -> Vec<Account> {
         let Ok(number) = num_str.parse::<u32>() else {
             continue;
         };
-        let email = record.get("email").and_then(Value::as_str).unwrap_or_default().to_string();
+        let email = record
+            .get("email")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string();
         let org_uuid_raw = record
             .get("organizationUuid")
             .and_then(Value::as_str)
             .unwrap_or_default()
             .to_string();
-        let organization_uuid = if org_uuid_raw.is_empty() { None } else { Some(org_uuid_raw.clone()) };
+        let organization_uuid = if org_uuid_raw.is_empty() {
+            None
+        } else {
+            Some(org_uuid_raw.clone())
+        };
         let organization_name = record
             .get("organizationName")
             .and_then(Value::as_str)
@@ -418,7 +441,10 @@ fn accounts_from_sequence(data: &Map<String, Value>) -> Vec<Account> {
         // cswap's JSON; this model folds it into `UsageStatus::Disabled`,
         // which is exactly what that variant's doc comment describes and is
         // what `Account::is_switchable` already keys off.
-        let disabled = record.get("disabled").and_then(Value::as_bool).unwrap_or(false);
+        let disabled = record
+            .get("disabled")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
         let active = active_num.as_deref() == Some(num_str.as_str());
 
         out.push(Account {
@@ -429,7 +455,11 @@ fn accounts_from_sequence(data: &Map<String, Value>) -> Vec<Account> {
             organization_uuid,
             is_organization: Some(!org_uuid_raw.is_empty()),
             active,
-            usage_status: if disabled { UsageStatus::Disabled } else { UsageStatus::Unknown },
+            usage_status: if disabled {
+                UsageStatus::Disabled
+            } else {
+                UsageStatus::Unknown
+            },
             usage: None,
             usage_fetched_at: None,
             usage_age_seconds: None,
@@ -488,8 +518,14 @@ pub async fn read_snapshot() -> Result<Snapshot, SwitchError> {
         let num = account.number.to_string();
 
         if !creds.is_empty() {
-            let outcome =
-                oauth::try_fetch_usage_for_account(&num, &account.email, &creds, account.active, None).await;
+            let outcome = oauth::try_fetch_usage_for_account(
+                &num,
+                &account.email,
+                &creds,
+                account.active,
+                None,
+            )
+            .await;
             match outcome.usage {
                 Some(result) => {
                     account.usage = Some(to_model_usage(&result));
@@ -610,7 +646,10 @@ fn acquire_cswap_and_vault_locks(
 ) -> Result<(Option<crate::locking::FileLock>, crate::locking::FileLock), SwitchError> {
     let cswap_root = paths::cswap_store_root();
     let cswap_lock = if cswap_root.exists() {
-        Some(crate::locking::acquire_or_err(cswap_root.join(".lock"), timeout)?)
+        Some(crate::locking::acquire_or_err(
+            cswap_root.join(".lock"),
+            timeout,
+        )?)
     } else {
         None
     };
@@ -733,8 +772,8 @@ fn switch_to_with_timeout(target: &Account, timeout: Duration) -> Result<(), Swi
     if target_creds.is_empty() {
         return Err(SwitchError::NoStoredCredentials(num));
     }
-    let target_config_text =
-        read_account_config(&num, &email).ok_or_else(|| SwitchError::NoStoredConfig(num.clone()))?;
+    let target_config_text = read_account_config(&num, &email)
+        .ok_or_else(|| SwitchError::NoStoredConfig(num.clone()))?;
     let target_config_value: Value = serde_json::from_str(&target_config_text)?;
     let target_oauth = target_config_value
         .get("oauthAccount")
@@ -750,8 +789,14 @@ fn switch_to_with_timeout(target: &Account, timeout: Duration) -> Result<(), Swi
     write_oauth_account(&target_oauth)?;
 
     // Step 5: record the new active slot.
-    data.insert("activeAccountNumber".to_string(), Value::from(target.number));
-    data.insert("lastUpdated".to_string(), Value::String(chrono::Utc::now().to_rfc3339()));
+    data.insert(
+        "activeAccountNumber".to_string(),
+        Value::from(target.number),
+    );
+    data.insert(
+        "lastUpdated".to_string(),
+        Value::String(chrono::Utc::now().to_rfc3339()),
+    );
     write_sequence_data(&data)?;
 
     Ok(())
@@ -805,7 +850,12 @@ fn next_free_slot(data: &Map<String, Value>) -> u32 {
     let used: std::collections::HashSet<u32> = data
         .get("accounts")
         .and_then(Value::as_object)
-        .map(|accounts| accounts.keys().filter_map(|k| k.parse::<u32>().ok()).collect())
+        .map(|accounts| {
+            accounts
+                .keys()
+                .filter_map(|k| k.parse::<u32>().ok())
+                .collect()
+        })
         .unwrap_or_default();
     let mut candidate = 1u32;
     while used.contains(&candidate) {
@@ -824,7 +874,10 @@ fn add_to_sequence(data: &mut Map<String, Value>, slot: u32) {
             }
         }
         None => {
-            data.insert("sequence".to_string(), Value::Array(vec![Value::from(slot)]));
+            data.insert(
+                "sequence".to_string(),
+                Value::Array(vec![Value::from(slot)]),
+            );
         }
     }
 }
@@ -843,7 +896,10 @@ fn find_registered_slot_by_fingerprint(
     live_fingerprint: &str,
 ) -> Option<String> {
     for (num, record) in accounts {
-        let email = record.get("email").and_then(Value::as_str).unwrap_or_default();
+        let email = record
+            .get("email")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
         let existing = store.read_account_credentials(num, email);
         if existing.is_empty() {
             continue;
@@ -906,13 +962,21 @@ impl From<oauth::TokenAccount> for ResolvedIdentity {
 /// `organizationUuid` + email rather than requiring `uuid` on both sides.
 fn identity_from_record(record: &Map<String, Value>) -> ResolvedIdentity {
     ResolvedIdentity {
-        uuid: record.get("uuid").and_then(Value::as_str).filter(|s| !s.is_empty()).map(str::to_string),
+        uuid: record
+            .get("uuid")
+            .and_then(Value::as_str)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string),
         organization_uuid: record
             .get("organizationUuid")
             .and_then(Value::as_str)
             .filter(|s| !s.is_empty())
             .map(str::to_string),
-        email: record.get("email").and_then(Value::as_str).filter(|s| !s.is_empty()).map(str::to_string),
+        email: record
+            .get("email")
+            .and_then(Value::as_str)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string),
     }
 }
 
@@ -931,7 +995,10 @@ fn identity_matches(new: &ResolvedIdentity, existing: &ResolvedIdentity) -> bool
     if let (Some(a), Some(b)) = (new.uuid.as_deref(), existing.uuid.as_deref()) {
         return a == b;
     }
-    if let (Some(a), Some(b)) = (new.organization_uuid.as_deref(), existing.organization_uuid.as_deref()) {
+    if let (Some(a), Some(b)) = (
+        new.organization_uuid.as_deref(),
+        existing.organization_uuid.as_deref(),
+    ) {
         if a != b {
             return false;
         }
@@ -962,12 +1029,14 @@ fn find_registered_slot_by_identity(
     live_fingerprint: Option<&str>,
 ) -> Option<String> {
     for (num, value) in accounts {
-        let Some(record) = value.as_object() else { continue };
+        let Some(record) = value.as_object() else {
+            continue;
+        };
         let existing_identity = identity_from_record(record);
 
         let has_uuid_pair = new_identity.uuid.is_some() && existing_identity.uuid.is_some();
-        let has_org_pair =
-            new_identity.organization_uuid.is_some() && existing_identity.organization_uuid.is_some();
+        let has_org_pair = new_identity.organization_uuid.is_some()
+            && existing_identity.organization_uuid.is_some();
 
         if has_uuid_pair || has_org_pair {
             if identity_matches(new_identity, &existing_identity) {
@@ -977,7 +1046,10 @@ fn find_registered_slot_by_identity(
         }
 
         if let Some(fp) = live_fingerprint {
-            let email = record.get("email").and_then(Value::as_str).unwrap_or_default();
+            let email = record
+                .get("email")
+                .and_then(Value::as_str)
+                .unwrap_or_default();
             let existing_creds = store.read_account_credentials(num, email);
             if !existing_creds.is_empty()
                 && oauth::credential_fingerprint(&existing_creds).as_deref() == Some(fp)
@@ -1048,7 +1120,11 @@ fn default_identity_resolver(access_token: &str) -> Option<oauth::TokenAccount> 
 /// comparison, logged at `warn`. Holds the lock (rule 1) for the
 /// read-check-write sequence once that starts.
 pub fn add_current_account(alias: Option<&str>) -> Result<u32, SwitchError> {
-    add_current_account_with_timeout(alias, crate::locking::DEFAULT_TIMEOUT, &default_identity_resolver)
+    add_current_account_with_timeout(
+        alias,
+        crate::locking::DEFAULT_TIMEOUT,
+        &default_identity_resolver,
+    )
 }
 
 fn add_current_account_with_timeout(
@@ -1066,10 +1142,13 @@ fn add_current_account_with_timeout(
         return Err(SwitchError::NoLiveCredential);
     }
     let live_fingerprint = oauth::credential_fingerprint(&live_creds);
-    let resolved_account =
-        oauth::extract_access_token(&live_creds).as_deref().and_then(resolve_identity);
+    let resolved_account = oauth::extract_access_token(&live_creds)
+        .as_deref()
+        .and_then(resolve_identity);
     let identity_resolved = resolved_account.is_some();
-    let new_identity: ResolvedIdentity = resolved_account.map(ResolvedIdentity::from).unwrap_or_default();
+    let new_identity: ResolvedIdentity = resolved_account
+        .map(ResolvedIdentity::from)
+        .unwrap_or_default();
 
     // Only our own vault is written here (the live login is read, never
     // written) — no cswap-compat lock needed, see the module-level locking
@@ -1083,8 +1162,11 @@ fn add_current_account_with_timeout(
         // Cloned rather than borrowed: `store` needs `&mut self` inside the
         // lookup, and `data` is mutated further down — decoupling here avoids
         // holding an immutable borrow of `data` across that later mutation.
-        let accounts_snapshot =
-            data.get("accounts").and_then(Value::as_object).cloned().unwrap_or_default();
+        let accounts_snapshot = data
+            .get("accounts")
+            .and_then(Value::as_object)
+            .cloned()
+            .unwrap_or_default();
         if let Some(existing_num) = find_registered_slot_by_identity(
             &mut store,
             &accounts_snapshot,
@@ -1108,7 +1190,11 @@ fn add_current_account_with_timeout(
         .get("oauthAccount")
         .cloned()
         .unwrap_or_else(|| Value::Object(Map::new()));
-    let email = oauth_account.get("emailAddress").and_then(Value::as_str).unwrap_or_default().to_string();
+    let email = oauth_account
+        .get("emailAddress")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_string();
     let organization_uuid = oauth_account
         .get("organizationUuid")
         .and_then(Value::as_str)
@@ -1132,9 +1218,18 @@ fn add_current_account_with_timeout(
 
     let mut record = Map::new();
     record.insert("email".to_string(), Value::String(email));
-    record.insert("organizationUuid".to_string(), Value::String(organization_uuid));
-    record.insert("organizationName".to_string(), Value::String(organization_name));
-    record.insert("added".to_string(), Value::String(chrono::Utc::now().to_rfc3339()));
+    record.insert(
+        "organizationUuid".to_string(),
+        Value::String(organization_uuid),
+    );
+    record.insert(
+        "organizationName".to_string(),
+        Value::String(organization_name),
+    );
+    record.insert(
+        "added".to_string(),
+        Value::String(chrono::Utc::now().to_rfc3339()),
+    );
     // Persist the resolved identity so a future add — even one that can't
     // reach the network — has something stable to match this slot on. The
     // absence of `uuid` on a slot is precisely what let the confirmed
@@ -1155,7 +1250,10 @@ fn add_current_account_with_timeout(
     // registry's notion of "active" — mirrors upstream `add_account` setting
     // `activeAccountNumber` to the freshly added slot.
     data.insert("activeAccountNumber".to_string(), Value::from(slot));
-    data.insert("lastUpdated".to_string(), Value::String(chrono::Utc::now().to_rfc3339()));
+    data.insert(
+        "lastUpdated".to_string(),
+        Value::String(chrono::Utc::now().to_rfc3339()),
+    );
     write_sequence_data(&data)?;
 
     Ok(slot)
@@ -1188,7 +1286,9 @@ fn validate_token(token: &str) -> Result<String, SwitchError> {
         ));
     }
     if trimmed.len() < 20 {
-        return Err(SwitchError::InvalidToken("token is too short to be valid".to_string()));
+        return Err(SwitchError::InvalidToken(
+            "token is too short to be valid".to_string(),
+        ));
     }
     Ok(trimmed.to_string())
 }
@@ -1223,8 +1323,18 @@ fn validate_token(token: &str) -> Result<String, SwitchError> {
 /// [`add_current_account`] does: allow the add, log at `warn`. The resolved
 /// identity, when there is one, is persisted onto the new record the same
 /// way. Identity resolution runs before the vault lock is taken (rule 2).
-pub fn add_token(token: &str, email: Option<&str>, alias: Option<&str>) -> Result<u32, SwitchError> {
-    add_token_with_timeout(token, email, alias, crate::locking::DEFAULT_TIMEOUT, &default_identity_resolver)
+pub fn add_token(
+    token: &str,
+    email: Option<&str>,
+    alias: Option<&str>,
+) -> Result<u32, SwitchError> {
+    add_token_with_timeout(
+        token,
+        email,
+        alias,
+        crate::locking::DEFAULT_TIMEOUT,
+        &default_identity_resolver,
+    )
 }
 
 fn add_token_with_timeout(
@@ -1245,7 +1355,9 @@ fn add_token_with_timeout(
     // duplicate check below to the fingerprint fallback.
     let resolved_account = resolve_identity(&trimmed);
     let identity_resolved = resolved_account.is_some();
-    let new_identity: ResolvedIdentity = resolved_account.map(ResolvedIdentity::from).unwrap_or_default();
+    let new_identity: ResolvedIdentity = resolved_account
+        .map(ResolvedIdentity::from)
+        .unwrap_or_default();
 
     let credentials_payload = if is_api_key {
         trimmed.clone()
@@ -1269,8 +1381,11 @@ fn add_token_with_timeout(
 
     let mut store = CredentialStore::new(GuiStoreHost);
     {
-        let accounts_snapshot =
-            data.get("accounts").and_then(Value::as_object).cloned().unwrap_or_default();
+        let accounts_snapshot = data
+            .get("accounts")
+            .and_then(Value::as_object)
+            .cloned()
+            .unwrap_or_default();
         if let Some(existing_num) = find_registered_slot_by_identity(
             &mut store,
             &accounts_snapshot,
@@ -1319,7 +1434,10 @@ fn add_token_with_timeout(
         Value::String(new_identity.organization_uuid.clone().unwrap_or_default()),
     );
     record.insert("organizationName".to_string(), Value::String(String::new()));
-    record.insert("added".to_string(), Value::String(chrono::Utc::now().to_rfc3339()));
+    record.insert(
+        "added".to_string(),
+        Value::String(chrono::Utc::now().to_rfc3339()),
+    );
     // Persist the resolved identity — same reasoning as `add_current_account`.
     if let Some(uuid) = new_identity.uuid.clone() {
         record.insert("uuid".to_string(), Value::String(uuid));
@@ -1339,7 +1457,10 @@ fn add_token_with_timeout(
     // Unlike `add_current_account`, this does not become the active account —
     // it is only registered, not activated, mirroring upstream
     // `add_account_from_token` (which never touches `activeAccountNumber`).
-    data.insert("lastUpdated".to_string(), Value::String(chrono::Utc::now().to_rfc3339()));
+    data.insert(
+        "lastUpdated".to_string(),
+        Value::String(chrono::Utc::now().to_rfc3339()),
+    );
     write_sequence_data(&data)?;
 
     Ok(slot)
@@ -1418,16 +1539,22 @@ fn add_oauth_credential_with_timeout(
     // it produces.
     let trimmed = credentials_json.trim();
     if trimmed.is_empty() {
-        return Err(SwitchError::InvalidCredential("credential is empty".to_string()));
+        return Err(SwitchError::InvalidCredential(
+            "credential is empty".to_string(),
+        ));
     }
     if serde_json::from_str::<Value>(trimmed).is_err() {
-        return Err(SwitchError::InvalidCredential("credential is not valid JSON".to_string()));
+        return Err(SwitchError::InvalidCredential(
+            "credential is not valid JSON".to_string(),
+        ));
     }
-    let access_token = oauth::extract_access_token(trimmed).filter(|t| !t.is_empty()).ok_or_else(|| {
-        SwitchError::InvalidCredential(
-            "credential is missing a non-empty claudeAiOauth.accessToken".to_string(),
-        )
-    })?;
+    let access_token = oauth::extract_access_token(trimmed)
+        .filter(|t| !t.is_empty())
+        .ok_or_else(|| {
+            SwitchError::InvalidCredential(
+                "credential is missing a non-empty claudeAiOauth.accessToken".to_string(),
+            )
+        })?;
 
     // Resolve identity BEFORE any lock is taken — rule 2 (never hold a lock
     // across a network call), same as `add_current_account`/`add_token`.
@@ -1436,7 +1563,9 @@ fn add_oauth_credential_with_timeout(
     let live_fingerprint = oauth::credential_fingerprint(trimmed);
     let resolved_account = resolve_identity(&access_token);
     let identity_resolved = resolved_account.is_some();
-    let new_identity: ResolvedIdentity = resolved_account.map(ResolvedIdentity::from).unwrap_or_default();
+    let new_identity: ResolvedIdentity = resolved_account
+        .map(ResolvedIdentity::from)
+        .unwrap_or_default();
 
     // Vault-only write (the live credential/config are never touched here) —
     // vault lock alone suffices, same reasoning as
@@ -1448,8 +1577,11 @@ fn add_oauth_credential_with_timeout(
 
     let mut store = CredentialStore::new(GuiStoreHost);
     {
-        let accounts_snapshot =
-            data.get("accounts").and_then(Value::as_object).cloned().unwrap_or_default();
+        let accounts_snapshot = data
+            .get("accounts")
+            .and_then(Value::as_object)
+            .cloned()
+            .unwrap_or_default();
         if let Some(existing_num) = find_registered_slot_by_identity(
             &mut store,
             &accounts_snapshot,
@@ -1505,7 +1637,10 @@ fn add_oauth_credential_with_timeout(
         Value::String(new_identity.organization_uuid.clone().unwrap_or_default()),
     );
     record.insert("organizationName".to_string(), Value::String(String::new()));
-    record.insert("added".to_string(), Value::String(chrono::Utc::now().to_rfc3339()));
+    record.insert(
+        "added".to_string(),
+        Value::String(chrono::Utc::now().to_rfc3339()),
+    );
     // Persist the resolved identity — same reasoning as `add_current_account`:
     // the absence of `uuid` on a slot is exactly what let the confirmed
     // duplicate through.
@@ -1523,7 +1658,10 @@ fn add_oauth_credential_with_timeout(
     add_to_sequence(&mut data, slot);
     // Deliberately NOT setting `activeAccountNumber` — see the doc comment
     // above: this registers the account, it does not switch to it.
-    data.insert("lastUpdated".to_string(), Value::String(chrono::Utc::now().to_rfc3339()));
+    data.insert(
+        "lastUpdated".to_string(),
+        Value::String(chrono::Utc::now().to_rfc3339()),
+    );
     write_sequence_data(&data)?;
 
     Ok(slot)
@@ -1582,7 +1720,10 @@ fn set_account_enabled_with_timeout(
             record.insert("disabled".to_string(), Value::Bool(true));
         }
     }
-    data.insert("lastUpdated".to_string(), Value::String(chrono::Utc::now().to_rfc3339()));
+    data.insert(
+        "lastUpdated".to_string(),
+        Value::String(chrono::Utc::now().to_rfc3339()),
+    );
     write_sequence_data(&data)?;
 
     Ok(())
@@ -1677,8 +1818,11 @@ fn import_from_cswap_with_timeout(timeout: Duration) -> Result<ImportOutcome, Sw
 
     let mut dest_data = read_sequence_data().unwrap_or_default();
     ensure_accounts_object(&mut dest_data);
-    let dest_accounts_snapshot =
-        dest_data.get("accounts").and_then(Value::as_object).cloned().unwrap_or_default();
+    let dest_accounts_snapshot = dest_data
+        .get("accounts")
+        .and_then(Value::as_object)
+        .cloned()
+        .unwrap_or_default();
 
     let mut source_store = CredentialStore::new(CswapStoreHost);
     let mut dest_store = CredentialStore::new(GuiStoreHost);
@@ -1695,7 +1839,11 @@ fn import_from_cswap_with_timeout(timeout: Duration) -> Result<ImportOutcome, Sw
         let Some(record) = source_accounts.get(&source_num).and_then(Value::as_object) else {
             continue;
         };
-        let email = record.get("email").and_then(Value::as_str).unwrap_or_default().to_string();
+        let email = record
+            .get("email")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string();
 
         let credential = source_store.read_account_credentials(&source_num, &email);
         if credential.is_empty() {
@@ -1704,7 +1852,9 @@ fn import_from_cswap_with_timeout(timeout: Duration) -> Result<ImportOutcome, Sw
         }
 
         if let Some(fp) = oauth::credential_fingerprint(&credential) {
-            if find_registered_slot_by_fingerprint(&mut dest_store, &dest_accounts_snapshot, &fp).is_some() {
+            if find_registered_slot_by_fingerprint(&mut dest_store, &dest_accounts_snapshot, &fp)
+                .is_some()
+            {
                 skipped += 1;
                 continue;
             }
@@ -1723,8 +1873,14 @@ fn import_from_cswap_with_timeout(timeout: Duration) -> Result<ImportOutcome, Sw
         }
 
         let mut new_record = record.clone();
-        new_record.insert("importedFrom".to_string(), Value::String("cswap".to_string()));
-        new_record.insert("imported".to_string(), Value::String(chrono::Utc::now().to_rfc3339()));
+        new_record.insert(
+            "importedFrom".to_string(),
+            Value::String("cswap".to_string()),
+        );
+        new_record.insert(
+            "imported".to_string(),
+            Value::String(chrono::Utc::now().to_rfc3339()),
+        );
 
         dest_data
             .get_mut("accounts")
@@ -1737,7 +1893,10 @@ fn import_from_cswap_with_timeout(timeout: Duration) -> Result<ImportOutcome, Sw
     }
 
     if imported > 0 {
-        dest_data.insert("lastUpdated".to_string(), Value::String(chrono::Utc::now().to_rfc3339()));
+        dest_data.insert(
+            "lastUpdated".to_string(),
+            Value::String(chrono::Utc::now().to_rfc3339()),
+        );
         write_sequence_data(&dest_data)?;
     }
 
@@ -1867,7 +2026,13 @@ fn pick_consume_first(accounts: &[Account]) -> Option<&Account> {
 /// "soonest" — that would rank the just-rolled-over account, the *least*
 /// perishable quota of all, first).
 fn seven_day_reset_ts(account: &Account) -> Option<f64> {
-    let resets_at = account.usage.as_ref()?.seven_day.as_ref()?.resets_at.as_deref()?;
+    let resets_at = account
+        .usage
+        .as_ref()?
+        .seven_day
+        .as_ref()?
+        .resets_at
+        .as_deref()?;
     let parsed = chrono::DateTime::parse_from_rfc3339(resets_at).ok()?;
     let ts = parsed.timestamp() as f64;
     let now = chrono::Utc::now().timestamp() as f64;
@@ -1893,14 +2058,21 @@ mod tests {
     fn switchable_account(number: u32, pct: Option<f64>) -> Account {
         let usage = pct.map(|p| Usage {
             five_hour: None,
-            seven_day: Some(UsageWindow { pct: p, ..Default::default() }),
+            seven_day: Some(UsageWindow {
+                pct: p,
+                ..Default::default()
+            }),
             scoped: None,
         });
         Account {
             number,
             email: format!("acct{number}@example.com"),
             active: false,
-            usage_status: if pct.is_some() { UsageStatus::Ok } else { UsageStatus::Unknown },
+            usage_status: if pct.is_some() {
+                UsageStatus::Ok
+            } else {
+                UsageStatus::Unknown
+            },
             usage,
             ..Default::default()
         }
@@ -1929,22 +2101,37 @@ mod tests {
             switchable_account(2, Some(30.0)), // headroom 70
             switchable_account(3, Some(50.0)), // headroom 50
         ];
-        assert_eq!(pick_target(&accounts, Strategy::MostHeadroom).unwrap().number, 2);
+        assert_eq!(
+            pick_target(&accounts, Strategy::MostHeadroom)
+                .unwrap()
+                .number,
+            2
+        );
     }
 
     #[test]
     fn most_headroom_never_targets_the_active_account() {
         let accounts = vec![active_account(1), switchable_account(2, Some(10.0))];
-        assert_eq!(pick_target(&accounts, Strategy::MostHeadroom).unwrap().number, 2);
+        assert_eq!(
+            pick_target(&accounts, Strategy::MostHeadroom)
+                .unwrap()
+                .number,
+            2
+        );
     }
 
     #[test]
     fn most_headroom_ignores_unknown_usage_when_a_known_candidate_exists() {
         let accounts = vec![
-            switchable_account(1, None),       // unknown usage — not the winner, not excluded either
+            switchable_account(1, None), // unknown usage — not the winner, not excluded either
             switchable_account(2, Some(40.0)), // headroom 60
         ];
-        assert_eq!(pick_target(&accounts, Strategy::MostHeadroom).unwrap().number, 2);
+        assert_eq!(
+            pick_target(&accounts, Strategy::MostHeadroom)
+                .unwrap()
+                .number,
+            2
+        );
     }
 
     #[test]
@@ -1955,7 +2142,10 @@ mod tests {
 
     #[test]
     fn most_headroom_returns_none_when_all_switchable_accounts_are_exhausted() {
-        let accounts = vec![switchable_account(1, Some(100.0)), switchable_account(2, Some(100.0))];
+        let accounts = vec![
+            switchable_account(1, Some(100.0)),
+            switchable_account(2, Some(100.0)),
+        ];
         assert!(pick_target(&accounts, Strategy::MostHeadroom).is_none());
     }
 
@@ -1966,19 +2156,36 @@ mod tests {
             switchable_account(2, None),        // unknown: must NOT be auto-skipped
             switchable_account(3, Some(10.0)),
         ];
-        assert_eq!(pick_target(&accounts, Strategy::NextAvailable).unwrap().number, 2);
+        assert_eq!(
+            pick_target(&accounts, Strategy::NextAvailable)
+                .unwrap()
+                .number,
+            2
+        );
     }
 
     #[test]
     fn next_available_returns_none_when_every_switchable_account_is_known_exhausted() {
-        let accounts = vec![switchable_account(1, Some(100.0)), switchable_account(2, Some(100.0))];
+        let accounts = vec![
+            switchable_account(1, Some(100.0)),
+            switchable_account(2, Some(100.0)),
+        ];
         assert!(pick_target(&accounts, Strategy::NextAvailable).is_none());
     }
 
     #[test]
     fn next_available_never_targets_active_or_disabled_accounts() {
-        let accounts = vec![active_account(1), disabled_account(2, 0.0), switchable_account(3, Some(0.0))];
-        assert_eq!(pick_target(&accounts, Strategy::NextAvailable).unwrap().number, 3);
+        let accounts = vec![
+            active_account(1),
+            disabled_account(2, 0.0),
+            switchable_account(3, Some(0.0)),
+        ];
+        assert_eq!(
+            pick_target(&accounts, Strategy::NextAvailable)
+                .unwrap()
+                .number,
+            3
+        );
     }
 
     #[test]
@@ -1987,23 +2194,51 @@ mod tests {
         let later = (chrono::Utc::now() + chrono::Duration::days(3)).to_rfc3339();
 
         let mut a = switchable_account(1, Some(50.0));
-        a.usage.as_mut().unwrap().seven_day.as_mut().unwrap().resets_at = Some(later);
+        a.usage
+            .as_mut()
+            .unwrap()
+            .seven_day
+            .as_mut()
+            .unwrap()
+            .resets_at = Some(later);
         let mut b = switchable_account(2, Some(50.0));
-        b.usage.as_mut().unwrap().seven_day.as_mut().unwrap().resets_at = Some(soon);
+        b.usage
+            .as_mut()
+            .unwrap()
+            .seven_day
+            .as_mut()
+            .unwrap()
+            .resets_at = Some(soon);
 
         let accounts = vec![a, b];
-        assert_eq!(pick_target(&accounts, Strategy::ConsumeFirst).unwrap().number, 2);
+        assert_eq!(
+            pick_target(&accounts, Strategy::ConsumeFirst)
+                .unwrap()
+                .number,
+            2
+        );
     }
 
     #[test]
     fn consume_first_skips_unknown_usage_accounts() {
-        let accounts = vec![switchable_account(1, None), switchable_account(2, Some(20.0))];
-        assert_eq!(pick_target(&accounts, Strategy::ConsumeFirst).unwrap().number, 2);
+        let accounts = vec![
+            switchable_account(1, None),
+            switchable_account(2, Some(20.0)),
+        ];
+        assert_eq!(
+            pick_target(&accounts, Strategy::ConsumeFirst)
+                .unwrap()
+                .number,
+            2
+        );
     }
 
     #[test]
     fn consume_first_returns_none_when_all_switchable_accounts_are_exhausted() {
-        let accounts = vec![switchable_account(1, Some(100.0)), switchable_account(2, Some(100.0))];
+        let accounts = vec![
+            switchable_account(1, Some(100.0)),
+            switchable_account(2, Some(100.0)),
+        ];
         assert!(pick_target(&accounts, Strategy::ConsumeFirst).is_none());
     }
 
@@ -2093,7 +2328,9 @@ mod tests {
         write_json_file(&accounts_file(), &seq);
 
         let mut store = CredentialStore::new(GuiStoreHost);
-        store.write_account_credentials("2", "bravo@example.com", "target-creds-2").unwrap();
+        store
+            .write_account_credentials("2", "bravo@example.com", "target-creds-2")
+            .unwrap();
         write_json_file(
             &account_config_path("2", "bravo@example.com"),
             &serde_json::json!({"oauthAccount": {"emailAddress": "bravo@example.com", "organizationUuid": "org-2"}}),
@@ -2107,11 +2344,19 @@ mod tests {
             }),
         );
         std::fs::create_dir_all(paths::claude_config_home()).unwrap();
-        std::fs::write(paths::credentials_path(), "original-active-creds-for-account-1").unwrap();
+        std::fs::write(
+            paths::credentials_path(),
+            "original-active-creds-for-account-1",
+        )
+        .unwrap();
     }
 
     fn bravo_target() -> Account {
-        Account { number: 2, email: "bravo@example.com".to_string(), ..Default::default() }
+        Account {
+            number: 2,
+            email: "bravo@example.com".to_string(),
+            ..Default::default()
+        }
     }
 
     #[test]
@@ -2126,9 +2371,13 @@ mod tests {
             "target-creds-2"
         );
         let cfg: Value =
-            serde_json::from_str(&std::fs::read_to_string(paths::global_config_path()).unwrap()).unwrap();
+            serde_json::from_str(&std::fs::read_to_string(paths::global_config_path()).unwrap())
+                .unwrap();
         assert_eq!(cfg["oauthAccount"]["emailAddress"], "bravo@example.com");
-        assert_eq!(cfg["someLocalSetting"], true, "untouched keys must survive the splice");
+        assert_eq!(
+            cfg["someLocalSetting"], true,
+            "untouched keys must survive the splice"
+        );
 
         let mut store = CredentialStore::new(GuiStoreHost);
         assert_eq!(
@@ -2136,7 +2385,8 @@ mod tests {
             "original-active-creds-for-account-1"
         );
 
-        let seq: Value = serde_json::from_str(&std::fs::read_to_string(accounts_file()).unwrap()).unwrap();
+        let seq: Value =
+            serde_json::from_str(&std::fs::read_to_string(accounts_file()).unwrap()).unwrap();
         assert_eq!(seq["activeAccountNumber"], 2);
     }
 
@@ -2146,7 +2396,8 @@ mod tests {
     /// login without a fresh backup. Instead the backup must already be there,
     /// and the live login must be untouched.
     #[test]
-    fn backup_happens_before_target_validation_so_a_failed_switch_still_preserves_the_outgoing_login() {
+    fn backup_happens_before_target_validation_so_a_failed_switch_still_preserves_the_outgoing_login(
+    ) {
         let _env = setup_env();
         seed_two_accounts();
         std::fs::remove_file(account_config_path("2", "bravo@example.com")).unwrap();
@@ -2166,7 +2417,8 @@ mod tests {
             "original-active-creds-for-account-1",
             "the live login must never be touched when the switch fails"
         );
-        let seq: Value = serde_json::from_str(&std::fs::read_to_string(accounts_file()).unwrap()).unwrap();
+        let seq: Value =
+            serde_json::from_str(&std::fs::read_to_string(accounts_file()).unwrap()).unwrap();
         assert_eq!(seq["activeAccountNumber"], 1);
     }
 
@@ -2178,7 +2430,8 @@ mod tests {
         // entirely and its only contention point is our own vault lock.
         assert!(!paths::cswap_store_root().exists());
 
-        let _held = crate::locking::acquire_or_err(vault_lock_path(), Duration::from_secs(5)).unwrap();
+        let _held =
+            crate::locking::acquire_or_err(vault_lock_path(), Duration::from_secs(5)).unwrap();
 
         let err = switch_to_with_timeout(&bravo_target(), Duration::from_millis(200)).unwrap_err();
         assert!(matches!(err, SwitchError::Locking(_)));
@@ -2189,7 +2442,8 @@ mod tests {
             std::fs::read_to_string(paths::credentials_path()).unwrap(),
             "original-active-creds-for-account-1"
         );
-        let seq: Value = serde_json::from_str(&std::fs::read_to_string(accounts_file()).unwrap()).unwrap();
+        let seq: Value =
+            serde_json::from_str(&std::fs::read_to_string(accounts_file()).unwrap()).unwrap();
         assert_eq!(seq["activeAccountNumber"], 1);
         let mut store = CredentialStore::new(GuiStoreHost);
         assert_eq!(store.read_account_credentials("1", "alpha@example.com"), "");
@@ -2206,7 +2460,9 @@ mod tests {
         // exists, so switch_to must coordinate with it.
         let cswap_root = paths::cswap_store_root();
         std::fs::create_dir_all(&cswap_root).unwrap();
-        let _held = crate::locking::acquire_or_err(cswap_root.join(".lock"), Duration::from_secs(5)).unwrap();
+        let _held =
+            crate::locking::acquire_or_err(cswap_root.join(".lock"), Duration::from_secs(5))
+                .unwrap();
 
         let err = switch_to_with_timeout(&bravo_target(), Duration::from_millis(200)).unwrap_err();
         assert!(matches!(err, SwitchError::Locking(_)));
@@ -2220,7 +2476,8 @@ mod tests {
             "original-active-creds-for-account-1",
             "the live login must never be touched when the cswap-compat lock can't be acquired"
         );
-        let seq: Value = serde_json::from_str(&std::fs::read_to_string(accounts_file()).unwrap()).unwrap();
+        let seq: Value =
+            serde_json::from_str(&std::fs::read_to_string(accounts_file()).unwrap()).unwrap();
         assert_eq!(seq["activeAccountNumber"], 1);
         let mut store = CredentialStore::new(GuiStoreHost);
         assert_eq!(
@@ -2354,7 +2611,8 @@ mod tests {
         .unwrap();
         assert_eq!(slot, 1);
 
-        let seq: Value = serde_json::from_str(&std::fs::read_to_string(accounts_file()).unwrap()).unwrap();
+        let seq: Value =
+            serde_json::from_str(&std::fs::read_to_string(accounts_file()).unwrap()).unwrap();
         assert_eq!(seq["activeAccountNumber"], 1);
         assert_eq!(seq["accounts"]["1"]["email"], "fresh@example.com");
         assert_eq!(seq["accounts"]["1"]["organizationUuid"], "org-fresh");
@@ -2364,7 +2622,10 @@ mod tests {
         assert!(seq["accounts"]["1"].get("uuid").is_none());
 
         let mut store = CredentialStore::new(GuiStoreHost);
-        assert_eq!(store.read_account_credentials("1", "fresh@example.com"), live);
+        assert_eq!(
+            store.read_account_credentials("1", "fresh@example.com"),
+            live
+        );
     }
 
     #[test]
@@ -2387,10 +2648,15 @@ mod tests {
             }),
         );
         std::fs::create_dir_all(paths::claude_config_home()).unwrap();
-        std::fs::write(paths::credentials_path(), oauth_creds_json("refresh-2", "access-2")).unwrap();
+        std::fs::write(
+            paths::credentials_path(),
+            oauth_creds_json("refresh-2", "access-2"),
+        )
+        .unwrap();
 
         let slot =
-            add_current_account_with_timeout(None, crate::locking::DEFAULT_TIMEOUT, &no_identity).unwrap();
+            add_current_account_with_timeout(None, crate::locking::DEFAULT_TIMEOUT, &no_identity)
+                .unwrap();
         assert_eq!(slot, 2);
     }
 
@@ -2429,7 +2695,11 @@ mod tests {
 
         let mut store = CredentialStore::new(GuiStoreHost);
         store
-            .write_account_credentials("1", "alpha@example.com", &oauth_creds_json("shared-refresh", "old-access"))
+            .write_account_credentials(
+                "1",
+                "alpha@example.com",
+                &oauth_creds_json("shared-refresh", "old-access"),
+            )
             .unwrap();
 
         write_json_file(
@@ -2513,7 +2783,8 @@ mod tests {
         };
 
         let err =
-            add_current_account_with_timeout(None, crate::locking::DEFAULT_TIMEOUT, &resolver).unwrap_err();
+            add_current_account_with_timeout(None, crate::locking::DEFAULT_TIMEOUT, &resolver)
+                .unwrap_err();
         assert!(matches!(err, SwitchError::AlreadyRegistered(ref n) if n == "1"));
 
         let seq_after: Value =
@@ -2526,7 +2797,8 @@ mod tests {
     }
 
     #[test]
-    fn add_current_account_refuses_duplicate_matched_by_org_and_email_when_existing_slot_has_no_uuid() {
+    fn add_current_account_refuses_duplicate_matched_by_org_and_email_when_existing_slot_has_no_uuid(
+    ) {
         // A record written before this fix (or copied in via
         // `import_from_cswap` from a source that never had one) carries
         // `organizationUuid` + email but no `uuid` at all — this is exactly
@@ -2550,7 +2822,11 @@ mod tests {
             }),
         );
         std::fs::create_dir_all(paths::claude_config_home()).unwrap();
-        std::fs::write(paths::credentials_path(), oauth_creds_json("fresh-refresh", "fresh-access")).unwrap();
+        std::fs::write(
+            paths::credentials_path(),
+            oauth_creds_json("fresh-refresh", "fresh-access"),
+        )
+        .unwrap();
 
         // Resolves a brand-new uuid — the existing side has none to compare
         // against, so this can't match on `uuid` — but the SAME org + email,
@@ -2564,12 +2840,14 @@ mod tests {
         };
 
         let err =
-            add_current_account_with_timeout(None, crate::locking::DEFAULT_TIMEOUT, &resolver).unwrap_err();
+            add_current_account_with_timeout(None, crate::locking::DEFAULT_TIMEOUT, &resolver)
+                .unwrap_err();
         assert!(matches!(err, SwitchError::AlreadyRegistered(ref n) if n == "1"));
     }
 
     #[test]
-    fn add_current_account_allows_the_add_when_identity_is_unresolved_and_fingerprint_does_not_match() {
+    fn add_current_account_allows_the_add_when_identity_is_unresolved_and_fingerprint_does_not_match(
+    ) {
         // Simulates a total network outage during identity resolution: the
         // resolver always returns `None`, exactly like `fetch_oauth_profile`
         // degrading on a failure. With no identity to compare and no
@@ -2593,11 +2871,19 @@ mod tests {
             }),
         );
         std::fs::create_dir_all(paths::claude_config_home()).unwrap();
-        std::fs::write(paths::credentials_path(), oauth_creds_json("new-refresh", "new-access")).unwrap();
+        std::fs::write(
+            paths::credentials_path(),
+            oauth_creds_json("new-refresh", "new-access"),
+        )
+        .unwrap();
 
         let slot =
-            add_current_account_with_timeout(None, crate::locking::DEFAULT_TIMEOUT, &no_identity).unwrap();
-        assert_eq!(slot, 2, "the add must proceed rather than being blocked by a degraded check");
+            add_current_account_with_timeout(None, crate::locking::DEFAULT_TIMEOUT, &no_identity)
+                .unwrap();
+        assert_eq!(
+            slot, 2,
+            "the add must proceed rather than being blocked by a degraded check"
+        );
     }
 
     #[test]
@@ -2622,7 +2908,11 @@ mod tests {
             }),
         );
         std::fs::create_dir_all(paths::claude_config_home()).unwrap();
-        std::fs::write(paths::credentials_path(), oauth_creds_json("beta-refresh", "beta-access")).unwrap();
+        std::fs::write(
+            paths::credentials_path(),
+            oauth_creds_json("beta-refresh", "beta-access"),
+        )
+        .unwrap();
 
         let resolver = |_: &str| {
             Some(oauth::TokenAccount {
@@ -2633,7 +2923,8 @@ mod tests {
         };
 
         let slot =
-            add_current_account_with_timeout(None, crate::locking::DEFAULT_TIMEOUT, &resolver).unwrap();
+            add_current_account_with_timeout(None, crate::locking::DEFAULT_TIMEOUT, &resolver)
+                .unwrap();
         assert_eq!(slot, 2);
 
         let seq_after: Value =
@@ -2646,7 +2937,10 @@ mod tests {
     #[test]
     fn add_token_rejects_empty_json_and_unrecognised_input() {
         let _env = setup_env();
-        assert!(matches!(add_token("", None, None).unwrap_err(), SwitchError::InvalidToken(_)));
+        assert!(matches!(
+            add_token("", None, None).unwrap_err(),
+            SwitchError::InvalidToken(_)
+        ));
         assert!(matches!(
             add_token("   ", None, None).unwrap_err(),
             SwitchError::InvalidToken(_)
@@ -2688,7 +2982,8 @@ mod tests {
         .unwrap();
         assert_eq!(setup_slot, 2);
 
-        let seq: Value = serde_json::from_str(&std::fs::read_to_string(accounts_file()).unwrap()).unwrap();
+        let seq: Value =
+            serde_json::from_str(&std::fs::read_to_string(accounts_file()).unwrap()).unwrap();
         assert_eq!(seq["accounts"]["1"]["email"], "api-key-1@token.local");
         assert_eq!(seq["accounts"]["1"]["kind"], "api_key");
         assert_eq!(seq["accounts"]["2"]["email"], "setup-token-2@token.local");
@@ -2701,7 +2996,10 @@ mod tests {
         );
         let setup_creds = store.read_account_credentials("2", "setup-token-2@token.local");
         let parsed: Value = serde_json::from_str(&setup_creds).unwrap();
-        assert_eq!(parsed["claudeAiOauth"]["accessToken"], "sk-ant-oat01-abcdefghijklmnopqrstuvwxyz");
+        assert_eq!(
+            parsed["claudeAiOauth"]["accessToken"],
+            "sk-ant-oat01-abcdefghijklmnopqrstuvwxyz"
+        );
 
         // add_token never activates the token — it only registers it.
         assert!(seq.get("activeAccountNumber").is_none());
@@ -2720,7 +3018,8 @@ mod tests {
         .unwrap();
         assert_eq!(slot, 1);
 
-        let seq: Value = serde_json::from_str(&std::fs::read_to_string(accounts_file()).unwrap()).unwrap();
+        let seq: Value =
+            serde_json::from_str(&std::fs::read_to_string(accounts_file()).unwrap()).unwrap();
         assert_eq!(seq["accounts"]["1"]["email"], "custom@example.com");
         assert_eq!(seq["accounts"]["1"]["alias"], "ci-key");
     }
@@ -2808,7 +3107,8 @@ mod tests {
         .unwrap();
         assert_eq!(slot, 1);
 
-        let seq: Value = serde_json::from_str(&std::fs::read_to_string(accounts_file()).unwrap()).unwrap();
+        let seq: Value =
+            serde_json::from_str(&std::fs::read_to_string(accounts_file()).unwrap()).unwrap();
         assert_eq!(seq["accounts"]["1"]["email"], "captured@example.com");
         // Alias must be trimmed before storage, same as `add_current_account`.
         assert_eq!(seq["accounts"]["1"]["alias"], "work");
@@ -2818,7 +3118,10 @@ mod tests {
         );
 
         let mut store = CredentialStore::new(GuiStoreHost);
-        assert_eq!(store.read_account_credentials("1", "captured@example.com"), creds);
+        assert_eq!(
+            store.read_account_credentials("1", "captured@example.com"),
+            creds
+        );
         assert!(
             read_account_config("1", "captured@example.com").is_some(),
             "a config backup must exist so a future switch_to has something to install"
@@ -2850,10 +3153,16 @@ mod tests {
                 &no_identity,
             )
             .unwrap_err();
-            assert!(matches!(err, SwitchError::InvalidCredential(_)), "input {bad:?} got {err:?}");
+            assert!(
+                matches!(err, SwitchError::InvalidCredential(_)),
+                "input {bad:?} got {err:?}"
+            );
         }
 
-        assert!(read_accounts().unwrap().is_empty(), "no slot may be created by a rejected blob");
+        assert!(
+            read_accounts().unwrap().is_empty(),
+            "no slot may be created by a rejected blob"
+        );
     }
 
     #[test]
@@ -2922,7 +3231,9 @@ mod tests {
         // us here.
         let stored = oauth_creds_json("original-refresh", "original-access");
         let mut store = CredentialStore::new(GuiStoreHost);
-        store.write_account_credentials("1", "charlie@example.com", &stored).unwrap();
+        store
+            .write_account_credentials("1", "charlie@example.com", &stored)
+            .unwrap();
         assert_ne!(
             oauth::credential_fingerprint(&stored),
             oauth::credential_fingerprint(&oauth_creds_json("fresh-refresh", "fresh-access")),
@@ -2957,7 +3268,10 @@ mod tests {
         );
         // And the original stored credential must be untouched — a refused add
         // must not have overwritten the account it refused to duplicate.
-        assert_eq!(store.read_account_credentials("1", "charlie@example.com"), stored);
+        assert_eq!(
+            store.read_account_credentials("1", "charlie@example.com"),
+            stored
+        );
     }
 
     #[test]
@@ -3011,7 +3325,8 @@ mod tests {
         )
         .unwrap();
         assert_eq!(slot1, 1);
-        let seq: Value = serde_json::from_str(&std::fs::read_to_string(accounts_file()).unwrap()).unwrap();
+        let seq: Value =
+            serde_json::from_str(&std::fs::read_to_string(accounts_file()).unwrap()).unwrap();
         assert_eq!(seq["accounts"]["1"]["email"], "setup-token-1@token.local");
 
         // No caller email, but identity resolves one: that wins over synthetic.
@@ -3032,7 +3347,8 @@ mod tests {
         )
         .unwrap();
         assert_eq!(slot2, 2);
-        let seq: Value = serde_json::from_str(&std::fs::read_to_string(accounts_file()).unwrap()).unwrap();
+        let seq: Value =
+            serde_json::from_str(&std::fs::read_to_string(accounts_file()).unwrap()).unwrap();
         assert_eq!(seq["accounts"]["2"]["email"], "resolved@example.com");
         assert_eq!(seq["accounts"]["2"]["uuid"], "uuid-2");
         assert_eq!(seq["accounts"]["2"]["organizationUuid"], "org-2");
@@ -3057,7 +3373,8 @@ mod tests {
         )
         .unwrap();
         assert_eq!(slot3, 3);
-        let seq: Value = serde_json::from_str(&std::fs::read_to_string(accounts_file()).unwrap()).unwrap();
+        let seq: Value =
+            serde_json::from_str(&std::fs::read_to_string(accounts_file()).unwrap()).unwrap();
         assert_eq!(seq["accounts"]["3"]["email"], "explicit@example.com");
     }
 
@@ -3097,8 +3414,12 @@ mod tests {
         let err = set_account_enabled(1, false).unwrap_err();
         assert!(matches!(err, SwitchError::CannotDisableActive(ref n) if n == "1"));
 
-        let seq: Value = serde_json::from_str(&std::fs::read_to_string(accounts_file()).unwrap()).unwrap();
-        assert!(seq["accounts"]["1"].get("disabled").is_none(), "must be a strict no-op");
+        let seq: Value =
+            serde_json::from_str(&std::fs::read_to_string(accounts_file()).unwrap()).unwrap();
+        assert!(
+            seq["accounts"]["1"].get("disabled").is_none(),
+            "must be a strict no-op"
+        );
     }
 
     #[test]
@@ -3107,11 +3428,13 @@ mod tests {
         seed_two_accounts(); // account 2 (bravo) is not active
 
         set_account_enabled(2, false).unwrap();
-        let seq: Value = serde_json::from_str(&std::fs::read_to_string(accounts_file()).unwrap()).unwrap();
+        let seq: Value =
+            serde_json::from_str(&std::fs::read_to_string(accounts_file()).unwrap()).unwrap();
         assert_eq!(seq["accounts"]["2"]["disabled"], true);
 
         set_account_enabled(2, true).unwrap();
-        let seq: Value = serde_json::from_str(&std::fs::read_to_string(accounts_file()).unwrap()).unwrap();
+        let seq: Value =
+            serde_json::from_str(&std::fs::read_to_string(accounts_file()).unwrap()).unwrap();
         assert!(seq["accounts"]["2"].get("disabled").is_none());
     }
 
@@ -3173,7 +3496,13 @@ mod tests {
         assert!(!cswap_root.exists());
 
         let outcome = import_from_cswap().unwrap();
-        assert_eq!(outcome, ImportOutcome { imported: 0, skipped: 0 });
+        assert_eq!(
+            outcome,
+            ImportOutcome {
+                imported: 0,
+                skipped: 0
+            }
+        );
 
         assert!(
             !cswap_root.exists(),
@@ -3191,11 +3520,21 @@ mod tests {
         ]);
 
         let source_seq_before = std::fs::read_to_string(cswap_root.join("sequence.json")).unwrap();
-        let source_alpha_config_before =
-            std::fs::read_to_string(account_config_path_at(&cswap_root, "1", "alpha@example.com")).unwrap();
+        let source_alpha_config_before = std::fs::read_to_string(account_config_path_at(
+            &cswap_root,
+            "1",
+            "alpha@example.com",
+        ))
+        .unwrap();
 
         let outcome = import_from_cswap().unwrap();
-        assert_eq!(outcome, ImportOutcome { imported: 2, skipped: 0 });
+        assert_eq!(
+            outcome,
+            ImportOutcome {
+                imported: 2,
+                skipped: 0
+            }
+        );
 
         // The source is byte-for-byte untouched: sequence.json, the config
         // backup, and (via a fresh read through the source-side store) the
@@ -3205,24 +3544,41 @@ mod tests {
             source_seq_before
         );
         assert_eq!(
-            std::fs::read_to_string(account_config_path_at(&cswap_root, "1", "alpha@example.com")).unwrap(),
+            std::fs::read_to_string(account_config_path_at(
+                &cswap_root,
+                "1",
+                "alpha@example.com"
+            ))
+            .unwrap(),
             source_alpha_config_before
         );
         let mut source_store = CredentialStore::new(CswapStoreHost);
-        assert_eq!(source_store.read_account_credentials("1", "alpha@example.com"), "alpha-live-creds");
-        assert_eq!(source_store.read_account_credentials("2", "bravo@example.com"), "bravo-live-creds");
+        assert_eq!(
+            source_store.read_account_credentials("1", "alpha@example.com"),
+            "alpha-live-creds"
+        );
+        assert_eq!(
+            source_store.read_account_credentials("2", "bravo@example.com"),
+            "bravo-live-creds"
+        );
 
         // Our vault now has both accounts, with matching credentials, under
         // whatever slots it chose to allocate.
         let dest_accounts = read_accounts().unwrap();
         assert_eq!(dest_accounts.len(), 2);
         let mut dest_store = CredentialStore::new(GuiStoreHost);
-        let alpha = dest_accounts.iter().find(|a| a.email == "alpha@example.com").unwrap();
+        let alpha = dest_accounts
+            .iter()
+            .find(|a| a.email == "alpha@example.com")
+            .unwrap();
         assert_eq!(
             dest_store.read_account_credentials(&alpha.number.to_string(), "alpha@example.com"),
             "alpha-live-creds"
         );
-        let bravo = dest_accounts.iter().find(|a| a.email == "bravo@example.com").unwrap();
+        let bravo = dest_accounts
+            .iter()
+            .find(|a| a.email == "bravo@example.com")
+            .unwrap();
         assert_eq!(
             dest_store.read_account_credentials(&bravo.number.to_string(), "bravo@example.com"),
             "bravo-live-creds"
@@ -3243,23 +3599,41 @@ mod tests {
             }),
         );
         let mut dest_store = CredentialStore::new(GuiStoreHost);
-        dest_store.write_account_credentials("5", "dup@example.com", &shared_creds).unwrap();
+        dest_store
+            .write_account_credentials("5", "dup@example.com", &shared_creds)
+            .unwrap();
 
         // cswap has the same login (rotated access token) plus one genuinely
         // new account.
         seed_cswap_store(&[
-            ("1", "dup@example.com", &oauth_creds_json("shared-refresh", "cswap-rotated-access")),
+            (
+                "1",
+                "dup@example.com",
+                &oauth_creds_json("shared-refresh", "cswap-rotated-access"),
+            ),
             ("2", "fresh@example.com", "fresh-creds"),
         ]);
 
         let outcome = import_from_cswap().unwrap();
-        assert_eq!(outcome, ImportOutcome { imported: 1, skipped: 1 });
+        assert_eq!(
+            outcome,
+            ImportOutcome {
+                imported: 1,
+                skipped: 1
+            }
+        );
 
         // Still exactly two accounts total: the pre-existing slot 5, plus
         // the one genuinely new import. No duplicate of "dup@example.com".
         let accounts = read_accounts().unwrap();
         assert_eq!(accounts.len(), 2);
-        assert_eq!(accounts.iter().filter(|a| a.email == "dup@example.com").count(), 1);
+        assert_eq!(
+            accounts
+                .iter()
+                .filter(|a| a.email == "dup@example.com")
+                .count(),
+            1
+        );
         assert!(accounts.iter().any(|a| a.email == "fresh@example.com"));
     }
 
@@ -3268,7 +3642,9 @@ mod tests {
         let _env = setup_env();
         let cswap_root = seed_cswap_store(&[("1", "alpha@example.com", "alpha-creds")]);
 
-        let _held = crate::locking::acquire_or_err(cswap_root.join(".lock"), Duration::from_secs(5)).unwrap();
+        let _held =
+            crate::locking::acquire_or_err(cswap_root.join(".lock"), Duration::from_secs(5))
+                .unwrap();
 
         let err = import_from_cswap_with_timeout(Duration::from_millis(200)).unwrap_err();
         assert!(matches!(err, SwitchError::Locking(_)));

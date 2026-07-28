@@ -231,7 +231,12 @@ pub fn fresh_reset_strings(
             }
         }
     }
-    cached_clock.map(|clock| (cached_countdown.unwrap_or("?").to_string(), clock.to_string()))
+    cached_clock.map(|clock| {
+        (
+            cached_countdown.unwrap_or("?").to_string(),
+            clock.to_string(),
+        )
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -906,7 +911,10 @@ pub async fn fetch_oauth_profile(access_token: &str) -> Option<TokenAccount> {
 /// private: callers see the classified [`UsageError`] instead.
 #[derive(Debug)]
 enum UsageFetchError {
-    Http { status: u16, retry_after_s: Option<f64> },
+    Http {
+        status: u16,
+        retry_after_s: Option<f64>,
+    },
     Timeout,
     Network,
     BadResponse,
@@ -1064,12 +1072,14 @@ pub struct UsageOutcome {
     pub retry_after_s: Option<f64>,
 }
 
-fn persist(
-    callback: Option<&(dyn Fn(&str, &str, &str) -> Result<(), String> + Send + Sync)>,
-    account_num: &str,
-    email: &str,
-    credentials: &str,
-) {
+/// Writes a refreshed credential back to the account store.
+///
+/// Called as `(account_num, email, credentials)`. Passed in rather than called
+/// directly so this module stays free of any dependency on the store layout —
+/// `switcher` owns that, and the tests substitute a recorder.
+pub type PersistCallback = dyn Fn(&str, &str, &str) -> Result<(), String> + Send + Sync;
+
+fn persist(callback: Option<&PersistCallback>, account_num: &str, email: &str, credentials: &str) {
     let callback = match callback {
         Some(c) => c,
         None => return,
@@ -1102,7 +1112,7 @@ pub async fn try_fetch_usage_for_account(
     email: &str,
     credentials: &str,
     is_active: bool,
-    persist_credentials: Option<&(dyn Fn(&str, &str, &str) -> Result<(), String> + Send + Sync)>,
+    persist_credentials: Option<&PersistCallback>,
 ) -> UsageOutcome {
     // No email in the log context: paste-safe for public issues.
     let context = format!("for account {}", account_num);
@@ -1140,7 +1150,12 @@ pub async fn try_fetch_usage_for_account(
         let refresh = try_refresh_oauth_credentials(&working_credentials).await;
         if let Some(new_creds) = refresh.credentials {
             working_credentials = new_creds;
-            persist(persist_credentials, account_num, email, &working_credentials);
+            persist(
+                persist_credentials,
+                account_num,
+                email,
+                &working_credentials,
+            );
             let new_oauth = extract_oauth_data(&working_credentials);
             if let Some(o) = &new_oauth {
                 if let Some(t) = o.get("accessToken").and_then(|v| v.as_str()) {
@@ -1221,7 +1236,12 @@ pub async fn try_fetch_usage_for_account(
             };
 
             working_credentials = new_creds;
-            persist(persist_credentials, account_num, email, &working_credentials);
+            persist(
+                persist_credentials,
+                account_num,
+                email,
+                &working_credentials,
+            );
             let refreshed_oauth = extract_oauth_data(&working_credentials);
             let new_token = refreshed_oauth
                 .as_ref()
@@ -1271,11 +1291,17 @@ pub async fn fetch_usage_for_account(
     email: &str,
     credentials: &str,
     is_active: bool,
-    persist_credentials: Option<&(dyn Fn(&str, &str, &str) -> Result<(), String> + Send + Sync)>,
+    persist_credentials: Option<&PersistCallback>,
 ) -> Option<UsageResult> {
-    try_fetch_usage_for_account(account_num, email, credentials, is_active, persist_credentials)
-        .await
-        .usage
+    try_fetch_usage_for_account(
+        account_num,
+        email,
+        credentials,
+        is_active,
+        persist_credentials,
+    )
+    .await
+    .usage
 }
 
 // ---------------------------------------------------------------------------

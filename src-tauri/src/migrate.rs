@@ -68,12 +68,18 @@ pub enum MigrationOutcome {
     /// the contained path. `accounts_migrated` is the account count found in
     /// `accounts/sequence.json`, or `0` if neither side had that file (e.g. a
     /// data dir that only ever held `settings.json`).
-    Migrated { accounts_migrated: usize, retired_old_dir: PathBuf },
+    Migrated {
+        accounts_migrated: usize,
+        retired_old_dir: PathBuf,
+    },
     /// The copy completed and verified, but renaming `old_dir` out of the way
     /// afterwards failed (e.g. a file still open elsewhere). `new_dir` is a
     /// fully verified, usable copy — the app is not orphaned — but `old_dir`
     /// was left in place rather than retired.
-    MigratedButOldDirNotRetired { accounts_migrated: usize, reason: String },
+    MigratedButOldDirNotRetired {
+        accounts_migrated: usize,
+        reason: String,
+    },
     /// The copy could not be produced or could not be verified. Both
     /// directories were left exactly as they were when this was called
     /// (`old_dir` untouched throughout; `new_dir` left as whatever partial
@@ -135,7 +141,10 @@ pub fn migrate_app_data(old_dir: &Path, new_dir: &Path) -> MigrationOutcome {
                 "cc-logins: migrated {accounts_migrated} account(s); old data dir moved to {}",
                 retired.display()
             );
-            MigrationOutcome::Migrated { accounts_migrated, retired_old_dir: retired }
+            MigrationOutcome::Migrated {
+                accounts_migrated,
+                retired_old_dir: retired,
+            }
         }
         Err(e) => {
             // The copy at new_dir is fully verified and usable at this
@@ -148,7 +157,10 @@ pub fn migrate_app_data(old_dir: &Path, new_dir: &Path) -> MigrationOutcome {
                 retired.display()
             );
             log::error!("cc-logins: {reason}");
-            MigrationOutcome::MigratedButOldDirNotRetired { accounts_migrated, reason }
+            MigrationOutcome::MigratedButOldDirNotRetired {
+                accounts_migrated,
+                reason,
+            }
         }
     }
 }
@@ -171,7 +183,10 @@ fn retired_dir_path(old_dir: &Path) -> PathBuf {
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs())
         .unwrap_or(0);
-    let name = old_dir.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+    let name = old_dir
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default();
     let sibling_name = format!("{name}.migrated-{epoch}");
     match old_dir.parent() {
         Some(parent) => parent.join(sibling_name),
@@ -199,7 +214,11 @@ fn count_accounts(dir: &Path) -> Result<Option<usize>, String> {
         .map_err(|e| format!("failed to read {}: {e}", seq_path.display()))?;
     let value: Value = serde_json::from_str(&text)
         .map_err(|e| format!("failed to parse {}: {e}", seq_path.display()))?;
-    let count = value.get("accounts").and_then(Value::as_object).map(|m| m.len()).unwrap_or(0);
+    let count = value
+        .get("accounts")
+        .and_then(Value::as_object)
+        .map(|m| m.len())
+        .unwrap_or(0);
     Ok(Some(count))
 }
 
@@ -211,12 +230,12 @@ fn verify_migration(old_dir: &Path, new_dir: &Path) -> Result<usize, String> {
     let new_count = count_accounts(new_dir)?;
     match (old_count, new_count) {
         (Some(old), Some(new)) if old == new => Ok(new),
-        (Some(old), Some(new)) => {
-            Err(format!("account count mismatch after copy: old={old} new={new}"))
-        }
-        (Some(old), None) => {
-            Err(format!("old dir had {old} account(s) in sequence.json, but the copy has none"))
-        }
+        (Some(old), Some(new)) => Err(format!(
+            "account count mismatch after copy: old={old} new={new}"
+        )),
+        (Some(old), None) => Err(format!(
+            "old dir had {old} account(s) in sequence.json, but the copy has none"
+        )),
         (None, Some(new)) => {
             // A copy producing a sequence.json where the source had none
             // should not be possible for a straight recursive copy, but it
@@ -329,7 +348,11 @@ mod tests {
     fn populate_old_dir(dir: &Path) {
         write_sequence(dir, 2);
         fs::write(dir.join("settings.json"), r#"{"threshold":90}"#).unwrap();
-        fs::write(dir.join("history.sqlite3"), b"not a real sqlite file, just bytes").unwrap();
+        fs::write(
+            dir.join("history.sqlite3"),
+            b"not a real sqlite file, just bytes",
+        )
+        .unwrap();
     }
 
     #[test]
@@ -342,9 +365,10 @@ mod tests {
         let outcome = migrate_app_data(&old_dir, &new_dir);
 
         let (accounts_migrated, retired) = match outcome {
-            MigrationOutcome::Migrated { accounts_migrated, retired_old_dir } => {
-                (accounts_migrated, retired_old_dir)
-            }
+            MigrationOutcome::Migrated {
+                accounts_migrated,
+                retired_old_dir,
+            } => (accounts_migrated, retired_old_dir),
             other => panic!("expected Migrated, got {other:?}"),
         };
         assert_eq!(accounts_migrated, 2);
@@ -353,8 +377,16 @@ mod tests {
         assert!(new_dir.join("settings.json").exists());
         assert!(new_dir.join("history.sqlite3").exists());
         assert!(new_dir.join("accounts").join("sequence.json").exists());
-        assert!(new_dir.join("accounts").join("credentials").join("1.enc").exists());
-        assert!(new_dir.join("accounts").join("credentials").join("2.enc").exists());
+        assert!(new_dir
+            .join("accounts")
+            .join("credentials")
+            .join("1.enc")
+            .exists());
+        assert!(new_dir
+            .join("accounts")
+            .join("credentials")
+            .join("2.enc")
+            .exists());
         assert_eq!(
             fs::read_to_string(new_dir.join("settings.json")).unwrap(),
             r#"{"threshold":90}"#
@@ -365,7 +397,11 @@ mod tests {
         // ...but not deleted -- it was renamed, and every byte is still there.
         assert!(retired.exists());
         assert!(retired.join("accounts").join("sequence.json").exists());
-        assert!(retired.join("accounts").join("credentials").join("1.enc").exists());
+        assert!(retired
+            .join("accounts")
+            .join("credentials")
+            .join("1.enc")
+            .exists());
         assert_eq!(
             fs::read_to_string(retired.join("settings.json")).unwrap(),
             r#"{"threshold":90}"#
@@ -487,7 +523,9 @@ mod tests {
         let outcome = migrate_app_data(&old_dir, &new_dir);
 
         match outcome {
-            MigrationOutcome::Migrated { accounts_migrated, .. } => {
+            MigrationOutcome::Migrated {
+                accounts_migrated, ..
+            } => {
                 assert_eq!(accounts_migrated, 5);
             }
             other => panic!("expected Migrated, got {other:?}"),
@@ -508,7 +546,9 @@ mod tests {
         let outcome = migrate_app_data(&old_dir, &new_dir);
 
         match outcome {
-            MigrationOutcome::Migrated { accounts_migrated, .. } => {
+            MigrationOutcome::Migrated {
+                accounts_migrated, ..
+            } => {
                 assert_eq!(accounts_migrated, 0);
             }
             other => panic!("expected Migrated, got {other:?}"),

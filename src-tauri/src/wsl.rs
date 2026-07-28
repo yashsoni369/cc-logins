@@ -325,9 +325,7 @@ mod windows_impl {
     pub(super) fn is_wsl_available() -> bool {
         match spawn(&["--status"]) {
             Ok(_) => true,
-            Err(WslError::Spawn { source, .. }) => {
-                source.kind() != std::io::ErrorKind::NotFound
-            }
+            Err(WslError::Spawn { source, .. }) => source.kind() != std::io::ErrorKind::NotFound,
             Err(_) => false,
         }
     }
@@ -379,7 +377,8 @@ mod windows_impl {
         // $CLAUDE_CONFIG_DIR if set and non-empty, else $HOME/.claude, then
         // .credentials.json under that. `${VAR:-default}` triggers on
         // unset *or empty*, matching `paths.rs`'s `env_non_empty` check.
-        const SCRIPT: &str = r#"cfg="${CLAUDE_CONFIG_DIR:-$HOME/.claude}"; test -f "$cfg/.credentials.json""#;
+        const SCRIPT: &str =
+            r#"cfg="${CLAUDE_CONFIG_DIR:-$HOME/.claude}"; test -f "$cfg/.credentials.json""#;
         let output = spawn(&["-d", name, "-e", "sh", "-c", SCRIPT])?;
         Ok(output.status.success())
     }
@@ -509,7 +508,10 @@ mod tests {
         assert_eq!(text, "Ubuntu\r\ndocker-desktop\r\n");
 
         let names = parse_distro_list(&text);
-        assert_eq!(names, vec!["Ubuntu".to_string(), "docker-desktop".to_string()]);
+        assert_eq!(
+            names,
+            vec!["Ubuntu".to_string(), "docker-desktop".to_string()]
+        );
     }
 
     #[test]
@@ -526,7 +528,10 @@ mod tests {
         // gotcha in the module docs isn't just asserted, it's demonstrated.
         let bytes = utf16le_bytes("Ubuntu");
         let naive = String::from_utf8_lossy(&bytes);
-        assert!(naive.contains('\u{0}'), "expected NUL-corrupted output, got {naive:?}");
+        assert!(
+            naive.contains('\u{0}'),
+            "expected NUL-corrupted output, got {naive:?}"
+        );
         assert_ne!(naive, "Ubuntu");
 
         // The real decoder produces the clean string.
@@ -596,7 +601,10 @@ mod tests {
             // merely logged, so this doubles as the proof that
             // `detect_environments` performs no filesystem/exec access for
             // a stopped distro.
-            assert_eq!(name, "Ubuntu", "probed a distro that must not have been touched");
+            assert_eq!(
+                name, "Ubuntu",
+                "probed a distro that must not have been touched"
+            );
             let mut names = probed_names.take();
             names.push(name.to_string());
             probed_names.set(names);

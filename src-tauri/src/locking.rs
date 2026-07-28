@@ -295,7 +295,10 @@ mod tests {
 
         let mut second = FileLock::with_timeout(&path, Duration::from_millis(250));
         let acquired = second.acquire().unwrap();
-        assert!(!acquired, "a held lock must not be acquirable a second time");
+        assert!(
+            !acquired,
+            "a held lock must not be acquirable a second time"
+        );
 
         // Releasing the first lock frees it up for a subsequent acquire.
         first.release();
