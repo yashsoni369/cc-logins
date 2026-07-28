@@ -1,11 +1,11 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useState, type ReactNode } from "react";
 import AccountsScreen from "./components/AccountsScreen";
 import HistoryScreen from "./components/HistoryScreen";
 import EnvironmentsScreen from "./components/EnvironmentsScreen";
 import SettingsScreen from "./components/SettingsScreen";
 import FirstRunScreen from "./components/FirstRunScreen";
 import { useSnapshot } from "./lib/useSnapshot";
-import { useTheme } from "./lib/useTheme";
+import { useTheme, type Theme } from "./lib/useTheme";
 import {
   addCurrentAccount,
   addToken,
@@ -24,6 +24,80 @@ const NAV_ITEMS: Array<{ id: Screen; label: string }> = [
   { id: "environments", label: "Environments" },
   { id: "settings", label: "Settings" },
 ];
+
+const NAV_THEME_OPTIONS: Array<{ id: Theme; label: string; icon: ReactNode }> = [
+  {
+    id: "day",
+    label: "Day theme",
+    icon: (
+      <svg width="13" height="13" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+        <circle cx="8" cy="8" r="3.1" stroke="currentColor" strokeWidth="1.4" />
+        <path
+          d="M8 1.5v1.7M8 12.8v1.7M1.5 8h1.7M12.8 8h1.7M3.6 3.6l1.2 1.2M11.2 11.2l1.2 1.2M3.6 12.4l1.2-1.2M11.2 4.8l1.2-1.2"
+          stroke="currentColor"
+          strokeWidth="1.3"
+          strokeLinecap="round"
+        />
+      </svg>
+    ),
+  },
+  {
+    id: "night",
+    label: "Night theme",
+    icon: (
+      <svg width="13" height="13" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+        <path
+          d="M13.2 9.4A5.6 5.6 0 116.6 2.8a4.4 4.4 0 006.6 6.6z"
+          stroke="currentColor"
+          strokeWidth="1.4"
+          strokeLinejoin="round"
+        />
+      </svg>
+    ),
+  },
+  {
+    id: "system",
+    label: "Match system theme",
+    icon: (
+      <svg width="13" height="13" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+        <rect x="2" y="3" width="12" height="8" rx="1.2" stroke="currentColor" strokeWidth="1.4" />
+        <path d="M6 13.5h4M8 11v2.3" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" />
+      </svg>
+    ),
+  },
+];
+
+/**
+ * Compact Day/Night/System control anchored to the bottom of the sidebar —
+ * a quiet utility, not a headline, so it's a three-icon row rather than the
+ * full-width `Segmented` the Settings screen uses (which would dominate a
+ * narrow sidebar). Real `<button>`s, so Enter/Space activation and the
+ * global `:focus-visible` ring come for free without extra key handling.
+ *
+ * Takes the same `useTheme()` instance `App` already mounts and passes to
+ * `SettingsScreen`, rather than mounting its own — two instances would each
+ * think they own `document.documentElement` and could disagree.
+ */
+function NavThemeControl({ theme, onChange }: { theme: Theme; onChange: (t: Theme) => void }) {
+  return (
+    <div className="nav-theme" role="radiogroup" aria-label="Theme">
+      {NAV_THEME_OPTIONS.map((opt) => (
+        <button
+          key={opt.id}
+          type="button"
+          role="radio"
+          aria-checked={theme === opt.id}
+          aria-label={opt.label}
+          title={opt.label}
+          className={`nav-theme-btn${theme === opt.id ? " on" : ""}`}
+          onClick={() => onChange(opt.id)}
+        >
+          {opt.icon}
+        </button>
+      ))}
+    </div>
+  );
+}
 
 /** Per-account outcome of the most recent switch attempt. */
 interface SwitchError {
@@ -331,6 +405,8 @@ export default function App() {
           ))}
           <div className="grp">Auto-switch</div>
           <span>Running · best</span>
+
+          <NavThemeControl theme={theme.theme} onChange={theme.setTheme} />
         </div>
 
         {screen === "accounts" && (

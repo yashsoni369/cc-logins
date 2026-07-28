@@ -1,4 +1,4 @@
-# Resilience findings: cc-switch vs. claude-swap-gui
+# Resilience findings: cc-switch vs. cc-logins
 
 Reference: [`farion1231/cc-switch`](https://github.com/farion1231/cc-switch) (MIT), read via `gh api`
 at the `main` branch as of 2026-07-28: `panic_hook.rs`, `linux_fix.rs`, `auto_launch.rs`, `tray.rs`

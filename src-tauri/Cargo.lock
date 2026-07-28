@@ -512,6 +512,35 @@ dependencies = [
 ]
 
 [[package]]
+name = "cc-logins"
+version = "0.1.0"
+dependencies = [
+ "base64 0.22.1",
+ "chrono",
+ "dirs 5.0.1",
+ "env_logger",
+ "libc",
+ "log",
+ "reqwest 0.12.28",
+ "rusqlite",
+ "security-framework",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tauri",
+ "tauri-build",
+ "tauri-plugin-autostart",
+ "tauri-plugin-notification",
+ "tauri-plugin-opener",
+ "tauri-plugin-single-instance",
+ "tempfile",
+ "thiserror 2.0.19",
+ "tiny-skia",
+ "tokio",
+ "windows-sys 0.59.0",
+]
+
+[[package]]
 name = "cesu8"
 version = "1.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -573,35 +602,6 @@ dependencies = [
  "serde",
  "wasm-bindgen",
  "windows-link 0.2.1",
-]
-
-[[package]]
-name = "claude-swap-gui"
-version = "0.1.0"
-dependencies = [
- "base64 0.22.1",
- "chrono",
- "dirs 5.0.1",
- "env_logger",
- "libc",
- "log",
- "reqwest 0.12.28",
- "rusqlite",
- "security-framework",
- "serde",
- "serde_json",
- "sha2",
- "tauri",
- "tauri-build",
- "tauri-plugin-autostart",
- "tauri-plugin-notification",
- "tauri-plugin-opener",
- "tauri-plugin-single-instance",
- "tempfile",
- "thiserror 2.0.19",
- "tiny-skia",
- "tokio",
- "windows-sys 0.59.0",
 ]
 
 [[package]]

@@ -78,6 +78,26 @@ function graceBucket(seconds: number): GracePeriod {
   );
 }
 
+/**
+ * Discretised view of `intervalSeconds` — same bucket-of-common-values
+ * pattern as `GracePeriod` above, but for a genuinely different reason: this
+ * field has a real floor (the backend clamps below 180s back up to it — see
+ * `settings.rs::Settings::sanitised`), and a slider makes a floor implicit
+ * and easy to miss by dragging past it. A discrete "3 min" as the lowest
+ * option makes the floor visible without a separate "minimum" callout.
+ */
+type IntervalBucket = "3m" | "5m" | "10m" | "30m";
+
+const INTERVAL_SECONDS: Record<IntervalBucket, number> = { "3m": 180, "5m": 300, "10m": 600, "30m": 1800 };
+
+/** Nearest `IntervalBucket` for an arbitrary `intervalSeconds` value. */
+function intervalBucket(seconds: number): IntervalBucket {
+  const options: IntervalBucket[] = ["3m", "5m", "10m", "30m"];
+  return options.reduce((best, id) =>
+    Math.abs(INTERVAL_SECONDS[id] - seconds) < Math.abs(INTERVAL_SECONDS[best] - seconds) ? id : best,
+  );
+}
+
 const THRESHOLD_MIN = 50;
 const THRESHOLD_MAX = 99; // matches the backend's clamp range exactly
 
@@ -94,6 +114,13 @@ const GRACE_OPTIONS: Array<SegOption<GracePeriod>> = [
   { id: "off", label: "Off" },
   { id: "60s", label: "60s" },
   { id: "5m", label: "5m" },
+];
+
+const INTERVAL_OPTIONS: Array<SegOption<IntervalBucket>> = [
+  { id: "3m", label: "3 min" },
+  { id: "5m", label: "5 min" },
+  { id: "10m", label: "10 min" },
+  { id: "30m", label: "30 min" },
 ];
 
 const THEME_OPTIONS: Array<SegOption<Theme>> = [
@@ -245,6 +272,26 @@ export default function SettingsScreen({ theme, onThemeChange, themeError }: Set
           </div>
           <div className="v">
             <Segmented ariaLabel="Theme" value={theme} onChange={onThemeChange} options={THEME_OPTIONS} />
+          </div>
+        </div>
+
+        <div className="field">
+          <div className="k">
+            Check usage at most every
+            <i>
+              Anthropic limits how often usage can be read — roughly 30 checks an hour per account — so the app
+              spaces out checks automatically. This sets the minimum gap between them, not a fixed period: the app
+              may still check less often than this (it backs off after being rate-limited), and it checks more
+              eagerly on its own as an account nears its limit.
+            </i>
+          </div>
+          <div className="v">
+            <Segmented
+              ariaLabel="Minimum time between usage checks"
+              value={intervalBucket(settings.intervalSeconds)}
+              onChange={(id) => commitField("intervalSeconds", INTERVAL_SECONDS[id])}
+              options={INTERVAL_OPTIONS}
+            />
           </div>
         </div>
 

@@ -50,7 +50,7 @@ use std::sync::mpsc;
 use std::thread;
 use std::time::{Duration, Instant};
 
-use claude_swap_gui_lib::locking::{acquire_or_err, FileLock, LockingError};
+use cc_logins_lib::locking::{acquire_or_err, FileLock, LockingError};
 
 // ---------------------------------------------------------------------------
 // The Python side: a thin CLI driver around the REAL claude_swap.locking

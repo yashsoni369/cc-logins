@@ -913,7 +913,7 @@ fn tray_tooltip(spec: IconSpec) -> String {
         (TrayState::Switching, _) => "Switching account…".into(),
         (TrayState::Stale, Some(p)) => format!("{p:.0}% · reading failed, showing last known"),
         (_, Some(p)) => format!("{p:.0}% of the binding window used"),
-        (_, None) => "Claude Account Switcher".into(),
+        (_, None) => "cc-logins".into(),
     }
 }
 

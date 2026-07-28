@@ -1,8 +1,8 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "Claude Account Switcher",
+  "productName": "cc-logins",
   "version": "0.1.0",
-  "identifier": "dev.apex36.claude-account-switcher",
+  "identifier": "dev.apex36.cc-logins",
   "build": {
     "beforeDevCommand": "pnpm dev",
     "devUrl": "http://localhost:1420",
@@ -14,7 +14,7 @@
     "windows": [
       {
         "label": "main",
-        "title": "Claude Account Switcher",
+        "title": "cc-logins",
         "width": 1000,
         "height": 660,
         "minWidth": 720,

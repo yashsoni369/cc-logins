@@ -348,7 +348,7 @@ export async function historyAvailable(): Promise<Sourced<boolean>> {
 export const DEFAULT_SETTINGS: Settings = {
   autoSwitchEnabled: false,
   threshold: 90,
-  intervalSeconds: 60,
+  intervalSeconds: 300,
   cooldownSeconds: 300,
   hysteresisPct: 10,
   unhealthyTicks: 3,

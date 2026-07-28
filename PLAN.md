@@ -1,6 +1,7 @@
-# Claude Account Switcher — Desktop App Plan
+# cc-logins — Desktop App Plan
 
-Working name: `claude-swap-gui`. Status: pre-scaffold. Last updated 2026-07-28.
+Product name: `cc-logins` (package/crate/bundle-id renamed from the `claude-swap-gui` working
+title — see §9.2). Status: pre-scaffold. Last updated 2026-07-28.
 
 ---
 
@@ -376,7 +377,10 @@ running concurrently in a terminal — this is the interop acceptance test.
 ## 9. Open questions
 
 1. **Interop vs. encryption** (§3.3) — dual store, or opt-in interop mode? Blocks M3.
-2. Product name. `claude-swap-gui` is a working title and implies dependency we do not have.
+2. ~~Product name.~~ Resolved: renamed to `cc-logins`. `claude-swap-gui` was a working title that
+   implied a dependency the project does not have; the repository directory keeps that old name for
+   historical reasons only — the package, crate, bundle identifier, and product name are all
+   `cc-logins`.
 3. Does the port keep `cswap`'s slot/alias/mapping semantics exactly, or only the credential and
    usage layers? Exact-match is more interop but more porting.
 4. Attribution form — MIT header retention is required; how prominently beyond that?

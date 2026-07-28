@@ -22,7 +22,7 @@
 
 use std::process::Command;
 
-use claude_swap_gui_lib::model::{Account, UsageStatus};
+use cc_logins_lib::model::{Account, UsageStatus};
 use serde_json::Value;
 
 /// The read-only subcommands this file is permitted to run.

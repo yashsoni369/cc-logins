@@ -41,7 +41,7 @@ jobs:
       - name: Build
         run: pnpm build
 
-  # The Rust side is compiled per-OS because claude-swap-gui carries real
+  # The Rust side is compiled per-OS because cc-logins carries real
   # platform-specific code (windows-sys / DPAPI-adjacent Win32 calls,
   # security-framework on macOS, libc on unix) behind #[cfg(...)], so a
   # clippy/test run on only one OS would leave the other two platforms'

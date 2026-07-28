@@ -141,6 +141,38 @@ h3 {
   font-weight: 500;
 }
 
+/* Quiet Day/Night/System control anchored to the bottom of the sidebar via
+   margin-top: auto (.nav is already a flex column). Chrome, not quota state —
+   uses --muted/--ink/--interact only, same as .navlink above; never
+   --caution/--danger, which are reserved for utilisation. */
+.nav-theme {
+  margin-top: auto;
+  display: flex;
+  gap: 2px;
+  padding: 8px 2px 2px;
+  border-top: 1px solid var(--line-soft);
+}
+.nav-theme-btn {
+  all: unset;
+  box-sizing: border-box;
+  flex: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 6px 0;
+  border-radius: var(--r);
+  color: var(--muted);
+  cursor: pointer;
+}
+.nav-theme-btn:hover {
+  background: var(--surface);
+  color: var(--ink);
+}
+.nav-theme-btn.on {
+  background: var(--raised);
+  color: var(--ink);
+}
+
 .pane {
   height: 100%;
   min-height: 0;

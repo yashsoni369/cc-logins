@@ -1,4 +1,4 @@
-//! Credential storage layer for claude-swap-gui.
+//! Credential storage layer for cc-logins.
 //!
 //! Ported from claude-swap (MIT) — <https://github.com/realiti4/claude-swap>,
 //! `claude_swap/credentials.py`. Owns *where* Claude Code's credentials live

@@ -183,7 +183,7 @@ mod tests {
     #[test]
     fn env_guard_restores_previous_value_on_drop() {
         let _lock = env_lock();
-        let key = "CLAUDE_SWAP_GUI_TEST_SUPPORT_PROBE_VAR";
+        let key = "CC_LOGINS_TEST_SUPPORT_PROBE_VAR";
         let _outer = EnvGuard::set(key, "outer");
         assert_eq!(env::var(key).unwrap(), "outer");
         {
@@ -192,7 +192,7 @@ mod tests {
         }
         assert_eq!(env::var(key).unwrap(), "outer");
 
-        let untouched_key = "CLAUDE_SWAP_GUI_TEST_SUPPORT_UNSET_VAR";
+        let untouched_key = "CC_LOGINS_TEST_SUPPORT_UNSET_VAR";
         {
             let _guard = EnvGuard::unset(untouched_key);
             assert!(env::var(untouched_key).is_err());

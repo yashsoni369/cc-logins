@@ -2,7 +2,7 @@
 //!
 //! Ported from [`claude-swap`](https://github.com/realiti4/claude-swap) (MIT
 //! licensed), module `claude_swap/paths.py`. This file is a line-for-line
-//! behavioral port, not a redesign: claude-swap-gui must resolve exactly the
+//! behavioral port, not a redesign: cc-logins must resolve exactly the
 //! same on-disk paths the Python CLI does, or the two tools will silently
 //! read and write different files.
 //!
@@ -135,7 +135,7 @@ impl Platform {
     ///
     /// The Python original uses `sys.platform` (a single cross-platform
     /// interpreter deciding at runtime) and treats WSL as Linux plus a
-    /// `WSL_DISTRO_NAME` env var check. claude-swap-gui instead ships one
+    /// `WSL_DISTRO_NAME` env var check. cc-logins instead ships one
     /// compiled binary per OS, so the OS itself is pinned at compile time
     /// via `#[cfg(target_os = ...)]` — equivalent in effect, since a
     /// Windows-built binary never runs under WSL and vice versa. WSL runs
@@ -333,7 +333,7 @@ fn backup_root_inner() -> PathBuf {
 fn default_store_root() -> PathBuf {
     dirs::data_dir()
         .unwrap_or_else(std::env::temp_dir)
-        .join("claude-account-switcher")
+        .join("cc-logins")
         .join("accounts")
 }
 
@@ -1261,7 +1261,7 @@ mod tests {
     #[test]
     fn env_guard_restores_previous_value_on_drop() {
         let _lock = env_lock();
-        let key = "CLAUDE_SWAP_GUI_PATHS_TEST_PROBE_VAR";
+        let key = "CC_LOGINS_PATHS_TEST_PROBE_VAR";
         let _outer = EnvGuard::set(key, "outer");
         assert_eq!(env::var(key).unwrap(), "outer");
         {
@@ -1271,7 +1271,7 @@ mod tests {
         assert_eq!(env::var(key).unwrap(), "outer");
 
         // Also verify unset restores correctly when the var wasn't set at all.
-        let untouched_key = "CLAUDE_SWAP_GUI_PATHS_TEST_UNSET_VAR";
+        let untouched_key = "CC_LOGINS_PATHS_TEST_UNSET_VAR";
         let _ = env::var(untouched_key); // sanity: no assumption either way
         {
             let _guard = EnvGuard::unset(untouched_key);

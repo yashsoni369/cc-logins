@@ -1,12 +1,13 @@
-# Claude Account Switcher
+# cc-logins
 
 A tray application for developers who hold more than one Claude subscription and run Claude Code
 all day. It shows which account is active and how much 5-hour and 7-day quota each account has
 left, and switches between them — one click, or automatically before a limit lands. Windows,
 macOS, and Linux.
 
-The package and repository are named `claude-swap-gui`, a working title from before the project
-had a real name. The shipped app identifies itself as **Claude Account Switcher**.
+The shipped app identifies itself as **cc-logins**. The repository directory itself is still named
+`claude-swap-gui`, a working title from before the project had a real name — only the folder path
+is unchanged; the package, bundle identifier, and product name are all `cc-logins` now.
 
 This project is young (`0.1.0`) and pre-release. Expect rough edges.
 

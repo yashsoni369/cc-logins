@@ -1,5 +1,5 @@
 [package]
-name = "claude-swap-gui"
+name = "cc-logins"
 version = "0.1.0"
 description = "Tray application for switching between multiple Claude Code accounts"
 authors = ["Yash Soni"]
@@ -11,7 +11,7 @@ license = "MIT"
 # claude-swap (MIT) — https://github.com/realiti4/claude-swap
 
 [lib]
-name = "claude_swap_gui_lib"
+name = "cc_logins_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
 [build-dependencies]

@@ -1,4 +1,4 @@
-//! Claude Account Switcher.
+//! cc-logins.
 //!
 //! A tray application that reports Claude Code account quota and switches
 //! between accounts. It refreshes OAuth tokens and reads usage telemetry, and
@@ -13,6 +13,7 @@ pub mod credentials;
 pub mod history;
 pub mod locking;
 pub mod login;
+pub mod migrate;
 pub mod model;
 pub mod oauth;
 pub mod paths;
@@ -120,7 +121,7 @@ fn popover_position(
 pub fn log_path() -> std::path::PathBuf {
     dirs::data_dir()
         .unwrap_or_else(std::env::temp_dir)
-        .join("claude-account-switcher")
+        .join("cc-logins")
         .join("app.log")
 }
 
@@ -137,7 +138,7 @@ fn init_logging() {
     }
 
     let mut builder = env_logger::Builder::from_env(
-        env_logger::Env::default().default_filter_or("claude_swap_gui_lib=debug,info"),
+        env_logger::Env::default().default_filter_or("cc_logins_lib=debug,info"),
     );
     builder.format_timestamp_millis();
 
@@ -192,7 +193,7 @@ pub fn run() {
     resilience::install();
 
     init_logging();
-    log::info!("claude account switcher starting");
+    log::info!("cc-logins starting");
 
     tauri::Builder::default()
         // Must be registered first so a second launch is rejected before it
@@ -234,6 +235,24 @@ pub fn run() {
                 .path()
                 .app_data_dir()
                 .unwrap_or_else(|_| std::path::PathBuf::from("."));
+
+            // One-time migration across the bundle identifier rename
+            // (dev.apex36.claude-account-switcher -> dev.apex36.cc-logins).
+            // Tauri derives app_data_dir() from the identifier, so the rename
+            // alone would move this app's own data tree (accounts/,
+            // history.sqlite3, settings.json) to a new, empty directory and
+            // silently orphan a real user's accounts sitting one directory
+            // over. Must run before `set_store_root`/`AppState::new` below,
+            // since both read from `data_dir`. The old directory is derived
+            // from the same parent as the new one (not hardcoded to
+            // %APPDATA%) so this also works on macOS/Linux, where the
+            // identifier is likewise the directory name. See migrate.rs for
+            // the full safety model (copy-verify-retire, never delete).
+            if let Some(parent) = data_dir.parent() {
+                let old_data_dir = parent.join("dev.apex36.claude-account-switcher");
+                migrate::migrate_app_data(&old_data_dir, &data_dir);
+            }
+
             // Point the vault at our own directory before anything reads it.
             //
             // Not a setting, and deliberately so. This app used to write its
