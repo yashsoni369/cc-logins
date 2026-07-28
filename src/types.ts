@@ -59,7 +59,9 @@ export interface Usage {
  */
 export type UsageStatus =
   | "ok"
-  /** Saved login was rejected by the server; re-login required. */
+  /** The server proved the refresh-token lineage is dead; re-login required. */
+  | "reloginrequired"
+  /** Legacy producer spelling, accepted for compatibility only. */
   | "expired"
   /** Usage could not be read this cycle; last-known values are shown. */
   | "stale"

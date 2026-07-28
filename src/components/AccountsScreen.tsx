@@ -144,6 +144,7 @@ export default function AccountsScreen({
         <tbody>
           {accounts.map((account) => {
             const isHeldOut = account.usageStatus === "disabled";
+            const needsRelogin = account.usageStatus === "reloginrequired";
             const resets = account.usage?.fiveHour?.clock ?? "—";
             const ratio = paceRatio(account.usage?.sevenDay);
             const pace = paceLabel(ratio);
@@ -207,9 +208,15 @@ export default function AccountsScreen({
                           {displayName(account)}{" "}
                           {account.active && <span className="pill on">active</span>}
                           {isHeldOut && <span className="pill">held out</span>}
+                          {needsRelogin && <span className="pill danger">Re-login required</span>}
                           {age && <span className="pill">{age}</span>}
                         </div>
                         <div className="mail">{maskEmail(account.email)}</div>
+                        {needsRelogin && (
+                          <div style={{ marginTop: 3, fontSize: 11, color: "var(--danger)" }}>
+                            Sign in again and re-add this account.
+                          </div>
+                        )}
                       </div>
                     </div>
                   </td>
@@ -251,7 +258,7 @@ export default function AccountsScreen({
                         <button
                           type="button"
                           className="btn"
-                          disabled={mutationInFlight}
+                          disabled={mutationInFlight || needsRelogin}
                           onClick={(e) => {
                             e.stopPropagation();
                             onSwitch(account.number);

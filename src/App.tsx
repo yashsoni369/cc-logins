@@ -251,6 +251,8 @@ export default function App() {
           const message =
             err instanceof IpcError && err.isBusy
               ? BUSY_MESSAGE
+              : err instanceof IpcError && err.isReloginRequired
+                ? "This account needs a fresh sign-in before it can be activated. Sign in again and re-add it."
               : err instanceof Error
                 ? err.message
                 : "Couldn't switch accounts.";

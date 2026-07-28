@@ -53,6 +53,7 @@ export type IpcErrorKind =
   | "noTerminalAvailable"
   | "alreadyRegistered"
   | "cannotDisableActive"
+  | "reloginRequired"
   | "settingsConflict"
   | "internal";
 
@@ -121,6 +122,11 @@ export class IpcError extends Error {
   /** Refused to disable the currently-active account. */
   get isCannotDisableActive() {
     return this.kind === "cannotDisableActive";
+  }
+
+  /** The selected account needs a fresh interactive login before activation. */
+  get isReloginRequired() {
+    return this.kind === "reloginRequired";
   }
 }
 

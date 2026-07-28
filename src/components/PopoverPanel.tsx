@@ -126,6 +126,8 @@ export default function PopoverPanel() {
           const message =
             reason instanceof IpcError && reason.isBusy
               ? "Another process is using your accounts right now. Try again in a moment."
+              : reason instanceof IpcError && reason.isReloginRequired
+                ? "This account needs a fresh sign-in before it can be activated."
               : reason instanceof Error
                 ? reason.message
                 : "Couldn't switch accounts.";
@@ -260,6 +262,8 @@ export default function PopoverPanel() {
       <div className="pop-list">
         {others.map((account) => {
           const disabled = account.usageStatus === "disabled";
+          const needsRelogin = account.usageStatus === "reloginrequired";
+          const unavailable = disabled || needsRelogin;
           const isNext = phase?.kind === "warning" && phase.to === account.number;
           const isPending = pendingAccount === account.number;
           const age = ageLabel(account.usageAgeSeconds);
@@ -267,16 +271,17 @@ export default function PopoverPanel() {
             <button
               key={account.number}
               type="button"
-              className={`pop-item${disabled ? " dim" : ""}${isNext ? " next" : ""}`}
-              disabled={disabled || pendingAccount !== null}
+              className={`pop-item${unavailable ? " dim" : ""}${isNext ? " next" : ""}`}
+              disabled={unavailable || pendingAccount !== null}
               onClick={() => handleSwitch(account.number)}
             >
               <span className="mark" />
               <span className="alias">{displayName(account)}</span>
               {disabled && <span className="pill">held out</span>}
+              {needsRelogin && <span className="pill danger">Re-login required</span>}
               {isNext && <span className="pill">next</span>}
               {isPending && <span className="pill">switching…</span>}
-              {!disabled && !isPending && age && <span className="pill">{age}</span>}
+              {!unavailable && !isPending && age && <span className="pill">{age}</span>}
               <div style={dimStyle}><UsageMeter pct={bindingUtilisation(account.usage)} /></div>
             </button>
           );
@@ -292,7 +297,12 @@ export default function PopoverPanel() {
       <div className="pop-foot">
         {phase?.kind === "warning" && warningTarget ? (
           <>
-            <button type="button" className="btn" disabled={pendingAccount !== null} onClick={() => handleSwitch(warningTarget.number)}>
+            <button
+              type="button"
+              className="btn"
+              disabled={pendingAccount !== null || warningTarget.usageStatus === "reloginrequired"}
+              onClick={() => handleSwitch(warningTarget.number)}
+            >
               Switch now
             </button>
             <button type="button" className="btn ghost" onClick={snooze}>Hold 1h</button>

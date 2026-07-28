@@ -87,7 +87,9 @@ function status(phase: DaemonStatus["phase"], revision = 1): DaemonStatus {
 
 describe("PopoverPanel authoritative daemon phases", () => {
   beforeEach(() => {
+    vi.clearAllMocks();
     mocks.status = status({ kind: "monitoring" });
+    fixture.environments[0]!.accounts[1]!.usageStatus = "ok";
   });
 
   it("does not infer warning or exhaustion from high usage", () => {
@@ -149,5 +151,17 @@ describe("PopoverPanel authoritative daemon phases", () => {
     render(<PopoverPanel />);
     fireEvent.click(screen.getByRole("button", { name: /Next/i }));
     expect(mocks.switchAccount).toHaveBeenCalledWith(2);
+  });
+
+  it("labels a dead credential distinctly and disables manual activation", () => {
+    fixture.environments[0]!.accounts[1]!.usageStatus = "reloginrequired";
+    render(<PopoverPanel />);
+
+    const account = screen.getByRole("button", { name: /Next.*Re-login required/i });
+    expect(account).toBeDisabled();
+    expect(screen.getByText("Re-login required")).toBeInTheDocument();
+    expect(screen.queryByText(/expired/i)).not.toBeInTheDocument();
+    fireEvent.click(account);
+    expect(mocks.switchAccount).not.toHaveBeenCalled();
   });
 });
