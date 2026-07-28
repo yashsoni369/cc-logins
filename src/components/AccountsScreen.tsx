@@ -123,6 +123,13 @@ export default function AccountsScreen({
         <RefreshButton />
       </div>
 
+      {/*
+        Header cells are `nowrap`, so at the 720px minimum window width the
+        table's min-content width exceeds the pane. Scrolling it here keeps
+        that out of the window. tabindex + role make the scroll region
+        keyboard-reachable, which browsers do not do on their own.
+      */}
+      <div className="table-scroll" tabIndex={0} role="region" aria-label="Accounts table">
       <table className="accts">
         <thead>
           <tr>
@@ -295,6 +302,7 @@ export default function AccountsScreen({
           })}
         </tbody>
       </table>
+      </div>
 
       <hr className="rule" />
 

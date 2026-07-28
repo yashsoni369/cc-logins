@@ -209,6 +209,18 @@ h3 {
 
 /* ─────────── data primitives ─────────── */
 
+/* Scrolls the table rather than the window at narrow widths. `.pane` already
+   has min-width: 0 and sits in a minmax(0, 1fr) column, but neither stops a
+   nowrap table from pushing past its box — only a scroll container does. */
+.table-scroll {
+  overflow-x: auto;
+  min-width: 0;
+}
+.table-scroll:focus-visible {
+  outline: 2px solid var(--interact);
+  outline-offset: 2px;
+}
+
 table.accts {
   width: 100%;
   border-collapse: collapse;
