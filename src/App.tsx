@@ -8,6 +8,7 @@ import { useSnapshot } from "./lib/useSnapshot";
 import { useTheme, type Theme } from "./lib/useTheme";
 import { useSettings } from "./lib/useSettings";
 import { useDaemonStatus } from "./lib/useDaemonStatus";
+import { useUpdate } from "./lib/useUpdate";
 import {
   addCurrentAccount,
   addToken,
@@ -242,6 +243,12 @@ export default function App() {
   const { snapshot, live, loading, error, refresh } = useSnapshot();
   const settings = useSettings();
   const daemon = useDaemonStatus();
+  // Mounted here and nowhere else: a second scheduler in the popover window
+  // would double every check and could announce the same release twice.
+  const update = useUpdate(
+    settings.settings?.autoCheckUpdates ?? false,
+    daemon.status?.phase ?? null,
+  );
   // Applies the persisted theme to this window's <html> and keeps it live
   // against OS changes. SettingsScreen gets the same instance as props
   // rather than mounting its own, so the segmented control there and the
@@ -467,6 +474,9 @@ export default function App() {
               onClick={() => setScreen(item.id)}
             >
               {item.label}
+              {item.id === "settings" && update.available && (
+                <span className="navlink-dot" aria-label="Update available" />
+              )}
             </button>
           ))}
           <div className="grp">Auto-switch</div>
@@ -512,6 +522,7 @@ export default function App() {
               theme={theme.theme}
               onThemeChange={theme.setTheme}
               themeError={theme.error}
+              update={update}
             />
           )}
         </main>

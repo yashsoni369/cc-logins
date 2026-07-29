@@ -119,6 +119,15 @@ pub struct Settings {
 
     pub start_at_login: bool,
 
+    /// Whether the app may ask GitHub for a newer release on its own.
+    ///
+    /// On by default: an update path nobody discovers is not an update path,
+    /// and every install otherwise stays on the version it was downloaded at.
+    /// This is the only setting that permits an outbound request to anything
+    /// other than Anthropic, so it is named in the README rather than buried,
+    /// and turning it off leaves the manual check in Settings -> About working.
+    pub auto_check_updates: bool,
+
     /// Colour theme for the app windows.
     pub theme: Theme,
 
@@ -141,6 +150,7 @@ impl Default for Settings {
             notify_on_exhausted: true,
             notify_on_expiry: false,
             start_at_login: false,
+            auto_check_updates: true,
             theme: Theme::default(),
             history_retention_days: 14,
         }
@@ -191,6 +201,7 @@ pub struct SettingsPatch {
     pub notify_on_exhausted: Option<bool>,
     pub notify_on_expiry: Option<bool>,
     pub start_at_login: Option<bool>,
+    pub auto_check_updates: Option<bool>,
     pub theme: Option<Theme>,
     pub history_retention_days: Option<i64>,
 }
@@ -377,6 +388,9 @@ fn apply_patch(settings: &mut Settings, patch: SettingsPatch) {
     }
     if let Some(value) = patch.start_at_login {
         settings.start_at_login = value;
+    }
+    if let Some(value) = patch.auto_check_updates {
+        settings.auto_check_updates = value;
     }
     if let Some(value) = patch.theme {
         settings.theme = value;

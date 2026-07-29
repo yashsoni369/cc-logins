@@ -1,17 +1,5 @@
-import { useState } from "react";
-import {
-  checkForUpdate,
-  installUpdate,
-  type DownloadProgress,
-  type UpdateCheck as CheckResult,
-} from "../lib/updater";
-
-type Phase =
-  | { kind: "idle" }
-  | { kind: "checking" }
-  | { kind: "result"; result: CheckResult }
-  | { kind: "installing"; version: string; progress: DownloadProgress }
-  | { kind: "install-failed"; version: string; message: string };
+import type { UseUpdateResult } from "../lib/useUpdate";
+import type { DownloadProgress } from "../lib/updater";
 
 function percent({ downloaded, total }: DownloadProgress): string {
   if (!total) return "…";
@@ -19,90 +7,68 @@ function percent({ downloaded, total }: DownloadProgress): string {
 }
 
 /**
- * The manual update control. Deliberately a button rather than a background
- * check — see the note at the top of `lib/updater.ts` for why this app does not
- * contact anything unless asked.
+ * The update row in About. Holds no state of its own — `useUpdate` is mounted
+ * once in `App`, so what is shown here is the same check the background
+ * scheduler ran, not a second opinion.
  */
-export default function UpdateCheck() {
-  const [phase, setPhase] = useState<Phase>({ kind: "idle" });
-
-  async function onCheck() {
-    setPhase({ kind: "checking" });
-    setPhase({ kind: "result", result: await checkForUpdate() });
-  }
-
-  async function onInstall(result: Extract<CheckResult, { kind: "available" }>) {
-    setPhase({
-      kind: "installing",
-      version: result.version,
-      progress: { downloaded: 0, total: null },
-    });
-
-    const outcome = await installUpdate(result.update, (progress) =>
-      setPhase({ kind: "installing", version: result.version, progress }),
-    );
-
-    // On success the app is already restarting, so there is no success state to
-    // render — only a failure needs somewhere to go.
-    if (!outcome.ok) {
-      setPhase({ kind: "install-failed", version: result.version, message: outcome.message });
-    }
-  }
-
-  const busy = phase.kind === "checking" || phase.kind === "installing";
+export default function UpdateCheck({ update }: { update: UseUpdateResult }) {
+  const { status, checking, install, blocked } = update;
+  const busy = checking || install.kind === "installing";
 
   return (
     <div className="field">
       <div className="k">
         Updates
-        <i>Checked only when you ask.</i>
+        <i>Verified against this build&apos;s signing key before installing.</i>
       </div>
       <div className="v">
-        <button className="btn" onClick={() => void onCheck()} disabled={busy}>
-          {phase.kind === "checking" ? "Checking…" : "Check for updates"}
+        <button className="btn" onClick={() => void update.check()} disabled={busy}>
+          {checking ? "Checking…" : "Check for updates"}
         </button>
 
-        {phase.kind === "result" && phase.result.kind === "current" && (
+        {status?.kind === "current" && (
           <span className="about-note">You are on the latest version.</span>
         )}
 
-        {phase.kind === "result" && phase.result.kind === "unsupported" && (
+        {status?.kind === "unsupported" && (
           <span className="about-note">
             Only the desktop app can check for updates — this is the browser preview.
           </span>
         )}
 
-        {phase.kind === "result" && phase.result.kind === "failed" && (
-          <span className="about-note">Couldn&apos;t check: {phase.result.message}</span>
+        {status?.kind === "failed" && (
+          <span className="about-note">Couldn&apos;t check: {status.message}</span>
         )}
 
-        {phase.kind === "result" && phase.result.kind === "available" && (
+        {status?.kind === "available" && install.kind !== "installing" && (
           <>
             <span className="about-note">
-              Version <span className="num">{phase.result.version}</span> is available. It is
-              verified against this build&apos;s signing key before it installs, and the app will
-              restart.
+              Version <span className="num">{status.version}</span> is available. The app will
+              restart once it installs.
             </span>
-            {phase.result.notes && <span className="about-note">{phase.result.notes}</span>}
-            <button
-              className="btn"
-              onClick={() => void onInstall(phase.result as Extract<CheckResult, { kind: "available" }>)}
-            >
-              Download and install {phase.result.version}
-            </button>
+            {status.notes && <span className="about-note">{status.notes}</span>}
+
+            {/* Restarting mid-switch would interrupt a credential rotation. */}
+            {blocked ? (
+              <span className="about-note">{blocked}</span>
+            ) : (
+              <button className="btn" onClick={() => void update.startInstall()}>
+                Download and install {status.version}
+              </button>
+            )}
           </>
         )}
 
-        {phase.kind === "installing" && (
+        {install.kind === "installing" && (
           <span className="about-note">
-            Installing {phase.version} — {percent(phase.progress)}. The app will restart on its own.
+            Installing — {percent(install.progress)}. The app will restart on its own.
           </span>
         )}
 
-        {phase.kind === "install-failed" && (
+        {install.kind === "failed" && (
           <span className="about-note">
-            Couldn&apos;t install {phase.version}: {phase.message} — download it manually from the
-            releases page instead.
+            Couldn&apos;t install: {install.message} — download it manually from the releases page
+            instead.
           </span>
         )}
       </div>

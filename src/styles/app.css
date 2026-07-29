@@ -162,6 +162,19 @@ h3 {
   font-weight: 500;
 }
 
+/* An update is waiting. `display: block` on .navlink means the label is not a
+   flex line, so the dot is floated to the trailing edge rather than laid out
+   beside the text. Deliberately quiet — an available update is information,
+   not a fault, so it does not borrow the danger colour. */
+.nav button.navlink .navlink-dot {
+  float: inline-end;
+  width: 6px;
+  height: 6px;
+  margin-top: 6px;
+  border-radius: 50%;
+  background: var(--interact);
+}
+
 /* Quiet Day/Night/System control anchored to the bottom of the sidebar via
    margin-top: auto (.nav is already a flex column). Chrome, not quota state —
    uses --muted/--ink/--interact only, same as .navlink above; never

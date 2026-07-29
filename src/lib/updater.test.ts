@@ -1,5 +1,13 @@
-import { afterEach, describe, expect, it, vi } from "vitest";
-import { checkForUpdate } from "./updater";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import {
+  CHECK_INTERVAL_MS,
+  checkForUpdate,
+  dueForAutoCheck,
+  installBlockedBy,
+  recordAutoCheck,
+  recordNotified,
+  shouldNotify,
+} from "./updater";
 
 /**
  * The updater's contract with the UI is that it never throws — every outcome is
@@ -68,5 +76,60 @@ describe("checkForUpdate", () => {
     const result = await fresh();
 
     expect(result).toMatchObject({ kind: "available", version: "0.2.0", notes: null });
+  });
+});
+
+describe("installBlockedBy", () => {
+  it("refuses while credentials are mid-rotation", () => {
+    // Installing restarts the app. Doing that during a switch means relying on
+    // the journal to recover from a crash we chose to cause.
+    expect(installBlockedBy({ kind: "switching", from: 0, to: 1 })).toMatch(/in progress/i);
+  });
+
+  it("refuses during the pre-switch countdown", () => {
+    expect(
+      installBlockedBy({ kind: "warning", from: 0, to: 1, deadline: "2026-01-01T00:00:00Z" }),
+    ).toMatch(/about to run/i);
+  });
+
+  it("refuses until recovery has completed", () => {
+    expect(installBlockedBy({ kind: "recoveryRequired", detail: "x" })).toMatch(/recovery/i);
+  });
+
+  it("allows the ordinary phases and an unknown one", () => {
+    expect(installBlockedBy({ kind: "monitoring" })).toBeNull();
+    expect(installBlockedBy({ kind: "disabled" })).toBeNull();
+    expect(installBlockedBy({ kind: "exhausted", earliestReset: null })).toBeNull();
+    expect(installBlockedBy(null)).toBeNull();
+  });
+});
+
+describe("automatic check bookkeeping", () => {
+  beforeEach(() => window.localStorage.clear());
+
+  it("is due when nothing has ever been recorded", () => {
+    expect(dueForAutoCheck()).toBe(true);
+  });
+
+  it("is not due again inside the interval, and is once it lapses", () => {
+    const t0 = 1_000_000_000_000;
+    recordAutoCheck(t0);
+    expect(dueForAutoCheck(t0 + CHECK_INTERVAL_MS - 1)).toBe(false);
+    expect(dueForAutoCheck(t0 + CHECK_INTERVAL_MS)).toBe(true);
+  });
+
+  it("recovers from a clock that moved backwards rather than wedging forever", () => {
+    const t0 = 1_000_000_000_000;
+    recordAutoCheck(t0);
+    // A future-dated stamp would otherwise make the difference negative forever.
+    expect(dueForAutoCheck(t0 - 60_000)).toBe(true);
+  });
+
+  it("announces a version once, not on every check", () => {
+    expect(shouldNotify("0.2.0")).toBe(true);
+    recordNotified("0.2.0");
+    expect(shouldNotify("0.2.0")).toBe(false);
+    // A newer release is still worth saying something about.
+    expect(shouldNotify("0.3.0")).toBe(true);
   });
 });

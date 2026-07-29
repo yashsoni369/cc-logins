@@ -270,6 +270,12 @@ export interface Settings {
   notifyOnExhausted: boolean;
   notifyOnExpiry: boolean;
   startAtLogin: boolean;
+  /**
+   * Whether the app may ask GitHub for a newer release on its own. On by
+   * default. The only setting that permits an outbound request to anything
+   * other than Anthropic; the manual check in About works regardless.
+   */
+  autoCheckUpdates: boolean;
   /** 1..3650 days, clamped by the backend on save. */
   historyRetentionDays: number;
   /**

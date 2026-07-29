@@ -20,6 +20,7 @@ const confirmed: SettingsSnapshot = {
     notifyOnExhausted: true,
     notifyOnExpiry: false,
     startAtLogin: false,
+    autoCheckUpdates: true,
     historyRetentionDays: 14,
     theme: "system",
   },

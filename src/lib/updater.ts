@@ -19,6 +19,106 @@
  */
 
 import type { Update } from "@tauri-apps/plugin-updater";
+import type { DaemonPhase } from "@/types";
+
+/** How long an automatic check waits before it is willing to run again. */
+export const CHECK_INTERVAL_MS = 24 * 60 * 60 * 1000;
+
+/**
+ * Startup delay before the first automatic check. Long enough that launch, the
+ * first poll and any first-run screen are done with; short enough that a user
+ * who opens the app and leaves it still learns about an update today.
+ */
+export const STARTUP_DELAY_MS = 30_000;
+
+const LAST_CHECK_KEY = "cc-logins.update.lastAutoCheck";
+const NOTIFIED_KEY = "cc-logins.update.notifiedVersion";
+
+/** localStorage is unavailable in some webview configurations; never fatal. */
+function readLocal(key: string): string | null {
+  try {
+    return window.localStorage.getItem(key);
+  } catch {
+    return null;
+  }
+}
+
+function writeLocal(key: string, value: string): void {
+  try {
+    window.localStorage.setItem(key, value);
+  } catch {
+    // A lost preference is not worth an error path; the cost is one extra
+    // check or one repeated notification.
+  }
+}
+
+/**
+ * Why an update must not be installed right now, or `null` when it is safe.
+ *
+ * Installing restarts the app. Doing that while credentials are mid-rotation
+ * means relying on the switch journal to recover from a crash we chose to
+ * cause, when waiting costs nothing.
+ */
+export function installBlockedBy(phase: DaemonPhase | null): string | null {
+  switch (phase?.kind) {
+    case "switching":
+      return "A switch is in progress — updating now would interrupt it.";
+    case "warning":
+      return "A switch is about to run. Let it finish, or pause auto-switching first.";
+    case "recoveryRequired":
+      return "Finish credential recovery before updating.";
+    default:
+      return null;
+  }
+}
+
+/** Whether an automatic check is due. Manual checks ignore this entirely. */
+export function dueForAutoCheck(now: number = Date.now()): boolean {
+  const raw = readLocal(LAST_CHECK_KEY);
+  if (!raw) return true;
+  const last = Number(raw);
+  // A corrupt or future-dated value must not wedge checking forever.
+  if (!Number.isFinite(last) || last > now) return true;
+  return now - last >= CHECK_INTERVAL_MS;
+}
+
+export function recordAutoCheck(now: number = Date.now()): void {
+  writeLocal(LAST_CHECK_KEY, String(now));
+}
+
+/**
+ * Whether this version still needs announcing. Keyed by version, not by time,
+ * so the same release is announced once and then never again — an update the
+ * user has decided to ignore must not nag on every launch.
+ */
+export function shouldNotify(version: string): boolean {
+  return readLocal(NOTIFIED_KEY) !== version;
+}
+
+export function recordNotified(version: string): void {
+  writeLocal(NOTIFIED_KEY, version);
+}
+
+/** Best-effort OS notification. Silence is the correct failure here. */
+export async function notifyUpdate(version: string): Promise<void> {
+  if (!hasTauri()) return;
+  try {
+    const { isPermissionGranted, requestPermission, sendNotification } = await import(
+      "@tauri-apps/plugin-notification"
+    );
+    let granted = await isPermissionGranted();
+    if (!granted) granted = (await requestPermission()) === "granted";
+    if (!granted) return;
+
+    sendNotification({
+      title: `CC Logins ${version} is available`,
+      body: "Open Settings → About to install it.",
+    });
+  } catch {
+    // The in-app indicator still shows the update; a failed toast is not worth
+    // surfacing as an error.
+  }
+}
 
 /** Outcome of a check. `unsupported` means there is no Tauri runtime at all. */
 export type UpdateCheck =
