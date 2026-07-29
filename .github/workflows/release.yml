@@ -228,9 +228,14 @@ jobs:
 
           # Tauri's default asset names embed the version, which breaks
           # `releases/latest/download/<file>` permalinks on every release.
-          # Dropping [version] makes those links stable; [arch] still separates
-          # the two macOS builds.
-          releaseAssetNamePattern: CC-Logins-[platform]-[arch][setup][ext]
+          # Dropping [version] makes those links stable.
+          #
+          # `assetNamePattern`, not `releaseAssetNamePattern`: the input was
+          # renamed after v0, and this workflow pins @v0. An unknown `with:` key
+          # is a warning rather than an error, so the wrong name silently did
+          # nothing and v0.1.0's first build produced default, version-stamped
+          # names. Check the ref that is actually pinned before changing this.
+          assetNamePattern: CC-Logins-[platform]-[arch][setup][ext]
 
   # Unsigned installers give a user no way to tell a real download from a
   # tampered one. A checksum file is the minimum substitute, and it has to be
