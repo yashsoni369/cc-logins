@@ -9,11 +9,20 @@ interface ResetStaggerProps {
   hours?: number;
 }
 
-const VIEW_W = 320;
-const TRACK_X = 66;
+/**
+ * User units are kept at roughly one-to-one with rendered pixels. The strip is
+ * full-pane width, so a narrow viewBox would scale every `font-size` up with
+ * it — at 320 units wide the labels rendered three times over and collided
+ * with the bands. Band heights and type sizes below are therefore real pixels.
+ */
+const VIEW_W = 1000;
+// Sized to the widest name `clip` will emit, not to a fraction of the width:
+// at 200 the gutter held 12 characters of 11px type in 200px of room.
+const TRACK_X = 122;
 const TRACK_W = VIEW_W - TRACK_X - 4;
-const ROW_PITCH = 15;
-const BAND_H = 9;
+// A 10px label cannot sit inside a 9px band; the text crossed the outline.
+const ROW_PITCH = 18;
+const BAND_H = 12;
 const AXIS_H = 12;
 
 /**
@@ -53,7 +62,7 @@ function bandFor(account: Account, now: number, horizonMs: number): Band {
 
 /** Labels are drawn, not laid out, so they cannot ellipsize themselves. */
 function clip(name: string): string {
-  return name.length > 12 ? `${name.slice(0, 11)}…` : name;
+  return name.length > 17 ? `${name.slice(0, 16)}…` : name;
 }
 
 function listNames(bands: Band[]): string {
@@ -159,50 +168,34 @@ export default function ResetStagger({ accounts, now, hours = 12 }: ResetStagger
           return (
             <g key={b.key}>
               <title>{bandTitle(b)}</title>
-              <text className="stagger-axis" x={0} y={y + BAND_H - 1.5} fontSize={7}>
+              <text className="stagger-axis" x={0} y={y + BAND_H - 1.5} fontSize={11}>
                 {clip(b.name)}
               </text>
 
+              {/* Outline first, always: it carries the band's full extent at a
+                  neutral 6:1, so the replenished stretch stays legible without
+                  depending on a tint of the state colour. */}
+              <rect className="stagger-track" x={TRACK_X} y={y} width={TRACK_W} height={BAND_H} />
+
               {b.at == null ? (
-                <>
-                  {/* Never omitted and never drawn at zero — an account whose
-                      reset we cannot read is a real hole in the plan. */}
-                  <rect
-                    className={`${cls} unknown`}
-                    x={TRACK_X}
-                    y={y}
-                    width={TRACK_W}
-                    height={BAND_H}
-                    fill="var(--faint)"
-                    opacity={0.22}
-                  />
-                  <text
-                    className="stagger-axis"
-                    x={TRACK_X + TRACK_W / 2}
-                    y={y + BAND_H - 1.5}
-                    fontSize={6.5}
-                    textAnchor="middle"
-                  >
-                    reset unknown
-                  </text>
-                </>
+                /* An account whose reset we cannot read is a real hole in the
+                   plan, so it keeps its outline and says so. */
+                <text
+                  className="stagger-axis"
+                  x={TRACK_X + TRACK_W / 2}
+                  y={y + BAND_H - 3.5}
+                  fontSize={10}
+                  textAnchor="middle"
+                >
+                  reset unknown
+                </text>
               ) : (
                 <>
-                  {/* Consumed then replenished, separated by opacity rather than
-                      a second hue: one band, one state, one colour. */}
+                  {/* Consumed is filled, replenished is the bare track — the
+                      same filled-versus-empty vocabulary as the quota meters,
+                      and it survives at any contrast. */}
                   {split > 0 && (
-                    <rect className={cls} x={TRACK_X} y={y} width={split} height={BAND_H} fill={fill} opacity={0.9} />
-                  )}
-                  {split < TRACK_W && (
-                    <rect
-                      className={cls}
-                      x={TRACK_X + split}
-                      y={y}
-                      width={TRACK_W - split}
-                      height={BAND_H}
-                      fill={fill}
-                      opacity={0.22}
-                    />
+                    <rect className={cls} x={TRACK_X} y={y} width={split} height={BAND_H} fill={fill} />
                   )}
                   {split > 0 && split < TRACK_W && (
                     <rect
@@ -220,13 +213,13 @@ export default function ResetStagger({ accounts, now, hours = 12 }: ResetStagger
           );
         })}
 
-        <text className="stagger-axis" x={TRACK_X} y={axisY} fontSize={6.5}>
+        <text className="stagger-axis" x={TRACK_X} y={axisY} fontSize={10}>
           now
         </text>
-        <text className="stagger-axis" x={TRACK_X + TRACK_W / 2} y={axisY} fontSize={6.5} textAnchor="middle">
+        <text className="stagger-axis" x={TRACK_X + TRACK_W / 2} y={axisY} fontSize={10} textAnchor="middle">
           +{Math.round(hours / 2)}h
         </text>
-        <text className="stagger-axis" x={TRACK_X + TRACK_W} y={axisY} fontSize={6.5} textAnchor="end">
+        <text className="stagger-axis" x={TRACK_X + TRACK_W} y={axisY} fontSize={10} textAnchor="end">
           +{hours}h
         </text>
       </svg>

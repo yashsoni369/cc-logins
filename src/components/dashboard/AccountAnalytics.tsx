@@ -424,7 +424,8 @@ export default function AccountAnalytics({
       <h3 className="dash-cap">When this account runs hot</h3>
       <UsageHeatmap samples={samples} />
 
-      <h3 className="dash-cap">Daily range</h3>
+      {/* No section heading here: RangeChart already titles itself "Daily
+          range", and the two rendered eight pixels apart said it twice. */}
       {hasDaily ? (
         <RangeChart daily={daily} rangeDays={rangeDays} threshold={threshold} />
       ) : (

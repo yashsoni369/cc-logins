@@ -156,14 +156,12 @@ describe("AccountsScreen reset countdown", () => {
   });
 });
 
-describe("AccountsScreen rotation switch", () => {
-  it("reflects rotation membership as aria-checked", () => {
+describe("AccountsScreen rotation control", () => {
+  it("labels the control by what pressing it does", () => {
     render(<AccountsScreen snapshot={rotationSnapshot} onSetEnabled={vi.fn()} {...inertProps()} />);
 
-    expect(screen.getByRole("switch", { name: /^Work / })).toHaveAttribute("aria-checked", "true");
-    expect(screen.getByRole("switch", { name: /^Spare / })).toHaveAttribute("aria-checked", "false");
-    // The pill stays: it is the shared status vocabulary, and reads without
-    // parsing switch position.
+    expect(screen.getByRole("button", { name: "Disable" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Enable" })).toBeInTheDocument();
     expect(screen.getByText(/held out/i)).toBeInTheDocument();
   });
 
@@ -171,9 +169,9 @@ describe("AccountsScreen rotation switch", () => {
     const onSetEnabled = vi.fn();
     render(<AccountsScreen snapshot={rotationSnapshot} onSetEnabled={onSetEnabled} {...inertProps()} />);
 
-    const toggle = screen.getByRole("switch", { name: /^Spare / });
-    const row = toggle.closest("tr")!;
-    fireEvent.click(toggle);
+    const button = screen.getByRole("button", { name: "Enable" });
+    const row = button.closest("tr")!;
+    fireEvent.click(button);
 
     expect(onSetEnabled).toHaveBeenCalledWith(3, true);
     // Regression guard for the click bubbling into the row's click-to-expand.
@@ -184,7 +182,7 @@ describe("AccountsScreen rotation switch", () => {
     const onSetEnabled = vi.fn();
     render(<AccountsScreen snapshot={rotationSnapshot} onSetEnabled={onSetEnabled} {...inertProps()} />);
 
-    fireEvent.click(screen.getByRole("switch", { name: /^Work / }));
+    fireEvent.click(screen.getByRole("button", { name: "Disable" }));
 
     expect(onSetEnabled).toHaveBeenCalledWith(1, false);
   });

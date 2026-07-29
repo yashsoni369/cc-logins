@@ -9,7 +9,7 @@ switch as a recoverable transaction.
 
 The lock order is fixed:
 
-1. `<cswap-store>/.lock`, only when a real cswap store already exists;
+1. `<legacy-store>/.lock`, only when a legacy CLI store already exists;
 2. `<CLAUDE_CONFIG_DIR>/.oauth_refresh.lock`;
 3. the sibling legacy credential lock (normally `~/.claude.lock`);
 4. the global-config lock (normally `~/.claude.json.lock`);

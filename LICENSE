@@ -23,8 +23,7 @@ SOFTWARE.
 ---
 
 Portions of this software (the credential, path-resolution, locking, and
-usage-tracking logic) are ported from claude-swap
-(https://github.com/realiti4/claude-swap), used and adapted under the MIT
+usage-tracking logic) are adapted from third-party code, used under the MIT
 License reproduced below, as required by that license.
 
 MIT License

@@ -1140,13 +1140,12 @@ fn persist(callback: Option<&PersistCallback>, account_num: &str, email: &str, c
         None => return,
     };
     if let Err(e) = callback(account_num, email, credentials) {
-        // Python additionally calls a CLI `print_warning` here; this port has
-        // no printer module (no CLI surface), so the GUI layer is expected to
-        // surface persistence failures itself (e.g. a toast) if it cares.
+        // No CLI surface here, so the GUI layer is expected to surface
+        // persistence failures itself (e.g. a toast) if it cares.
         log::warn!(
             "Refreshed OAuth token for account {} ({}) but failed to persist it: {}. \
              The refresh token on disk may now be stale; if the next refresh fails \
-             with invalid_grant, re-run `cswap --add-account` after logging in.",
+             with invalid_grant, sign in to this account again from the Accounts screen.",
             account_num,
             email,
             e

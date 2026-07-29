@@ -5,7 +5,6 @@ import UsageMeter from "./UsageMeter";
 import AccountDetails from "./AccountDetails";
 import AddTokenDialog from "./AddTokenDialog";
 import SignInFlow from "./SignInFlow";
-import Toggle from "./Toggle";
 import { RefreshButton } from "./RefreshButton";
 import { formatCountdown, formatInstant, useNow } from "../lib/time";
 import { useClockFormat } from "../lib/clockFormat";
@@ -287,24 +286,33 @@ export default function AccountsScreen({
                         </button>
                       ) : null}
                       {/*
-                        A bare switch has no visible label, so the title carries
-                        the meaning. `stopPropagation` is required: the row is
-                        itself a click-to-expand button, and flipping the switch
-                        must not also expand it.
+                        A labelled button, not a switch: it sits beside Switch
+                        and Re-login, and a lone toggle among buttons read as
+                        an odd one out. `stopPropagation` is still required —
+                        the row is itself a click-to-expand button.
                       */}
-                      <Toggle
-                        checked={!isHeldOut}
-                        onChange={(next) => onSetEnabled(account.number, next)}
-                        pending={isEnablePending}
+                      <button
+                        type="button"
+                        className="btn ghost"
                         disabled={mutationInFlight}
-                        stopPropagation
-                        ariaLabel={`${displayName(account)} in auto-switch rotation`}
                         title={
                           isHeldOut
-                            ? "Held out of rotation. Click to enable."
-                            : "Enabled — in auto-switch rotation. Click to hold out."
+                            ? "Held out of rotation. Enable to let auto-switch use it."
+                            : "In auto-switch rotation. Disable to hold it out."
                         }
-                      />
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          onSetEnabled(account.number, isHeldOut);
+                        }}
+                      >
+                        {isEnablePending
+                          ? isHeldOut
+                            ? "Enabling…"
+                            : "Disabling…"
+                          : isHeldOut
+                            ? "Enable"
+                            : "Disable"}
+                      </button>
                     </div>
                     {switchError?.accountNumber === account.number && (
                       <div style={{ marginTop: 6, fontSize: 11, color: "var(--danger)", textAlign: "right" }}>

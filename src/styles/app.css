@@ -964,26 +964,32 @@ hr.rule {
 .stagger-band.danger {
   fill: var(--danger-fill);
 }
-/* The replenished stretch after a reset — same hue, lower weight, so the
-   distinction never depends on a second colour. */
-.stagger-band.after {
-  opacity: 0.3;
-}
-.stagger-band.unknown {
-  fill: var(--raised);
+/* The band's full extent. Measured, not guessed: a tint of the state colour
+   tops out at 2.55:1 on --bg at any usable alpha, and --raised reaches 1.19:1,
+   so neither can carry the outline. --muted measures 6.02:1 dark / 6.37:1
+   light. State stays in the fill; the outline is chrome. */
+.stagger-track {
+  fill: none;
+  stroke: var(--muted);
+  stroke-width: 1;
 }
 .stagger-axis {
   stroke: var(--line);
   stroke-width: 1;
 }
+/* The same class lands on the in-SVG labels. Text needs a fill and no stroke —
+   inheriting the line's stroke outlines every glyph and leaves it colourless. */
+/* --muted, not --faint, for the same reason `.mail` above uses it: --faint
+   measures 3.04:1 dark and 3.66:1 light against --bg, under the 4.5:1 minimum,
+   and these are 10-11px data labels a user reads, not decoration. */
+text.stagger-axis {
+  stroke: none;
+  fill: var(--muted);
+  font-family: var(--mono);
+}
 .stagger-tick {
   stroke: var(--line-soft);
   stroke-width: 1;
-}
-.stagger-label {
-  font-family: var(--mono);
-  font-size: 9px;
-  fill: var(--faint);
 }
 
 /* ─────────── dashboard: account analytics ─────────── */
@@ -1058,14 +1064,18 @@ hr.rule {
 
 .heat {
   display: grid;
-  grid-template-columns: 30px repeat(7, minmax(0, 1fr));
+  /* Wide enough for "Afternoon" at 9px mono. At 30px the row labels clipped to
+     "Aft" / "Nig", and the 28px it costs the seven day columns is 4px each. */
+  grid-template-columns: 58px repeat(7, minmax(0, 1fr));
   gap: 3px;
   align-items: center;
 }
+/* --muted, not --faint: these are 9px labels, and --faint measures 3.04:1 dark
+   / 3.66:1 light against --bg, under the 4.5:1 text minimum. */
 .heat-lab {
   font-family: var(--mono);
   font-size: 9px;
-  color: var(--faint);
+  color: var(--muted);
   text-align: center;
 }
 .heat-cell {
@@ -1074,10 +1084,16 @@ hr.rule {
   background: var(--ok-fill);
 }
 /* No measurement in this bucket. Distinct from an average of zero, which is a
-   real reading — a bare track, not a faint fill. */
-.heat-cell.empty {
+   real reading — a bare track, not a faint fill.
+   Deliberately `is-empty`, not `empty`: the app already owns a global `.empty`
+   empty-state block, and a bare `.empty` here inherits its padded flex column. */
+/* --faint, not --line-soft: this outline is the whole "no samples" signal, and
+   --line-soft measures 1.22:1 against --bg — invisible. --faint reaches 3.04:1
+   dark / 3.66:1 light, clearing the 3:1 non-text bar without the grid of empty
+   cells shouting the way --muted would. */
+.heat-cell.is-empty {
   background: transparent;
-  border: 1px solid var(--line-soft);
+  border: 1px solid var(--faint);
 }
 .heat-legend {
   display: flex;
@@ -1085,7 +1101,7 @@ hr.rule {
   flex-wrap: wrap;
   font-family: var(--mono);
   font-size: 10px;
-  color: var(--faint);
+  color: var(--muted);
   padding-top: 4px;
 }
 .heat-legend i {

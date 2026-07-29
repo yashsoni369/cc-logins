@@ -119,7 +119,7 @@ interface EnableError {
 
 /** Shared across every mutation below: the backend's single credential lock is held elsewhere. */
 const BUSY_MESSAGE =
-  "Another process (very likely the cswap CLI) is using your accounts right now. Try again in a moment.";
+  "Another process is using your accounts right now. Try again in a moment.";
 
 export function daemonPhaseLabel(phase: DaemonPhase | undefined, strategy: string | undefined): string {
   const strategyLabel =

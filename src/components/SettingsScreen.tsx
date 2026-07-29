@@ -325,10 +325,10 @@ export default function SettingsScreen({
           </div>
           <div className="v">
             <span style={{ fontSize: 12, color: "var(--muted)", maxWidth: "52ch" }}>
-              This app keeps your accounts in its own folder, so a fault in either this app
-              or the <span className="num">cswap</span> CLI can only affect its own store.
+              This app keeps your accounts in its own folder, separate from any other
+              tool&apos;s, so a fault on either side can only affect its own store.
               Switching still installs the chosen login into Claude Code&apos;s official
-              location, which is the only thing the two tools share.
+              location, which is the only thing anything else here touches.
             </span>
           </div>
         </div>

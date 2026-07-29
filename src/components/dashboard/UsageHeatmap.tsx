@@ -107,7 +107,7 @@ export default function UsageHeatmap({ samples }: UsageHeatmapProps) {
 
       <div className="heat-legend">
         <span>
-          <i className="heat-cell empty" />
+          <i className="heat-cell is-empty" />
           no samples
         </span>
         <span>
@@ -125,15 +125,17 @@ export default function UsageHeatmap({ samples }: UsageHeatmapProps) {
 function HeatRow({ part, row, buckets }: { part: (typeof PARTS)[number]; row: number; buckets: Bucket[] }) {
   return (
     <>
+      {/* Full word: "Aft" and "Nig" are not words, and the column is now sized
+          for the longest of them. */}
       <span className="heat-lab" title={`${part.label}, ${part.hours}`}>
-        {part.label.slice(0, 3)}
+        {part.label}
       </span>
       {WEEKDAYS.map((day, col) => {
         const bucket = buckets[row * WEEKDAYS.length + col];
         // Absence is a class, not an intensity: an unsampled slot is drawn as
         // a bare outline so it can never be misread as a low reading.
         if (!bucket || bucket.count === 0) {
-          return <span className="heat-cell empty" key={day} title={`${day} ${part.label}: no samples`} />;
+          return <span className="heat-cell is-empty" key={day} title={`${day} ${part.label}: no samples`} />;
         }
         const avg = Math.max(0, Math.min(100, bucket.sum / bucket.count));
         return (
