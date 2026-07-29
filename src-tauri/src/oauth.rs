@@ -42,7 +42,9 @@ pub const OAUTH_CLIENT_ID: &str = "9d1c250a-e61b-44d9-88ed-5944d1962f5e";
 pub const USAGE_URL: &str = "https://api.anthropic.com/api/oauth/usage";
 pub const PROFILE_URL: &str = "https://api.anthropic.com/api/oauth/profile";
 
-const USER_AGENT: &str = "claude-swap/1.0";
+/// Identifies this app to Anthropic on every OAuth, usage and profile call.
+/// Tracks the crate version so a request can be traced to the build that made it.
+const USER_AGENT: &str = concat!("cc-logins/", env!("CARGO_PKG_VERSION"));
 
 // ---------------------------------------------------------------------------
 // Credential parsing (pure)

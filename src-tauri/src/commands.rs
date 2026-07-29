@@ -44,7 +44,7 @@ pub enum IpcError {
     Unreachable(String),
     /// The credential store could not be read or written.
     Credential(String),
-    /// A lock is held by another process (very likely the `cswap` CLI).
+    /// A lock is held by another process (very likely Claude Code itself).
     Busy(String),
     /// The interactive login's terminal window closed before any credential
     /// appeared. The ordinary "the user changed their mind" outcome, not a
@@ -556,14 +556,6 @@ pub async fn set_account_enabled(
     Ok(snap)
 }
 
-// NOTE: `switcher::import_from_cswap` is deliberately NOT exposed as a command.
-//
-// It exists as a one-off migration utility, not a product feature. Offering
-// "import from cswap" in the UI would frame this app as a companion to that
-// CLI rather than a standalone tool, which is not what it is. The function
-// stays (it is tested, and useful for seeding a vault during development) but
-// nothing user-facing reaches it.
-
 // ─── application state ───────────────────────────────────────────────────────
 
 /// Long-lived state, created once at startup and injected into commands.
@@ -754,7 +746,7 @@ pub fn history_available(state: tauri::State<'_, AppState>) -> bool {
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DataLocations {
-    /// This app's own account vault — never the `cswap` CLI's directory.
+    /// This app's own account vault — never another tool's directory.
     pub account_vault: String,
     /// Settings file and history database.
     pub data_dir: String,

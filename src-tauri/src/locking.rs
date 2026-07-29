@@ -1,10 +1,10 @@
 //! Cross-process advisory file locking.
 //!
 //! Ported from claude-swap (MIT) — <https://github.com/realiti4/claude-swap>,
-//! `claude_swap/locking.py`. This is the interop contract with the upstream
-//! Python CLI: both tools lock the *same* lock file with the *same* OS
-//! primitive, so a `cswap` process in a terminal and this app in the tray can
-//! run at the same time without corrupting each other's on-disk state.
+//! `claude_swap/locking.py`. Two processes coordinate only when they lock the
+//! *same* path with the *same* OS primitive, so this stays byte-compatible
+//! with the lock files Claude Code itself honours (see
+//! [`crate::claude_locks`]) and with other instances of this app.
 //!
 //! Protocol (must match the Python implementation byte-for-byte in
 //! behaviour, not just in outcome):
@@ -17,7 +17,7 @@
 //!
 //! Hard rule inherited from upstream, binding on every caller of this module:
 //! **never hold a credential or config lock across a network call.** A lock
-//! held here blocks every other `cswap`/GUI process on this machine; a
+//! held here blocks every other process on this machine that honours it; a
 //! network call can stall arbitrarily long. Acquire, do the local file I/O,
 //! release — then make the network call unlocked.
 
@@ -173,8 +173,8 @@ impl Drop for FileLock {
 /// releases the lock when dropped.
 ///
 /// # Errors
-/// [`LockingError::Timeout`] if another process (this app or `cswap` itself)
-/// is holding the lock past `timeout`. [`LockingError::Io`] if the lock file
+/// [`LockingError::Timeout`] if another process (this app or Claude Code
+/// itself) is holding the lock past `timeout`. [`LockingError::Io`] if the lock file
 /// could not be created/opened at all.
 pub fn acquire_or_err(
     lock_path: impl Into<PathBuf>,

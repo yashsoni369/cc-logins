@@ -17,19 +17,13 @@
 //!   `.claude/`.
 //! - Credentials: `<config_home>/.credentials.json`.
 //!
-//! Also resolves [`external_store_root`], the store directory of another
-//! process that writes the same credentials (Linux/WSL: XDG Base Directory
-//! Specification, `$XDG_DATA_HOME/claude-swap`; macOS/Windows: legacy
-//! `~/.claude-swap-backup`). We only ever place a lock file there —
-//! [`backup_root`], this app's own vault, is a completely separate directory
-//! and never resolves there. See [`backup_root`]'s doc for why the two must
-//! never be the same path.
+//! Also resolves [`backup_root`], this app's own account vault. That is a
+//! directory this app alone owns — see its doc for why it is never shared
+//! with any other tool's store.
 //!
 //! References:
 //! - claude-code `utils/env.ts` `getGlobalClaudeFile`
 //! - claude-code `utils/secureStorage/plainTextStorage.ts` `getStoragePath`
-//! - XDG Base Directory Specification:
-//!   <https://specifications.freedesktop.org/basedir-spec/basedir-spec-latest.html>
 
 use std::env;
 use std::path::{Path, PathBuf};
@@ -51,7 +45,7 @@ fn env_non_empty(name: &str) -> Option<String> {
 /// Resolve the current user's home directory.
 ///
 /// Mirrors Python's `Path.home()` (== `os.path.expanduser("~")`) closely
-/// enough for claude-swap's needs:
+/// enough for this app's needs:
 ///
 /// - macOS/Linux/WSL: `HOME` is authoritative, matching CPython's
 ///   `posixpath.expanduser`. (CPython additionally falls back to a
@@ -92,26 +86,6 @@ fn home_dir() -> PathBuf {
             None => PathBuf::from("."),
         }
     }
-}
-
-/// POSIX-style `~` expansion, mirroring `posixpath.expanduser` for the one
-/// case this module needs it (`XDG_DATA_HOME`, only ever consulted on the
-/// Linux/WSL branch where the *real* Python process is itself running on
-/// Linux, so `posixpath.expanduser` — not `ntpath.expanduser` — is what
-/// applies there).
-///
-/// Handles `~` and `~/rest`. Does **not** handle `~otheruser` (CPython
-/// resolves that via the `pwd` database, which has no portable std
-/// equivalent); such input is returned unchanged, same as this module's
-/// `home_dir` caveat above.
-fn expand_tilde(path: &str) -> PathBuf {
-    if path == "~" {
-        return home_dir();
-    }
-    if let Some(rest) = path.strip_prefix("~/") {
-        return home_dir().join(rest);
-    }
-    PathBuf::from(path)
 }
 
 // ---------------------------------------------------------------------------
@@ -263,15 +237,6 @@ pub fn global_config_lock_dir() -> PathBuf {
         .join(format!("{name}.lock"))
 }
 
-/// Directory name of the external store's legacy (pre-XDG) layout.
-pub const EXTERNAL_STORE_LEGACY_DIRNAME: &str = ".claude-swap-backup";
-
-/// Return the external store's legacy (pre-XDG) root:
-/// `~/.claude-swap-backup`.
-pub fn external_store_legacy_root() -> PathBuf {
-    home_dir().join(EXTERNAL_STORE_LEGACY_DIRNAME)
-}
-
 /// Process-wide override for where this app keeps its own account vault.
 ///
 /// Set once at startup (from Tauri's per-platform `app_data_dir()`). A
@@ -288,16 +253,14 @@ static STORE_ROOT: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
 /// # Why the vault is always ours
 ///
 /// This app originally wrote its registry, credential backups and lock
-/// **directly into `~/.claude-swap-backup`** — the external store's own
-/// directory. That gave interop for free, and a shared blast radius with it:
-/// when a bug in this project's test suite corrupted that store, it destroyed
-/// the other tool's accounts too, because they were the same bytes.
+/// directly into a directory another tool also owned. That gave interop for
+/// free, and a shared blast radius with it: when a bug in this project's test
+/// suite corrupted that store, it destroyed the other tool's accounts too,
+/// because they were the same bytes.
 ///
 /// So the vault is now always a directory of our own, alongside the settings
 /// and history databases we already own — there is no setting or code path
-/// that points it at [`external_store_root`] any more. All that is still
-/// shared there is a lock file, which cannot carry data and so cannot
-/// corrupt anything.
+/// that resolves anywhere else.
 ///
 /// Idempotent: the first call wins, so a later caller cannot silently move the
 /// vault out from under an in-flight operation.
@@ -305,9 +268,9 @@ pub fn set_store_root(root: PathBuf) {
     let _ = STORE_ROOT.set(root);
 }
 
-/// Where this app's OWN account vault lives. Always this app's directory —
-/// never [`external_store_root`] — regardless of platform, settings, or
-/// whether [`set_store_root`] has been called yet.
+/// Where this app's OWN account vault lives. Always this app's directory,
+/// regardless of platform, settings, or whether [`set_store_root`] has been
+/// called yet.
 ///
 /// [`set_store_root`]'s value once startup has configured it; otherwise a
 /// same-shaped own-directory fallback (see [`default_store_root`]), so any
@@ -342,64 +305,12 @@ fn backup_root_inner() -> PathBuf {
 /// future non-Tauri entry point) so they still resolve to a directory this
 /// app owns — computed from the OS's own "user data dir" convention (the same
 /// `dirs` crate used for this app's log directory), never from anything
-/// shared with the external store.
+/// shared with another tool.
 fn default_store_root() -> PathBuf {
     dirs::data_dir()
         .unwrap_or_else(std::env::temp_dir)
         .join("cc-logins")
         .join("accounts")
-}
-
-/// Store root of another process that writes the same credentials.
-///
-/// Linux/WSL: `$XDG_DATA_HOME/claude-swap` (default
-/// `~/.local/share/claude-swap`); macOS/Windows/unknown:
-/// [`external_store_legacy_root`]. Per the XDG spec, `$XDG_DATA_HOME` is
-/// ignored when unset, empty, or non-absolute; a leading `~` is expanded so
-/// values set via systemd unit files or Dockerfiles (which don't get shell
-/// expansion) still work.
-///
-/// The only thing this app ever puts here is `.lock`, and only when the
-/// directory already exists — see `crate::switch_transaction`'s lock-ordering
-/// doc. Never written to as a vault: this app's vault is always
-/// [`backup_root`], a completely separate directory.
-///
-/// Under `cfg(test)`, every resolution is checked to be inside a temp
-/// directory. This is not defensive padding: a flaky env-var race once let the
-/// suite resolve the developer's real backup root and destroy two registered
-/// accounts. Guarding at the single point where the path is produced catches
-/// every caller, rather than relying on each test to remember a lock.
-pub fn external_store_root() -> PathBuf {
-    let resolved = external_store_root_inner();
-    #[cfg(test)]
-    crate::test_support::guard_real_store(&resolved);
-    resolved
-}
-
-fn external_store_root_inner() -> PathBuf {
-    external_store_root_for(Platform::detect())
-}
-
-/// Core logic behind [`external_store_root`], parameterized on the platform.
-///
-/// Split out from `external_store_root` so every branch (Linux/WSL vs.
-/// macOS/Windows/Unknown) can be exercised in tests regardless of which OS
-/// actually compiles and runs the test suite — unlike [`Platform::detect`],
-/// which is pinned to the compiled target and so cannot be driven to every
-/// variant on a single host.
-fn external_store_root_for(platform: Platform) -> PathBuf {
-    match platform {
-        Platform::Linux | Platform::Wsl => {
-            if let Some(xdg) = env_non_empty("XDG_DATA_HOME") {
-                let expanded = expand_tilde(&xdg);
-                if expanded.is_absolute() {
-                    return expanded.join("claude-swap");
-                }
-            }
-            home_dir().join(".local").join("share").join("claude-swap")
-        }
-        Platform::Macos | Platform::Windows | Platform::Unknown => external_store_legacy_root(),
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -619,20 +530,6 @@ mod tests {
         );
     }
 
-    // -- external_store_legacy_root ------------------------------------------
-
-    #[test]
-    fn external_store_legacy_root_is_home_dot_claude_swap_backup() {
-        let _lock = env_lock();
-        let home = TempDir::new().unwrap();
-        let _home_guard = set_home(home.path());
-
-        assert_eq!(
-            external_store_legacy_root(),
-            home.path().join(".claude-swap-backup")
-        );
-    }
-
     // -- get_* compatibility aliases -----------------------------------------
 
     #[test]
@@ -674,119 +571,15 @@ mod tests {
         assert_eq!(backup_root(), vault.path());
     }
 
-    #[test]
-    fn backup_root_never_equals_the_external_store_even_when_home_would_make_them_collide() {
-        // Point HOME somewhere that WOULD make external_store_root() resolve
-        // right where the legacy shared store used to live, and confirm our
-        // vault (via an explicit override, as it always is once configured)
-        // is still a completely different directory. This is the regression
-        // this whole task exists to prevent: the vault silently landing
-        // inside the other tool's own directory.
-        let _lock = env_lock();
-        let home = TempDir::new().unwrap();
-        let _home_guard = set_home(home.path());
-        // Unset so the Linux branch is deterministic; CI runners set this.
-        let _xdg_guard = EnvGuard::unset("XDG_DATA_HOME");
-        let vault = TempDir::new().unwrap();
-        let _store_guard = crate::test_support::StoreRootGuard::set(vault.path().to_path_buf());
-
-        // The point of the test: the vault is never the external store.
-        assert_ne!(backup_root(), external_store_root());
-
-        // The external store's layout differs per platform — XDG on Linux, a
-        // dotdir elsewhere — so the expectation has to as well.
-        #[cfg(any(windows, target_os = "macos"))]
-        let expected = home.path().join(".claude-swap-backup");
-        #[cfg(not(any(windows, target_os = "macos")))]
-        let expected = home.path().join(".local").join("share").join("claude-swap");
-
-        assert_eq!(external_store_root(), expected);
-    }
-
-    // -- external_store_root_for (platform-parameterized XDG logic) ---------
-
-    #[test]
-    fn external_store_root_linux_uses_xdg_data_home_when_set_and_absolute() {
-        let _lock = env_lock();
-        let home = TempDir::new().unwrap();
-        let xdg = TempDir::new().unwrap();
-        let _home_guard = set_home(home.path());
-        let _xdg_guard = EnvGuard::set("XDG_DATA_HOME", xdg.path().to_str().unwrap());
-
-        assert_eq!(
-            external_store_root_for(Platform::Linux),
-            xdg.path().join("claude-swap")
-        );
-        assert_eq!(
-            external_store_root_for(Platform::Wsl),
-            xdg.path().join("claude-swap")
-        );
-    }
-
-    #[test]
-    fn external_store_root_linux_falls_back_to_local_share_when_xdg_unset() {
-        let _lock = env_lock();
-        let home = TempDir::new().unwrap();
-        let _home_guard = set_home(home.path());
-        let _xdg_guard = EnvGuard::unset("XDG_DATA_HOME");
-
-        assert_eq!(
-            external_store_root_for(Platform::Linux),
-            home.path().join(".local").join("share").join("claude-swap")
-        );
-    }
-
-    #[test]
-    fn external_store_root_linux_ignores_non_absolute_xdg_data_home() {
-        let _lock = env_lock();
-        let home = TempDir::new().unwrap();
-        let _home_guard = set_home(home.path());
-        let _xdg_guard = EnvGuard::set("XDG_DATA_HOME", "relative/path");
-
-        assert_eq!(
-            external_store_root_for(Platform::Linux),
-            home.path().join(".local").join("share").join("claude-swap")
-        );
-    }
-
-    #[test]
-    fn external_store_root_linux_expands_leading_tilde_in_xdg_data_home() {
-        let _lock = env_lock();
-        let home = TempDir::new().unwrap();
-        let _home_guard = set_home(home.path());
-        let _xdg_guard = EnvGuard::set("XDG_DATA_HOME", "~/xdgdata");
-
-        assert_eq!(
-            external_store_root_for(Platform::Linux),
-            home.path().join("xdgdata").join("claude-swap")
-        );
-    }
-
-    #[test]
-    fn external_store_root_macos_and_windows_use_legacy_layout() {
-        let _lock = env_lock();
-        let home = TempDir::new().unwrap();
-        let _home_guard = set_home(home.path());
-        // Even with XDG_DATA_HOME set, non-Linux platforms must ignore it.
-        let xdg = TempDir::new().unwrap();
-        let _xdg_guard = EnvGuard::set("XDG_DATA_HOME", xdg.path().to_str().unwrap());
-
-        let expected = home.path().join(".claude-swap-backup");
-        assert_eq!(external_store_root_for(Platform::Macos), expected);
-        assert_eq!(external_store_root_for(Platform::Windows), expected);
-        assert_eq!(external_store_root_for(Platform::Unknown), expected);
-    }
-
     // -- Platform::detect (host-pinned; smoke test only) ---------------------
 
     #[test]
     fn platform_detect_matches_compiled_target() {
         // Platform::detect() is pinned to the OS this test binary was
         // compiled for (see its doc comment) — it cannot be driven to other
-        // variants from a single test run, unlike external_store_root_for above.
-        // This just confirms it produces a variant consistent with the
-        // build, and that on Linux the WSL_DISTRO_NAME env var (when
-        // present) is honored.
+        // variants from a single test run. This just confirms it produces a
+        // variant consistent with the build, and that on Linux the
+        // WSL_DISTRO_NAME env var (when present) is honored.
         let _lock = env_lock();
 
         #[cfg(target_os = "macos")]

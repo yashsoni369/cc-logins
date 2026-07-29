@@ -1,10 +1,9 @@
 //! Persisted application settings.
 //!
-//! Stored as JSON in the app's own data directory, deliberately NOT in
-//! `cswap`'s `settings.json`. Sharing that file would mean two processes
-//! writing the same config with no coordination, and a partial write from
-//! either could leave the CLI unable to start. Interop is a promise about
-//! *credential* state, not about config.
+//! Stored as JSON in the app's own data directory, never in another tool's
+//! settings file. Sharing one would mean two processes writing the same
+//! config with no coordination, and a partial write from either could leave
+//! the other unable to start.
 //!
 //! Key names and defaults deliberately mirror `cswap`'s (`autoswitch.threshold`
 //! and friends) so a user reading both tools sees the same vocabulary and the
@@ -607,8 +606,8 @@ mod tests {
 
     #[test]
     fn an_old_file_with_the_removed_storage_mode_key_still_loads_with_its_other_fields_intact() {
-        // `storageMode` used to choose between this app's own vault and the
-        // shared `cswap` directory; that choice no longer exists (the vault
+        // `storageMode` used to choose between this app's own vault and a
+        // shared external directory; that choice no longer exists (the vault
         // is now always ours — see `paths::backup_root`), so the field is
         // gone from `Settings` entirely. A settings file a previous build
         // wrote still has this key on disk, though, and loading it must not

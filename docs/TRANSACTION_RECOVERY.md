@@ -9,17 +9,20 @@ switch as a recoverable transaction.
 
 The lock order is fixed:
 
-1. `<legacy-store>/.lock`, only when a legacy CLI store already exists;
-2. `<CLAUDE_CONFIG_DIR>/.oauth_refresh.lock`;
-3. the sibling legacy credential lock (normally `~/.claude.lock`);
-4. the global-config lock (normally `~/.claude.json.lock`);
-5. `<cc-logins-account-vault>/.lock`.
+1. `<CLAUDE_CONFIG_DIR>/.oauth_refresh.lock`;
+2. the sibling legacy credential lock (normally `~/.claude.lock`);
+3. the global-config lock (normally `~/.claude.json.lock`);
+4. `<cc-logins-account-vault>/.lock`.
+
+These coordinate with Claude Code and with other CC Logins processes. There is no
+coordination with any third-party switcher — this app does not read or lock another
+tool's store.
 
 The Claude directory-lock paths and timing match Claude Code 2.1.218: credential locks become stale
 after 60 seconds and the config lock after 10 seconds. CC Logins refreshes lock mtimes every three
 seconds. Switching and identity/usage lookups never hold the full lock set across network work.
-Active-token refresh is a bounded exception: its six-second grant POST holds only the optional
-legacy-store, Claude credential, and GUI vault locks; it never holds or later nests the config lock. A shared
+Active-token refresh is a bounded exception: its six-second grant POST holds only the Claude
+credential and GUI vault locks; it never holds or later nests the config lock. A shared
 per-account refresh lease precedes that set and also surrounds inactive refreshes, preventing a
 stale active/inactive classification from consuming one rotating grant twice.
 

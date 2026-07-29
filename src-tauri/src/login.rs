@@ -601,9 +601,9 @@ fn run_login_blocking(
 /// (and deletes its contents) on every `return` path, `?`-propagated error,
 /// and ordinary fall-through alike.
 ///
-/// Never touches this user's real `~/.claude` / `~/.claude.json` /
-/// `~/.claude-swap-backup` — every filesystem path this function or its
-/// helpers resolve is under the temp directory it creates for itself.
+/// Never touches this user's real `~/.claude` / `~/.claude.json` — every
+/// filesystem path this function or its helpers resolve is under the temp
+/// directory it creates for itself.
 /// Prefix for the isolated login directories, so [`sweep_stale_login_dirs`]
 /// can identify ours and only ours.
 pub const TEMP_DIR_PREFIX: &str = "claude-switcher-login-";
