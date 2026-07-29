@@ -95,6 +95,29 @@ export function RefreshButton({
               : "Fetch usage now"
         }
       >
+        <svg
+          className={pending ? "btn-icon spin" : "btn-icon"}
+          width="12"
+          height="12"
+          viewBox="0 0 16 16"
+          fill="none"
+          aria-hidden="true"
+        >
+          <path
+            d="M13.7 10A6 6 0 1 1 12.3 3.8L15.3 6.7"
+            stroke="currentColor"
+            strokeWidth="1.6"
+            strokeLinecap="round"
+            strokeLinejoin="round"
+          />
+          <path
+            d="M15.3 2.7v4h-4"
+            stroke="currentColor"
+            strokeWidth="1.6"
+            strokeLinecap="round"
+            strokeLinejoin="round"
+          />
+        </svg>
         {label}
       </button>
       {(error || note) && (

@@ -1,11 +1,14 @@
 import { Fragment, useState, type CSSProperties, type KeyboardEvent } from "react";
 import type { Account, Snapshot } from "../types";
-import { ageLabel, displayName, maskEmail, paceRatio, paceState } from "../types";
+import { ageLabel, displayName, maskEmail } from "../types";
 import UsageMeter from "./UsageMeter";
 import AccountDetails from "./AccountDetails";
 import AddTokenDialog from "./AddTokenDialog";
 import SignInFlow from "./SignInFlow";
+import Toggle from "./Toggle";
 import { RefreshButton } from "./RefreshButton";
+import { formatCountdown, formatInstant, useNow } from "../lib/time";
+import { useClockFormat } from "../lib/clockFormat";
 
 /** Per-account outcome of the most recent switch attempt. */
 interface SwitchError {
@@ -92,11 +95,6 @@ function measuredLabel(accounts: Account[]): string {
   return label ? `measured ${label}` : "measured just now";
 }
 
-/** Pace multiplier ("0.9×") derived from where 7-day utilisation should be. */
-function paceLabel(ratio: number | null): string | null {
-  return ratio == null ? null : `${ratio.toFixed(1)}×`;
-}
-
 export default function AccountsScreen({
   snapshot,
   onSwitch,
@@ -121,6 +119,12 @@ export default function AccountsScreen({
   degraded,
 }: AccountsScreenProps) {
   const accounts = snapshot.environments.flatMap((e) => e.accounts);
+
+  // Countdowns are recomputed here, not read off the snapshot: the backend
+  // bakes them at snapshot-build time and only re-polls every ~5 minutes, so
+  // its strings drift. The shared ticker keeps every row honest between polls.
+  const now = useNow();
+  const clockFormat = useClockFormat();
 
   // Purely local UI state — which row is expanded and whether the token form
   // is open. Neither one touches credentials, so neither needs to live
@@ -149,8 +153,7 @@ export default function AccountsScreen({
             <th style={{ width: "36%" }}>Account</th>
             <th>5-hour</th>
             <th>7-day</th>
-            <th className="r">Resets</th>
-            <th className="r">Pace</th>
+            <th className="r">Resets in</th>
             <th></th>
           </tr>
         </thead>
@@ -159,10 +162,14 @@ export default function AccountsScreen({
             const isHeldOut = account.usageStatus === "disabled";
             const needsRelogin = account.usageStatus === "reloginrequired";
             const hasForeignCredential = account.usageStatus === "foreigncredential";
-            const resets = account.usage?.fiveHour?.clock ?? "—";
-            const ratio = paceRatio(account.usage?.sevenDay);
-            const pace = paceLabel(ratio);
-            const paceColorState = paceState(account.usage?.sevenDay, ratio);
+            const fiveHour = account.usage?.fiveHour;
+            // Fallback chain mirrors `fresh_reset_strings` in oauth.rs: when
+            // `resetsAt` is missing or unparseable, show the backend's own
+            // (drifting) strings rather than nothing — stale beats blank.
+            const resets =
+              formatCountdown(fiveHour?.resetsAt, now) ?? fiveHour?.countdown ?? fiveHour?.clock ?? "—";
+            // The countdown loses the exact instant, so hover keeps it.
+            const resetsAtLabel = formatInstant(fiveHour?.resetsAt, clockFormat) ?? undefined;
             const age = ageLabel(account.usageAgeSeconds);
             const meterStyle: CSSProperties | undefined = degraded ? { opacity: 0.55 } : undefined;
             const isExpanded = expandedAccount === account.number;
@@ -247,25 +254,10 @@ export default function AccountsScreen({
                   </td>
                   <td
                     className="r num"
+                    title={resetsAtLabel}
                     style={{ fontSize: "12px", color: resets === "—" ? "var(--faint)" : "var(--muted)" }}
                   >
                     {resets}
-                  </td>
-                  <td
-                    className="r num"
-                    style={{
-                      fontSize: "12px",
-                      color:
-                        pace == null
-                          ? "var(--faint)"
-                          : paceColorState === "danger"
-                            ? "var(--danger)"
-                            : paceColorState === "caution"
-                              ? "var(--caution)"
-                              : "var(--muted)",
-                    }}
-                  >
-                    {pace ?? "—"}
                   </td>
                   <td className="r">
                     <div className="acct-actions">
@@ -294,23 +286,25 @@ export default function AccountsScreen({
                           {pendingAccount === account.number ? "Switching…" : "Switch"}
                         </button>
                       ) : null}
-                      <button
-                        type="button"
-                        className="btn ghost"
+                      {/*
+                        A bare switch has no visible label, so the title carries
+                        the meaning. `stopPropagation` is required: the row is
+                        itself a click-to-expand button, and flipping the switch
+                        must not also expand it.
+                      */}
+                      <Toggle
+                        checked={!isHeldOut}
+                        onChange={(next) => onSetEnabled(account.number, next)}
+                        pending={isEnablePending}
                         disabled={mutationInFlight}
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          onSetEnabled(account.number, isHeldOut);
-                        }}
-                      >
-                        {isEnablePending
-                          ? isHeldOut
-                            ? "Enabling…"
-                            : "Disabling…"
-                          : isHeldOut
-                            ? "Enable"
-                            : "Disable"}
-                      </button>
+                        stopPropagation
+                        ariaLabel={`${displayName(account)} in auto-switch rotation`}
+                        title={
+                          isHeldOut
+                            ? "Held out of rotation. Click to enable."
+                            : "Enabled — in auto-switch rotation. Click to hold out."
+                        }
+                      />
                     </div>
                     {switchError?.accountNumber === account.number && (
                       <div style={{ marginTop: 6, fontSize: 11, color: "var(--danger)", textAlign: "right" }}>
@@ -331,7 +325,7 @@ export default function AccountsScreen({
                 </tr>
                 {isExpanded && (
                   <tr className="acct-details-row">
-                    <td colSpan={6}>
+                    <td colSpan={5}>
                       <AccountDetails account={account} />
                     </td>
                   </tr>

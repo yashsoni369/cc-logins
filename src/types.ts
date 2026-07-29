@@ -270,6 +270,12 @@ export interface Settings {
   notifyOnExhausted: boolean;
   notifyOnExpiry: boolean;
   startAtLogin: boolean;
+  /**
+   * Whether the app may ask GitHub for a newer release on its own. On by
+   * default. The only setting that permits an outbound request to anything
+   * other than Anthropic; the manual check in About works regardless.
+   */
+  autoCheckUpdates: boolean;
   /** 1..3650 days, clamped by the backend on save. */
   historyRetentionDays: number;
   /**
@@ -277,6 +283,12 @@ export interface Settings {
    * maps onto `data-theme` on `document.documentElement`.
    */
   theme: "system" | "day" | "night";
+  /**
+   * How times of day are written. Default `"system"` — see `src/lib/time.ts`
+   * for how this maps onto `Intl`'s `hour12`, with `"system"` leaving the
+   * locale in charge.
+   */
+  clockFormat: "system" | "12h" | "24h";
 }
 
 export interface SettingsSnapshot {
@@ -322,6 +334,34 @@ export interface DataLocations {
 }
 
 // ── history ───────────────────────────────────────────────────────────────
+
+/** One model's slice of a sample. Mirrors `history.rs::ScopedSample`. */
+export interface ScopedSample {
+  name: string;
+  pct: number;
+}
+
+/**
+ * One recorded measurement, as returned by `history_samples`. Mirrors
+ * `src-tauri/src/history.rs::Sample`.
+ *
+ * This is the resolution `DayStat` throws away. Quota is spent in 5-hour
+ * windows, so a day averaged into one number hides every spike — an account
+ * that idled all day and touched 100% for one window reads as calm. The
+ * Dashboard's account view charts these instead.
+ *
+ * `fiveHourPct`/`sevenDayPct` are nullable because a window the API did not
+ * report is unknown, never zero.
+ */
+export interface Sample {
+  accountKey: string;
+  /** ISO-8601 instant the measurement was taken. */
+  timestamp: string;
+  fiveHourPct: number | null;
+  sevenDayPct: number | null;
+  bindingPct: number;
+  scoped: ScopedSample[];
+}
 
 /**
  * Min/max/avg/count of `bindingUtilisation()` for one account on one

@@ -162,6 +162,19 @@ h3 {
   font-weight: 500;
 }
 
+/* An update is waiting. `display: block` on .navlink means the label is not a
+   flex line, so the dot is floated to the trailing edge rather than laid out
+   beside the text. Deliberately quiet — an available update is information,
+   not a fault, so it does not borrow the danger colour. */
+.nav button.navlink .navlink-dot {
+  float: inline-end;
+  width: 6px;
+  height: 6px;
+  margin-top: 6px;
+  border-radius: 50%;
+  background: var(--interact);
+}
+
 /* Quiet Day/Night/System control anchored to the bottom of the sidebar via
    margin-top: auto (.nav is already a flex column). Chrome, not quota state —
    uses --muted/--ink/--interact only, same as .navlink above; never
@@ -341,6 +354,88 @@ table.accts tr.is-active td {
   font-weight: 600;
 }
 
+/* ─────────── loading (a reading not taken yet) ─────────── */
+/*
+ * Not a spinner — this is an instrument face. Three meter segments in the same
+ * .track/.fill language as PendingMeter in DegradedStates.tsx: pending is
+ * "unknown", not "zero". Monochrome by rule; loading is not a quota state.
+ *
+ * Markup (see components/Loading.tsx): the label is a text CHILD of .loading.
+ * font-size: 0 stops it being drawn while leaving it in the accessibility tree
+ * for role="status" — unlike display: none or visibility: hidden, which would
+ * take it out. The mark itself is drawn entirely with pseudo-elements.
+ *
+ * Geometry lives in custom properties so .loading-pane can scale the mark up
+ * without restating the gradient or the sweep distance.
+ */
+.loading {
+  --seg: 9px;
+  --seg-gap: 3px;
+  --seg-h: 5px;
+
+  display: inline-block;
+  position: relative;
+  vertical-align: -0.15em;
+  font-size: 0;
+  width: calc(var(--seg) * 3 + var(--seg-gap) * 2);
+  height: var(--seg-h);
+}
+/* The unlit track: three segments with gaps, one repeating gradient. */
+.loading::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background: repeating-linear-gradient(
+    to right,
+    var(--raised) 0 var(--seg),
+    transparent var(--seg) calc(var(--seg) + var(--seg-gap))
+  );
+}
+/* The lit segment. At rest it parks on the first one, so the un-animated form
+   still reads as a meter mid-reading rather than an empty track. */
+.loading::after {
+  content: "";
+  position: absolute;
+  inset: 0 auto 0 0;
+  width: var(--seg);
+  border-radius: 1px;
+  background: var(--faint);
+}
+
+/* First paint, filling a .pane: nothing else is on screen, so the mark is
+   centred in the full height and scaled up rather than sitting in a corner. */
+.loading-pane {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 11px;
+}
+.loading-pane .loading {
+  --seg: 14px;
+  --seg-gap: 4px;
+  --seg-h: 6px;
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  /* The lit segment scans across the track the way a meter fills — a reading
+     being taken, not a throbber. Distance is two segment pitches. */
+  .loading::after {
+    animation: loading-sweep 1.15s ease-in-out infinite;
+  }
+  @keyframes loading-sweep {
+    0%,
+    100% {
+      transform: translateX(0);
+    }
+    50% {
+      transform: translateX(calc((var(--seg) + var(--seg-gap)) * 2));
+    }
+  }
+}
+
 .pill {
   display: inline-flex;
   align-items: center;
@@ -396,6 +491,34 @@ table.accts tr.is-active td {
    as "clickable" to anyone using a mouse. */
 .btn:disabled:hover {
   background: transparent;
+}
+
+/* Inline SVG inside a .btn, sized to the 12px label — same approach as
+   .acct-caret. A .btn holding one becomes a flex row so the gap is uniform;
+   vertical-align is the flow-layout fallback, keeping the glyph on the text
+   baseline if the button is not flex. */
+.btn:has(.btn-icon) {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+.btn-icon {
+  width: 12px;
+  height: 12px;
+  flex: none;
+  vertical-align: -0.1em;
+}
+/* Rotates only while a refresh is in flight. Static, the icon still reads as
+   "refresh" and the button's disabled state carries the in-progress fact. */
+@media (prefers-reduced-motion: no-preference) {
+  .btn-icon.spin {
+    animation: btn-icon-spin 0.9s linear infinite;
+  }
+  @keyframes btn-icon-spin {
+    to {
+      transform: rotate(360deg);
+    }
+  }
 }
 
 /* ─────────── manual refresh ─────────── */
@@ -517,6 +640,26 @@ hr.rule {
   gap: 8px;
   font-size: 13px;
 }
+/* role="switch" + tabIndex, so it takes focus like a real control. Declared
+   here rather than left to the global :focus-visible, same as .input and
+   .pop-item, so the ring survives any `all: unset` on the element. */
+.toggle:focus-visible {
+  outline: 2px solid var(--interact);
+  outline-offset: 2px;
+  border-radius: var(--r);
+}
+/* Mid-flight, inside a table row: dim only. No size, border or padding change
+   — a reflow would shift the row out from under the pointer mid-click. */
+.toggle.is-pending {
+  opacity: 0.55;
+  cursor: progress;
+}
+/* Switch alone in a table cell; the column header is its label. No gap to
+   close, and line-height: 0 drops the inline box so it centres in the cell. */
+.toggle-bare {
+  gap: 0;
+  line-height: 0;
+}
 .sw {
   width: 30px;
   height: 17px;
@@ -536,9 +679,11 @@ hr.rule {
   border-radius: 50%;
   background: var(--muted);
 }
+/* --switch-on, not --interact: blue says "you may press this", green says
+   "this is on". Every toggle in the app shares one appearance, deliberately. */
 .sw.on {
-  background: var(--interact);
-  border-color: var(--interact);
+  background: var(--switch-on);
+  border-color: var(--switch-on);
 }
 .sw.on::after {
   left: auto;
@@ -636,6 +781,329 @@ hr.rule {
 }
 .chart-dot.danger {
   fill: var(--danger);
+}
+
+/* ─────────── dashboard: fleet ───────────
+   The fleet header and its rows share one column template, so they can only
+   drift together. Changing the grid means changing this one line. */
+
+.fleet {
+  --fleet-cols: minmax(120px, 1.4fr) minmax(80px, 2fr) minmax(96px, 1fr) 78px;
+  display: flex;
+  flex-direction: column;
+  gap: 0;
+}
+
+/* Caption on its own line, the figure and its qualifier beneath it, and the
+   supporting numbers pushed right — all from one flat row of siblings. */
+.dash-headline {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  gap: 4px 12px;
+  padding-bottom: 18px;
+}
+.dash-cap {
+  font-family: var(--mono);
+  font-size: 10px;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--faint);
+}
+.dash-headline > .dash-cap:first-child {
+  flex-basis: 100%;
+}
+.dash-headline > .dash-cap:last-child {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 2px;
+  margin-left: auto;
+  text-align: right;
+  letter-spacing: 0.04em;
+}
+.dash-big {
+  font-family: var(--mono);
+  font-variant-numeric: tabular-nums;
+  font-size: 34px;
+  line-height: 1.05;
+  letter-spacing: -0.02em;
+}
+/* A projection, not a measurement. It has to look different from a number we
+   actually read off the API — see PRODUCT.md's freshness rule. */
+.dash-qual {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 10px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--muted);
+  border: 1px dashed var(--line);
+  border-radius: 2px;
+  padding: 1px 6px;
+  vertical-align: middle;
+}
+
+.fleet-head {
+  display: grid;
+  grid-template-columns: var(--fleet-cols);
+  gap: 14px;
+  padding: 0 8px 7px;
+  font-family: var(--mono);
+  font-size: 10px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--faint);
+  border-bottom: 1px solid var(--line);
+}
+.fleet-head .r {
+  text-align: right;
+}
+
+.fleet-row {
+  display: grid;
+  grid-template-columns: var(--fleet-cols);
+  gap: 14px;
+  align-items: center;
+  width: 100%;
+  padding: 9px 8px;
+  border: 0;
+  border-bottom: 1px solid var(--line-soft);
+  border-radius: 0;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+.fleet-row:hover {
+  background: var(--surface);
+}
+.fleet-row:focus-visible {
+  outline: 2px solid var(--interact);
+  outline-offset: -2px;
+}
+/* The live account. Matches the accounts table's own active-row treatment so
+   "this is the one in use" reads the same on both screens. */
+.fleet-row.is-active {
+  background: var(--surface);
+}
+.fleet-row.is-active:hover {
+  background: var(--raised);
+}
+/* No stable key yet, so there is nothing to open. Must not look pressable. */
+.fleet-row:disabled,
+.fleet-row:not([role="button"]) {
+  cursor: default;
+}
+.fleet-row:disabled:hover,
+.fleet-row:not([role="button"]):hover {
+  background: transparent;
+}
+.fleet-row.is-active:not([role="button"]):hover {
+  background: var(--surface);
+}
+
+.fleet-who {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+.fleet-who .alias {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 13px;
+}
+
+.fleet-spark svg {
+  display: block;
+  width: 100%;
+  height: 24px;
+}
+/* An account with no recorded history leaves this empty rather than drawing a
+   flat line at zero, which would read as "confirmed idle". */
+.fleet-spark:empty::after {
+  content: "";
+  display: block;
+  height: 24px;
+}
+
+.fleet-reset {
+  font-family: var(--mono);
+  font-variant-numeric: tabular-nums;
+  font-size: 12px;
+  color: var(--muted);
+  text-align: right;
+}
+.fleet-reset.unknown {
+  color: var(--faint);
+}
+
+/* ─────────── dashboard: reset stagger ─────────── */
+
+.stagger {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding-top: 18px;
+}
+.stagger svg {
+  display: block;
+  width: 100%;
+  height: auto;
+}
+.stagger-band {
+  fill: var(--ok-fill);
+}
+.stagger-band.caution {
+  fill: var(--caution-fill);
+}
+.stagger-band.danger {
+  fill: var(--danger-fill);
+}
+/* The replenished stretch after a reset — same hue, lower weight, so the
+   distinction never depends on a second colour. */
+.stagger-band.after {
+  opacity: 0.3;
+}
+.stagger-band.unknown {
+  fill: var(--raised);
+}
+.stagger-axis {
+  stroke: var(--line);
+  stroke-width: 1;
+}
+.stagger-tick {
+  stroke: var(--line-soft);
+  stroke-width: 1;
+}
+.stagger-label {
+  font-family: var(--mono);
+  font-size: 9px;
+  fill: var(--faint);
+}
+
+/* ─────────── dashboard: account analytics ─────────── */
+
+.analytics {
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+}
+.analytics-head {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+.analytics-head h3 {
+  margin: 0;
+}
+.btn-back {
+  font: inherit;
+  font-size: 12px;
+  padding: 4px 10px;
+  border: 1px solid var(--line);
+  border-radius: var(--r);
+  background: transparent;
+  color: var(--muted);
+  cursor: pointer;
+}
+.btn-back:hover {
+  background: var(--raised);
+  color: var(--ink);
+}
+.btn-back:focus-visible {
+  outline: 2px solid var(--interact);
+  outline-offset: 2px;
+}
+
+.split-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+  gap: 16px;
+}
+
+.model-rows {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+}
+.model-rows .model-name {
+  font-size: 12px;
+  color: var(--muted);
+  width: 74px;
+  flex: none;
+}
+
+.range-chart svg {
+  display: block;
+  width: 100%;
+  height: 96px;
+}
+.range-band {
+  fill: var(--ok-fill);
+  opacity: 0.25;
+}
+.range-avg {
+  stroke: var(--ok);
+  stroke-width: 1.5;
+  fill: none;
+}
+
+/* ─────────── dashboard: heatmap ─────────── */
+
+.heat {
+  display: grid;
+  grid-template-columns: 30px repeat(7, minmax(0, 1fr));
+  gap: 3px;
+  align-items: center;
+}
+.heat-lab {
+  font-family: var(--mono);
+  font-size: 9px;
+  color: var(--faint);
+  text-align: center;
+}
+.heat-cell {
+  height: 15px;
+  border-radius: 1px;
+  background: var(--ok-fill);
+}
+/* No measurement in this bucket. Distinct from an average of zero, which is a
+   real reading — a bare track, not a faint fill. */
+.heat-cell.empty {
+  background: transparent;
+  border: 1px solid var(--line-soft);
+}
+.heat-legend {
+  display: flex;
+  gap: 14px;
+  flex-wrap: wrap;
+  font-family: var(--mono);
+  font-size: 10px;
+  color: var(--faint);
+  padding-top: 4px;
+}
+.heat-legend i {
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  border-radius: 1px;
+  margin-right: 5px;
+}
+
+@media (max-width: 720px) {
+  .fleet {
+    --fleet-cols: minmax(96px, 1.2fr) minmax(70px, 1fr) 66px;
+  }
+  .fleet-spark,
+  .fleet-head .spark-h {
+    display: none;
+  }
 }
 
 /* ─────────── realm (Environments) ─────────── */

@@ -304,6 +304,7 @@ pub fn run() {
             commands::set_account_enabled,
             commands::history_summary,
             commands::history_series,
+            commands::history_samples,
             commands::history_available,
             commands::get_settings,
             commands::get_daemon_status,

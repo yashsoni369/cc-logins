@@ -1,30 +1,13 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import AboutSection from "./AboutSection";
+import { Loading } from "./Loading";
+import Toggle from "./Toggle";
+import type { UseUpdateResult } from "../lib/useUpdate";
 import { IpcError } from "../lib/api";
+import type { ClockFormat } from "../lib/time";
 import type { UseSettingsResult } from "../lib/useSettings";
 import type { Theme } from "../lib/useTheme";
 import type { Settings } from "../types";
-
-/** A `.toggle`/`.sw` switch, made operable: click or Enter/Space to flip it. */
-function Toggle({ checked, onChange, label }: { checked: boolean; onChange: (v: boolean) => void; label: string }) {
-  return (
-    <span
-      className="toggle"
-      role="switch"
-      aria-checked={checked}
-      tabIndex={0}
-      onClick={() => onChange(!checked)}
-      onKeyDown={(e) => {
-        if (e.key === "Enter" || e.key === " ") {
-          e.preventDefault();
-          onChange(!checked);
-        }
-      }}
-    >
-      <span className={`sw${checked ? " on" : ""}`}></span> {label}
-    </span>
-  );
-}
 
 interface SegOption<T extends string> {
   id: T;
@@ -104,8 +87,16 @@ const THEME_OPTIONS: Array<SegOption<Theme>> = [
   { id: "system", label: "System" },
 ];
 
+const CLOCK_FORMAT_OPTIONS: Array<SegOption<ClockFormat>> = [
+  { id: "system", label: "System" },
+  { id: "12h", label: "12-hour" },
+  { id: "24h", label: "24-hour" },
+];
+
 interface SettingsScreenProps {
   runtime: UseSettingsResult;
+  /** Update lifecycle, owned by `useUpdate()` in `App.tsx` so the background scheduler and this screen show the same answer. */
+  update: UseUpdateResult;
   /** Current theme preference — owned by `useTheme()` in `App.tsx`, passed down so this control and the theme actually applied to the window never disagree. */
   theme: Theme;
   onThemeChange: (theme: Theme) => void;
@@ -126,7 +117,13 @@ interface SettingsScreenProps {
  * the backend's *returned* (clamped) settings rather than the value sent —
  * echoing the request would show a number that was not actually saved.
  */
-export default function SettingsScreen({ runtime, theme, onThemeChange, themeError }: SettingsScreenProps) {
+export default function SettingsScreen({
+  runtime,
+  theme,
+  onThemeChange,
+  themeError,
+  update: updater,
+}: SettingsScreenProps) {
   const { settings, live, loading, update } = runtime;
   const [saveError, setSaveError] = useState<string | null>(null);
 
@@ -187,7 +184,7 @@ export default function SettingsScreen({ runtime, theme, onThemeChange, themeErr
         <div className="pane-head">
           <h3>Settings</h3>
         </div>
-        <span className="sub">Loading…</span>
+        <Loading />
       </div>
     );
   }
@@ -217,6 +214,21 @@ export default function SettingsScreen({ runtime, theme, onThemeChange, themeErr
           </div>
           <div className="v">
             <Segmented ariaLabel="Theme" value={theme} onChange={onThemeChange} options={THEME_OPTIONS} />
+          </div>
+        </div>
+
+        <div className="field">
+          <div className="k">
+            Time format
+            <i>How reset and measurement times are shown.</i>
+          </div>
+          <div className="v">
+            <Segmented
+              ariaLabel="Time format"
+              value={settings.clockFormat}
+              onChange={(v) => commitField("clockFormat", v)}
+              options={CLOCK_FORMAT_OPTIONS}
+            />
           </div>
         </div>
 
@@ -320,9 +332,27 @@ export default function SettingsScreen({ runtime, theme, onThemeChange, themeErr
             </span>
           </div>
         </div>
+
+        <div className="field">
+          <div className="k">
+            Check for updates automatically
+            <i>Asks GitHub once a day. The only request this app makes outside Anthropic.</i>
+          </div>
+          <div className="v">
+            <Toggle
+              checked={settings.autoCheckUpdates}
+              onChange={(v) => commitField("autoCheckUpdates", v)}
+              label={settings.autoCheckUpdates ? "Enabled" : "Disabled"}
+            />
+            <span style={{ fontSize: 12, color: "var(--muted)", maxWidth: "52ch" }}>
+              Only the current version is sent, and nothing is installed without you asking.
+              Turning this off leaves the manual check below working.
+            </span>
+          </div>
+        </div>
       </div>
 
-      <AboutSection />
+      <AboutSection update={updater} />
     </div>
   );
 }

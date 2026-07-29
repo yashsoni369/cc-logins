@@ -712,6 +712,32 @@ pub fn history_series(
         .map_err(|e| IpcError::Internal(e.to_string()))
 }
 
+/// Raw samples for one account over a recent window, for the Dashboard.
+///
+/// Unlike [`history_series`], this keeps the intraday shape, the 5h/7d split
+/// and the per-model scoped windows instead of averaging them into one number
+/// per day. Same failure posture: no history yet is an empty series, not an
+/// error, so the UI can say "no history yet" honestly.
+#[tauri::command]
+pub fn history_samples(
+    state: tauri::State<'_, AppState>,
+    account_key: String,
+    hours: Option<i64>,
+) -> IpcResult<Vec<crate::history::Sample>> {
+    let Some(h) = state.history.as_ref() else {
+        return Ok(Vec::new());
+    };
+    // Clamped to the raw retention window: asking for more would silently
+    // return only what survived pruning, which reads as a gap in usage.
+    let hours = hours
+        .unwrap_or(24)
+        .clamp(1, crate::history::DEFAULT_RAW_RETENTION_DAYS * 24);
+    let until = chrono::Utc::now();
+    let since = until - chrono::Duration::hours(hours);
+    h.series(&account_key, since, until)
+        .map_err(|e| IpcError::Internal(e.to_string()))
+}
+
 /// Whether history is actually available this session.
 ///
 /// The UI must be able to say "no history yet" honestly instead of rendering an

@@ -25,6 +25,7 @@ import type {
   DayStat,
   Environment,
   HistorySummary,
+  Sample,
   Settings,
   SettingsPatch,
   SettingsSnapshot,
@@ -437,6 +438,41 @@ function mockDayStats(data: readonly number[]): DayStat[] {
   });
 }
 
+/**
+ * Plausible intraday samples for the sample-data path, every 15 minutes over
+ * the trailing `hours`. Deterministic — seeded off the account key rather than
+ * `Math.random()`, so the demo charts don't reshuffle on every render.
+ *
+ * The 5-hour series is deliberately a sawtooth (it resets every 5 hours) while
+ * the 7-day series only climbs: that contrast is exactly what the account view
+ * exists to show, so the fixture has to exhibit it.
+ */
+function mockSamples(accountKey: string, hours: number): Sample[] {
+  let seed = 0;
+  for (const ch of accountKey) seed = (seed * 31 + ch.charCodeAt(0)) % 997;
+
+  const stepMinutes = 15;
+  const count = Math.max(1, Math.round((hours * 60) / stepMinutes));
+  const now = Date.now();
+
+  return Array.from({ length: count }, (_, i) => {
+    const minutesAgo = (count - 1 - i) * stepMinutes;
+    const t = new Date(now - minutesAgo * 60_000);
+    // Cheap deterministic jitter — a sine keyed off the seed, not randomness.
+    const wobble = Math.sin((i + seed) / 6) * 9;
+    const fiveHour = Math.max(0, Math.min(100, ((i * stepMinutes) % 300) / 3 + wobble + 12));
+    const sevenDay = Math.max(0, Math.min(100, 18 + (i / count) * 46 + wobble / 3 + (seed % 11)));
+    return {
+      accountKey,
+      timestamp: t.toISOString(),
+      fiveHourPct: Math.round(fiveHour * 10) / 10,
+      sevenDayPct: Math.round(sevenDay * 10) / 10,
+      bindingPct: Math.round(Math.max(fiveHour, sevenDay) * 10) / 10,
+      scoped: [{ name: "Opus", pct: Math.round(sevenDay * 0.8 * 10) / 10 }],
+    };
+  });
+}
+
 /** Headline figures backing the History screen's stat row. `null` when there is no history yet. */
 export async function historySummary(days?: number): Promise<Sourced<HistorySummary | null>> {
   if (!hasBackend()) {
@@ -470,6 +506,23 @@ export async function historySeries(accountKey: string, days?: number): Promise<
 }
 
 /**
+ * Individual measurements for one account over the trailing `hours`, with
+ * their 5h/7d split and per-model windows intact — the resolution
+ * `historySeries` averages away. Backs the Dashboard's account view.
+ *
+ * Empty when the account has no recorded history yet, matching
+ * `historySeries`: nothing to chart is a normal state, not an error.
+ */
+export async function historySamples(accountKey: string, hours?: number): Promise<Sourced<Sample[]>> {
+  if (!hasBackend()) {
+    const keys = await mockAccountKeys();
+    const index = keys.indexOf(accountKey);
+    return { data: index === -1 ? [] : mockSamples(accountKey, hours ?? 24), live: false };
+  }
+  return { data: await call<Sample[]>("history_samples", { accountKey, hours }), live: true };
+}
+
+/**
  * Whether the history subsystem is actually up this session. The backend
  * still runs without it (a corrupt or unwritable database must not stop the
  * app from starting), so this can be `false` even with a real backend
@@ -497,8 +550,10 @@ export const DEFAULT_SETTINGS: Settings = {
   notifyOnExhausted: true,
   notifyOnExpiry: false,
   startAtLogin: false,
+  autoCheckUpdates: true,
   historyRetentionDays: 14,
   theme: "system",
+  clockFormat: "system",
 };
 
 /** Current settings. Falls back to the same defaults the backend ships with. */

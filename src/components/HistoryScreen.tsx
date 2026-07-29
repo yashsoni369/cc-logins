@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import BurnRateChart, { type BurnRateSeries } from "./BurnRateChart";
+import { Loading } from "./Loading";
 import { mockHistoryRanges, type HistoryRangeId } from "../lib/mock";
 import { getAccounts, historyAvailable, historySeries, historySummary } from "../lib/api";
 import { displayName, stableKey, type DayStat, type HistorySummary } from "../types";
@@ -186,7 +187,7 @@ export default function HistoryScreen({ settingsThreshold }: { settingsThreshold
           <h3>History</h3>
           {rangeSwitcher}
         </div>
-        <span className="sub">Loading…</span>
+        <Loading />
       </div>
     );
   }

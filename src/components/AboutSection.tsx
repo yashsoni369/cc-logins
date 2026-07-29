@@ -1,6 +1,8 @@
 import { useEffect, useState, type ReactNode } from "react";
 import { appVersion, dataLocations, openExternal } from "../lib/api";
+import { Loading } from "./Loading";
 import UpdateCheck from "./UpdateCheck";
+import type { UseUpdateResult } from "../lib/useUpdate";
 import type { DataLocations } from "../types";
 
 const REPO_URL = "https://github.com/yashsoni369/cc-logins";
@@ -51,7 +53,7 @@ function PathRow({ label, path }: { label: string; path: string }) {
  * What this build is and where it keeps your files. Version and paths both
  * come from the backend — neither is guessed or compiled in here.
  */
-export default function AboutSection() {
+export default function AboutSection({ update }: { update: UseUpdateResult }) {
   const [version, setVersion] = useState<Loadable<string>>(undefined);
   const [locations, setLocations] = useState<Loadable<DataLocations>>(undefined);
   const [linkError, setLinkError] = useState<string | null>(null);
@@ -103,7 +105,7 @@ export default function AboutSection() {
           </div>
         </div>
 
-        <UpdateCheck />
+        <UpdateCheck update={update} />
 
         <div className="field">
           <div className="k">
@@ -129,7 +131,12 @@ export default function AboutSection() {
             <i>Everything this app writes lives under these paths.</i>
           </div>
           <div className="v">
-            {locations === undefined && <span className="about-note">Loading…</span>}
+            {/* Keeps `.about-note` around the shared indicator so it matches the muted type of the sibling states below. */}
+            {locations === undefined && (
+              <span className="about-note">
+                <Loading />
+              </span>
+            )}
             {locations === null && (
               <span className="about-note">
                 Unavailable — only the desktop app can resolve these paths.
@@ -169,7 +176,8 @@ export default function AboutSection() {
           <div className="v">
             <span className="about-note">
               Builds are currently unsigned, so Windows SmartScreen and macOS Gatekeeper will warn
-              about this app.
+              about this app on first install. Updates are separate: each one is signed and
+              verified against a key compiled into this build before it runs.
             </span>
           </div>
         </div>
