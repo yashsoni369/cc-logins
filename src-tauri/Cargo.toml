@@ -38,6 +38,15 @@ tauri-plugin-notification = "2"
 # Two instances would mean two auto-switch daemons racing for the same
 # credential lock. Exactly one process may own the tray.
 tauri-plugin-single-instance = "2"
+# Updates are fetched by the app and verified against the public key in
+# tauri.conf.json before anything is executed. That signature is independent of
+# Authenticode: the installers are unsigned and warned about on first run, but
+# every update after that is cryptographically checked, and never carries the
+# mark of the web that triggers SmartScreen in the first place.
+tauri-plugin-updater = "2"
+# `relaunch` after an update. On Windows the installer restarts the app itself,
+# but macOS and Linux need this.
+tauri-plugin-process = "2"
 
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

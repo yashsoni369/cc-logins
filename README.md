@@ -38,6 +38,9 @@ What it does **not** do:
   There is no cloud sync.
 - It never shows or sends token material anywhere other than the Anthropic OAuth endpoints and
   your own disk.
+- It sends no telemetry and reports no usage. The only other host it can contact is GitHub, and
+  only when you press **Check for updates** in Settings → About. That request carries nothing but
+  the current version, and never runs on a timer or at startup.
 
 This distinction matters because Anthropic's terms treat it as the line between what's allowed and
 what isn't. They accept per-profile switching between real, individually-authenticated accounts

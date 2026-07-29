@@ -1,5 +1,6 @@
 import { useEffect, useState, type ReactNode } from "react";
 import { appVersion, dataLocations, openExternal } from "../lib/api";
+import UpdateCheck from "./UpdateCheck";
 import type { DataLocations } from "../types";
 
 const REPO_URL = "https://github.com/yashsoni369/cc-logins";
@@ -101,6 +102,8 @@ export default function AboutSection() {
             </span>
           </div>
         </div>
+
+        <UpdateCheck />
 
         <div className="field">
           <div className="k">

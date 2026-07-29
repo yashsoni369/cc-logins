@@ -174,11 +174,19 @@ jobs:
           # APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
           # APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
           #
-          # Tauri updater artifact signing — only meaningful once
-          # tauri-plugin-updater is actually added as a dependency (it is
-          # not, as of this workflow: see src-tauri/Cargo.toml):
-          # TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
-          # TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+          # Updater artifact signing. This is NOT code signing — it signs the
+          # update payload so the running app can verify it against the public
+          # key in tauri.conf.json before executing anything. Independent of
+          # Authenticode and Gatekeeper, and the reason an update never has to
+          # clear SmartScreen the way a browser download does.
+          #
+          # The key was generated with `pnpm tauri signer generate` and has no
+          # passphrase, so the password is an empty string rather than a secret.
+          # If the key is ever rotated, every already-installed build keeps the
+          # old public key compiled in and will reject the new signature — so a
+          # rotation strands existing users on their current version.
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ''
         with:
           args: ${{ matrix.args }}
           tagName: ${{ github.ref_name }}
@@ -220,11 +228,13 @@ jobs:
           releaseDraft: true
           prerelease: false
 
-          # The updater plugin is not a dependency and
-          # `bundle.createUpdaterArtifacts` is unset, so there is nothing for a
-          # `latest.json` to point at. Left at its default of true, tauri-action
-          # publishes a manifest describing an update path that does not exist.
-          uploadUpdaterJson: false
+          # Publishes `latest.json`, the manifest the running app fetches to
+          # discover a new version. `plugins.updater.endpoints` in
+          # tauri.conf.json points at this file via the releases/latest
+          # permalink, which only resolves once the release is published — a
+          # draft is invisible to it, so updates go live exactly when you press
+          # Publish and not before.
+          uploadUpdaterJson: true
 
           # Tauri's default asset names embed the version, which breaks
           # `releases/latest/download/<file>` permalinks on every release.

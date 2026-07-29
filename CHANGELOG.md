@@ -11,7 +11,18 @@ A breaking change to any of those bumps the minor version, since major is pinned
 
 ## [Unreleased]
 
-Nothing yet.
+### Added
+
+- In-app updates. Settings → About has a **Check for updates** control that fetches the
+  latest release, verifies it against a signing key compiled into this build, installs it
+  and restarts. The check runs only when you press the button — nothing contacts the
+  network on a timer or at startup.
+
+  Because an update arrives through the app rather than a browser download, it carries no
+  mark of the web and never reaches Windows SmartScreen. The first install still warns;
+  every update after it does not.
+
+  `0.1.0` has no updater, so upgrading from it has to be done by hand once.
 
 ## [0.1.0] - 2026-07-29
 

@@ -132,6 +132,14 @@ installer is present and that `SHA256SUMS.txt` lists them all — a failed build
 leg leaves an incomplete draft rather than failing loudly — then publish from the
 releases page.
 
+**Publishing is also what ships the update.** The app's updater endpoint is the
+`releases/latest/download/latest.json` permalink, and `latest` resolves only to
+published releases — a draft is invisible to it. So existing installs learn about
+a new version at the moment you press Publish, and not before.
+
+If a release turns out to be bad, un-publishing it back to a draft withdraws it
+from the updater as well.
+
 If a build leg fails, fix it and re-run the workflow from the Actions tab. The
 checksum step replaces its previous output rather than colliding with it.
 
