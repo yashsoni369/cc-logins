@@ -89,14 +89,21 @@ def save_bmp(img, name):
 
 
 # --- header.bmp: 150x57, sits in the NSIS page header -----------------------
+# MUI pins this flush to the window's right edge, so whatever sits at the right
+# of the bitmap sits against the window border. An earlier draft carried a
+# "Claude Code accounts" subtitle here and left 3px of right padding, which read
+# as clipped text rather than a caption. 150x57 has room for the mark and the
+# wordmark, and nothing else.
 def header():
     img = Image.new("RGB", (150, 57), GRAPHITE)
-    mark = draw_mark(38)
-    img.paste(mark, (10, 10), mark)
+    mark = draw_mark(34)
+    img.paste(mark, (14, (57 - 34) // 2), mark)
 
     d = ImageDraw.Draw(img)
-    d.text((58, 15), "CC Logins", font=font("segoeuib.ttf", 15), fill=CLOUD)
-    d.text((59, 33), "Claude Code accounts", font=font("segoeui.ttf", 9), fill=MUTED)
+    f = font("segoeuib.ttf", 15)
+    text = "CC Logins"
+    bbox = d.textbbox((0, 0), text, font=f)
+    d.text((56, (57 - (bbox[3] - bbox[1])) / 2 - bbox[1]), text, font=f, fill=CLOUD)
     save_bmp(img, "header.bmp")
 
 
