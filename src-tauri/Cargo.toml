@@ -48,7 +48,7 @@ reqwest = { version = "0.12", default-features = false, features = ["json", "rus
 
 chrono = { version = "0.4", features = ["serde"] }
 sha2 = "0.10"
-base64 = "0.22"
+base64 = "0.23"
 dirs = "6"
 # Used by login.rs (interactive_login) to create the isolated CLAUDE_CONFIG_DIR
 # temp directory at runtime — previously only a [dev-dependencies] entry,
