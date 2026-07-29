@@ -12,6 +12,7 @@ pub mod claude_locks;
 pub mod commands;
 pub mod credentials;
 pub mod durable_fs;
+pub mod hex;
 pub mod history;
 pub mod linux;
 pub mod locking;
