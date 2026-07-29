@@ -6,6 +6,7 @@
 
 **Quota visibility and account switching for Claude Code**
 
+[![Release](https://img.shields.io/github/v/release/yashsoni369/cc-logins?style=flat-square&label=release)](https://github.com/yashsoni369/cc-logins/releases/latest)
 [![CI](https://img.shields.io/github/actions/workflow/status/yashsoni369/cc-logins/ci.yml?branch=main&style=flat-square&label=CI)](https://github.com/yashsoni369/cc-logins/actions/workflows/ci.yml)
 [![License](https://img.shields.io/github/license/yashsoni369/cc-logins?style=flat-square)](LICENSE)
 [![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux-lightgrey?style=flat-square)](#install)
@@ -18,7 +19,9 @@ all day. It shows which account is active and how much 5-hour and 7-day quota ea
 left, and switches between them — one click, or automatically before a limit lands. Windows,
 macOS, and Linux.
 
-This project is young (`0.1.0`) and pre-release. Expect rough edges.
+This project is young. `0.1.0` is the first tagged release; expect rough edges, and see
+[Before you install this](#before-you-install-this-what-it-does-with-your-tokens) for what it does
+with your credentials.
 
 ## Before you install this: what it does with your tokens
 
@@ -50,15 +53,24 @@ beyond staying on the side of it described above.
 
 ## Install
 
-**There are no binary releases yet.** The first tagged release will attach installers for Windows
-(`.exe`), macOS (`.dmg`, Apple Silicon and Intel), and Linux (`.deb`, `.AppImage`) to the
-[releases page](https://github.com/yashsoni369/cc-logins/releases). Until then, build from source —
-see [Building from source](#building-from-source).
+Download from the [latest release](https://github.com/yashsoni369/cc-logins/releases/latest). These
+links always point at the newest build:
 
-### Builds will be unsigned
+| Platform | Download |
+| --- | --- |
+| Windows | [`CC-Logins-windows-x64-setup.exe`](https://github.com/yashsoni369/cc-logins/releases/latest/download/CC-Logins-windows-x64-setup.exe) |
+| macOS (Apple Silicon and Intel) | [`CC-Logins-darwin-universal.dmg`](https://github.com/yashsoni369/cc-logins/releases/latest/download/CC-Logins-darwin-universal.dmg) — one universal build covers both |
+| Linux | [`CC-Logins-linux-amd64.AppImage`](https://github.com/yashsoni369/cc-logins/releases/latest/download/CC-Logins-linux-amd64.AppImage) |
+| Debian / Ubuntu | [`CC-Logins-linux-amd64.deb`](https://github.com/yashsoni369/cc-logins/releases/latest/download/CC-Logins-linux-amd64.deb) |
 
-When releases do arrive they will be **unsigned**, and you should know what that looks like before
-you download one:
+Windows installs per-user, so it never asks for administrator rights. On Linux the `.deb` pulls in
+`libayatana-appindicator3-1` for the tray; the `.AppImage` needs `chmod +x` and nothing else.
+
+Prefer to build it yourself? See [Building from source](#building-from-source).
+
+### These builds are unsigned
+
+They are **unsigned**, and you should know what that looks like before you download one:
 
 - **Windows** shows "Windows protected your PC". Click **More info**, then **Run anyway**.
 - **macOS** refuses to open it. Right-click the app → **Open**, or clear the quarantine flag:
@@ -68,11 +80,39 @@ you download one:
   Prefer that over `xattr -cr`, which strips *every* extended attribute rather than just the
   download flag.
 
-The reason is cost, not evasion: a signing certificate is an ongoing expense (Apple) or requires an
-established open-source track record (Windows, via programs like the SignPath Foundation). This is
-the current state and it's written down rather than glossed over — but it does mean **you should
-verify what you're running before trusting it with your tokens.** Building from source is the
-strongest check available today.
+The reason is cost and eligibility, not evasion. Apple's certificate is an annual fee; Microsoft's
+own [Azure Artifact Signing](https://learn.microsoft.com/en-us/windows/apps/package-and-deploy/code-signing-options)
+is unavailable to individual developers outside the USA and Canada. The remaining route is the
+[SignPath Foundation](https://signpath.org/), which signs open-source projects for free but requires
+a project to have already shipped a release — so it became an option only with `0.1.0`.
+
+Worth knowing either way: **signing would not make the warning disappear.** Since 2024 no
+certificate grants immediate SmartScreen trust — [Microsoft removed that behaviour from EV
+certificates](https://learn.microsoft.com/en-us/windows/apps/package-and-deploy/smartscreen-reputation),
+and reputation now accrues per file and per certificate through download volume. What signing buys
+is that reputation carries across releases instead of resetting with every unsigned build.
+
+### Verify what you downloaded
+
+Every release ships `SHA256SUMS.txt`. With no signature on the binaries, this is the check that
+tells you a download is the file the build actually produced:
+
+```sh
+# macOS / Linux — run in the directory you downloaded into
+curl -LO https://github.com/yashsoni369/cc-logins/releases/latest/download/SHA256SUMS.txt
+sha256sum --check --ignore-missing SHA256SUMS.txt      # shasum -a 256 -c on macOS
+```
+
+```powershell
+# Windows — compare against the matching line in SHA256SUMS.txt
+Get-FileHash .\CC-Logins-windows-x64-setup.exe -Algorithm SHA256
+```
+
+A checksum proves the file matches this release. It does not prove the release is trustworthy —
+that rests on the source in this repository and on the
+[build log](https://github.com/yashsoni369/cc-logins/actions/workflows/release.yml) for the tag,
+which is public and shows exactly what produced each artifact. **You should verify what you're
+running before trusting it with your tokens.** Building from source remains the strongest check.
 
 ## What makes this different from another account switcher
 
