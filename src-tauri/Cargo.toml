@@ -57,7 +57,7 @@ reqwest = { version = "0.12", default-features = false, features = ["json", "rus
 
 chrono = { version = "0.4", features = ["serde"] }
 sha2 = "0.10"
-base64 = "0.22"
+base64 = "0.23"
 dirs = "6"
 # Used by login.rs (interactive_login) to create the isolated CLAUDE_CONFIG_DIR
 # temp directory at runtime — previously only a [dev-dependencies] entry,
@@ -69,7 +69,7 @@ tempfile = "3"
 tiny-skia = "0.12"
 
 # Local usage history. Bundled so no system SQLite is required.
-rusqlite = { version = "0.32", features = ["bundled", "chrono"] }
+rusqlite = { version = "0.40", features = ["bundled", "chrono"] }
 
 log = "0.4"
 env_logger = "0.11"
@@ -78,7 +78,7 @@ env_logger = "0.11"
 libc = "0.2"
 
 [target.'cfg(windows)'.dependencies]
-windows-sys = { version = "0.59", features = [
+windows-sys = { version = "0.61", features = [
   "Win32_Foundation",
   "Win32_Storage_FileSystem",
   "Win32_System_IO",
