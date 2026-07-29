@@ -1,6 +1,22 @@
 import type { Environment, Snapshot } from "../types";
 
 /**
+ * Instants are computed at load, not hardcoded: a fixed `resetsAt` drifts into
+ * the past and every countdown collapses to "now", which made the whole Resets
+ * column and the reset-stagger timeline read as broken in sample-data mode.
+ *
+ * `clock`/`countdown` are deliberately absent. They are the backend's cached
+ * fallbacks, only consulted when `resetsAt` is unusable — pinning them here
+ * would put a second, immediately-stale source of truth beside a live one.
+ */
+const LOADED_AT = Date.now();
+
+/** ISO instant `minutes` from load. Negative is in the past. */
+function fromNow(minutes: number): string {
+  return new Date(LOADED_AT + minutes * 60_000).toISOString();
+}
+
+/**
  * Static demo data for the Accounts screen, shaped exactly like the snapshot
  * contract. Mirrors the four accounts shown in wireframe screen 04
  * (naim / personal / work / spare).
@@ -22,20 +38,16 @@ export const mockSnapshot: Snapshot = {
           alias: "naim",
           active: true,
           usageStatus: "ok",
-          usageFetchedAt: "2026-07-28T04:44:56Z",
+          usageFetchedAt: fromNow(-0.1),
           usageAgeSeconds: 4,
           usage: {
             fiveHour: {
               pct: 61,
-              resetsAt: "2026-07-28T04:49:00Z",
-              clock: "04:49",
-              countdown: "4h 4m",
+              resetsAt: fromNow(244),
             },
             sevenDay: {
               pct: 13,
-              resetsAt: "2026-08-01T00:00:00Z",
-              clock: "Aug 1",
-              countdown: "4d",
+              resetsAt: fromNow(4 * 24 * 60),
               expectedPct: 14,
               aheadOfPace: false,
               willLastToReset: true,
@@ -48,14 +60,12 @@ export const mockSnapshot: Snapshot = {
           alias: "personal",
           active: false,
           usageStatus: "ok",
-          usageFetchedAt: "2026-07-28T04:44:48Z",
+          usageFetchedAt: fromNow(-0.1),
           usageAgeSeconds: 12,
           usage: {
             fiveHour: {
               pct: 4,
-              resetsAt: "2026-07-28T02:31:00Z",
-              clock: "02:31",
-              countdown: "1h 46m",
+              resetsAt: fromNow(106),
             },
             sevenDay: {
               // Realistic pace: 31/39 ≈ 0.79×, matching the ratios actually
@@ -64,9 +74,7 @@ export const mockSnapshot: Snapshot = {
               // a ratio that colored the same amber as a genuinely off-pace
               // account and never occurs in practice.
               pct: 31,
-              resetsAt: "2026-08-01T00:00:00Z",
-              clock: "Aug 1",
-              countdown: "4d",
+              resetsAt: fromNow(4 * 24 * 60),
               expectedPct: 39,
               aheadOfPace: false,
               willLastToReset: true,
@@ -79,20 +87,16 @@ export const mockSnapshot: Snapshot = {
           alias: "work",
           active: false,
           usageStatus: "ok",
-          usageFetchedAt: "2026-07-28T04:44:52Z",
+          usageFetchedAt: fromNow(-0.1),
           usageAgeSeconds: 8,
           usage: {
             fiveHour: {
               pct: 78,
-              resetsAt: "2026-07-28T00:44:00Z",
-              clock: "00:44",
-              countdown: "58m",
+              resetsAt: fromNow(58),
             },
             sevenDay: {
               pct: 82,
-              resetsAt: "2026-08-01T00:00:00Z",
-              clock: "Aug 1",
-              countdown: "4d",
+              resetsAt: fromNow(4 * 24 * 60),
               expectedPct: 34,
               aheadOfPace: true,
               willLastToReset: false,
@@ -105,7 +109,7 @@ export const mockSnapshot: Snapshot = {
           alias: "spare",
           active: false,
           usageStatus: "disabled",
-          usageFetchedAt: "2026-07-28T04:41:00Z",
+          usageFetchedAt: fromNow(-0.1),
           usageAgeSeconds: 240,
           usage: {
             fiveHour: {
