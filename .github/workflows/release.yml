@@ -143,7 +143,7 @@ jobs:
       # on macOS, deb/appimage on Linux) to a GitHub release matching the
       # tag, creating it as a draft so a human reviews and publishes it.
       - name: Build and attach to draft release
-        uses: tauri-apps/tauri-action@v0
+        uses: tauri-apps/tauri-action@v1
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
@@ -234,18 +234,22 @@ jobs:
           # permalink, which only resolves once the release is published — a
           # draft is invisible to it, so updates go live exactly when you press
           # Publish and not before.
+          #
+          # This is the v1 spelling. On v0 the input was `includeUpdaterJson`,
+          # so this key was silently ignored there and the manifest was only
+          # published because v0 defaulted it to true.
           uploadUpdaterJson: true
 
           # Tauri's default asset names embed the version, which breaks
           # `releases/latest/download/<file>` permalinks on every release.
           # Dropping [version] makes those links stable.
           #
-          # `assetNamePattern`, not `releaseAssetNamePattern`: the input was
-          # renamed after v0, and this workflow pins @v0. An unknown `with:` key
-          # is a warning rather than an error, so the wrong name silently did
-          # nothing and v0.1.0's first build produced default, version-stamped
-          # names. Check the ref that is actually pinned before changing this.
-          assetNamePattern: CC-Logins-[platform]-[arch][setup][ext]
+          # Both this and `uploadUpdaterJson` were renamed between v0 and v1,
+          # and an unknown `with:` key is a warning rather than an error — so a
+          # mismatched name fails silently and is only visible in the resulting
+          # asset list. Read `action.yml` at the ref actually pinned above
+          # before touching either.
+          releaseAssetNamePattern: CC-Logins-[platform]-[arch][setup][ext]
 
   # Unsigned installers give a user no way to tell a real download from a
   # tampered one. A checksum file is the minimum substitute, and it has to be
