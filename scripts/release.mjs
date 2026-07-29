@@ -23,6 +23,11 @@ const REPO = 'https://github.com/yashsoni369/cc-logins'
 const args = process.argv.slice(2)
 const dryRun = args.includes('--dry-run')
 const allowBranch = args.includes('--allow-branch')
+// `main` is protected, so the release commit reaches it through a pull request
+// and the tag belongs on the resulting merge commit, not on the branch commit
+// that went in. --no-tag cuts the commit and leaves the tagging until after the
+// merge. See RELEASING.md.
+const noTag = args.includes('--no-tag')
 const version = args.find((a) => !a.startsWith('-'))
 
 function die(message, hint) {
@@ -228,12 +233,34 @@ git('add', ...edits.map((e) => path.relative(root, e.file)))
 if (git('diff', '--cached', '--name-only')) {
   git('commit', '-m', `release: ${version}`)
 } else {
-  console.log('  nothing to change — tagging the current commit')
+  console.log('  nothing to change — leaving the current commit as the release commit')
 }
 
-git('tag', '-a', tag, '-m', `CC Logins ${version}`)
+if (!noTag) git('tag', '-a', tag, '-m', `CC Logins ${version}`)
 
-console.log(`
+console.log(
+  noTag
+    ? `
+  Committed on ${branch}. Not tagged, and nothing pushed.
+
+  Review it:
+
+    git show HEAD
+
+  Push the branch and merge it, then tag the merge commit — the tag is what
+  starts the release build:
+
+    git push -u origin ${branch}
+    # ...open and merge the pull request...
+    git checkout main && git pull --ff-only
+    git tag -a ${tag} -m "CC Logins ${version}"
+    git push origin ${tag}
+
+  To undo before pushing:
+
+    git reset --hard HEAD~1
+`
+    : `
   Committed and tagged locally. Nothing has been pushed.
 
   Review it:
@@ -251,4 +278,5 @@ console.log(`
   To undo before pushing:
 
     git tag -d ${tag} && git reset --hard HEAD~1
-`)
+`,
+)
