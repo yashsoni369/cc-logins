@@ -19,9 +19,10 @@
     "noFallthroughCasesInSwitch": true,
     "noUncheckedIndexedAccess": true,
 
-    "baseUrl": ".",
+    // No `baseUrl`: TypeScript 7 removed it. `paths` resolves relative to this
+    // file, so the entries carry an explicit "./".
     "paths": {
-      "@/*": ["src/*"]
+      "@/*": ["./src/*"]
     }
   },
   "include": ["src"]
