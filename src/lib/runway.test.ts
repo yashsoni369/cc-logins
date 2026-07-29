@@ -343,6 +343,15 @@ describe("formatRunway", () => {
     expect(formatRunway(86_400)).toBe("1d 0h");
   });
 
+  it("reports a floor past the horizon rather than noise-driven precision", () => {
+    // 7d exactly is still a measurement; a second past it is not.
+    expect(formatRunway(7 * 86_400)).toBe("7d 0h");
+    expect(formatRunway(7 * 86_400 + 1)).toBe("> 7d");
+    // The case that motivated the cap: four accounts against 0.01 points/hour
+    // of measurement noise, which used to render as "1583d 8h".
+    expect(formatRunway((380 / 0.01) * 3_600)).toBe("> 7d");
+  });
+
   it("says 'now' for a pool that is already spent", () => {
     expect(formatRunway(0)).toBe("now");
     expect(formatRunway(-60)).toBe("now");
