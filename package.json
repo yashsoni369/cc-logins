@@ -30,6 +30,7 @@
     "preview": "vite preview",
     "test": "vitest run",
     "test:watch": "vitest",
+    "release": "node scripts/release.mjs",
     "tauri": "tauri",
     "app": "tauri dev",
     "app:build": "tauri build"

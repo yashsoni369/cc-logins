@@ -15,8 +15,10 @@ jobs:
   # from tauri.conf.json into every installer, so pushing v0.2.0 while the
   # files still say 0.1.0 produces a v0.2.0 release full of 0.1.0 artifacts.
   verify-version:
-    name: Version matches tag
+    name: Version and changelog
     runs-on: ubuntu-latest
+    outputs:
+      notes: ${{ steps.notes.outputs.notes }}
     steps:
       - uses: actions/checkout@v7
       - name: Compare tag against all three version fields
@@ -38,6 +40,42 @@ jobs:
           done
           exit $fail
 
+      # The release body is the changelog entry, not hand-written prose typed
+      # into the GitHub UI at tag time. That keeps CHANGELOG.md and the release
+      # page from drifting, and makes an undocumented release fail here rather
+      # than ship with an empty description.
+      - name: Extract this version's changelog section
+        id: notes
+        run: |
+          set -euo pipefail
+          TAG="${GITHUB_REF_NAME#v}"
+
+          # Literal prefix match via index(), not a regex: the dots in a version
+          # like 0.1.0 are wildcards to awk, and `[0.1.0]` would then also match
+          # a `[0x1x0]` heading.
+          # Stops at the next `## ` heading, and also at the block of
+          # `[x.y.z]: https://...` link definitions at the end of the file —
+          # the oldest version's section runs straight into them otherwise.
+          NOTES=$(awk -v heading="## [$TAG]" '
+            index($0, heading) == 1 { found = 1; next }
+            found && /^## / { exit }
+            found && /^\[[^]]+\]: / { exit }
+            found { print }
+          ' CHANGELOG.md | sed -e '/./,$!d' | tac | sed -e '/./,$!d' | tac)
+
+          if [ -z "$NOTES" ]; then
+            echo "::error::CHANGELOG.md has no '## [$TAG]' section. Add one before tagging."
+            exit 1
+          fi
+
+          {
+            echo "notes<<CHANGELOG_SECTION_EOF"
+            echo "$NOTES"
+            echo "CHANGELOG_SECTION_EOF"
+          } >> "$GITHUB_OUTPUT"
+
+          echo "$NOTES"
+
   release:
     name: Build (${{ matrix.platform }})
     needs: verify-version
@@ -46,9 +84,17 @@ jobs:
       matrix:
         include:
           - platform: windows-latest
-          - platform: macos-14   # Apple Silicon (arm64)
-          - platform: macos-13   # Intel (x86_64)
+            args: ''
+          # One universal binary covering Apple Silicon and Intel, rather than a
+          # runner per architecture. The split build used macos-13 for Intel,
+          # and GitHub retired that image in December 2025 — the leg would fail
+          # outright now. Cross-compiling both slices from the arm64 runner is
+          # what the Tauri docs and the larger Tauri apps do, and it leaves
+          # users one .dmg to pick instead of asking which chip they have.
+          - platform: macos-latest
+            args: '--target universal-apple-darwin'
           - platform: ubuntu-22.04
+            args: ''
     runs-on: ${{ matrix.platform }}
     steps:
       - uses: actions/checkout@v7
@@ -70,7 +116,11 @@ jobs:
             wget \
             file
 
+      # The universal macOS bundle is lipo'd from both slices, so the arm64
+      # runner needs the Intel target installed as well as its own.
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.platform == 'macos-latest' && 'aarch64-apple-darwin,x86_64-apple-darwin' || '' }}
 
       - uses: Swatinem/rust-cache@v2
         with:
@@ -130,18 +180,123 @@ jobs:
           # TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           # TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         with:
+          args: ${{ matrix.args }}
           tagName: ${{ github.ref_name }}
           releaseName: 'CC Logins ${{ github.ref_name }}'
           releaseBody: |
-            Installers for Windows, macOS (Apple Silicon and Intel), and Linux are attached below.
+            ${{ needs.verify-version.outputs.notes }}
 
-            These builds are unsigned. Windows SmartScreen and macOS Gatekeeper will warn before
-            running them — see the README's "Signing" section for what that means and why.
+            ---
+
+            ### Install
+
+            Pick the file for your platform from the assets below.
+
+            | Platform | File |
+            | --- | --- |
+            | Windows | the `-setup.exe` |
+            | macOS (Apple Silicon and Intel) | the `.dmg` — one universal build covers both |
+            | Linux | the `.AppImage`, or the `.deb` on Debian/Ubuntu |
+
+            ### These builds are unsigned
+
+            Windows SmartScreen and macOS Gatekeeper will warn before running them — see the
+            README's "Signing" section for what that means and why. Because nothing here carries
+            a signature, `SHA256SUMS.txt` is the only way to check that a download is the file
+            this workflow actually produced:
+
+            ```
+            sha256sum --check --ignore-missing SHA256SUMS.txt   # Linux / macOS
+            ```
+
+            ```powershell
+            # Windows — compare against the matching line in SHA256SUMS.txt
+            Get-FileHash .\<downloaded-file> -Algorithm SHA256
+            ```
+
+            A checksum proves the file matches this release. It does not prove the release
+            itself is trustworthy — that still rests on the source in this repository and the
+            build log for this tag.
           releaseDraft: true
           prerelease: false
+
+          # The updater plugin is not a dependency and
+          # `bundle.createUpdaterArtifacts` is unset, so there is nothing for a
+          # `latest.json` to point at. Left at its default of true, tauri-action
+          # publishes a manifest describing an update path that does not exist.
+          uploadUpdaterJson: false
 
           # Tauri's default asset names embed the version, which breaks
           # `releases/latest/download/<file>` permalinks on every release.
           # Dropping [version] makes those links stable; [arch] still separates
           # the two macOS builds.
           releaseAssetNamePattern: CC-Logins-[platform]-[arch][setup][ext]
+
+  # Unsigned installers give a user no way to tell a real download from a
+  # tampered one. A checksum file is the minimum substitute, and it has to be
+  # generated after every platform leg has uploaded, from the assets as they
+  # were actually named on the release rather than from local build output.
+  # `needs: release` also means a failed platform never gets a checksum file
+  # that silently describes an incomplete release.
+  checksums:
+    name: Checksums
+    needs: release
+    runs-on: ubuntu-latest
+    steps:
+      - name: Generate and attach SHA256SUMS.txt
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+
+          # Plain REST rather than `gh release download`/`upload`, because the
+          # release is a draft: GitHub omits drafts from `/releases/tags/{tag}`,
+          # so anything that resolves a release by tag name can 404 here. The
+          # list endpoint does include drafts for a token with push access.
+          # The filter must emit nothing when a page holds no match: --paginate
+          # applies --jq per page, so anything ending in `first`/`.id` would
+          # print `null` for every other page and make this a multi-line value
+          # that still passes an emptiness check.
+          release_id=$(gh api "repos/$REPO/releases" --paginate \
+            --jq ".[] | select(.tag_name == \"$TAG\") | .id" | head -n 1)
+
+          if [ -z "$release_id" ]; then
+            echo "::error::no release found for tag $TAG"
+            exit 1
+          fi
+          echo "release id: $release_id"
+
+          # Re-running the workflow would otherwise collide with the previous
+          # run's asset, since GitHub rejects a duplicate name rather than
+          # replacing it.
+          for old in $(gh api "repos/$REPO/releases/$release_id/assets" --paginate \
+              --jq '.[] | select(.name == "SHA256SUMS.txt") | .id'); do
+            echo "removing previous SHA256SUMS.txt ($old)"
+            gh api --method DELETE "repos/$REPO/releases/assets/$old"
+          done
+
+          mkdir -p assets
+          gh api "repos/$REPO/releases/$release_id/assets" --paginate \
+            --jq '.[] | "\(.id)\t\(.name)"' > manifest.tsv
+
+          if [ ! -s manifest.tsv ]; then
+            echo "::error::release $TAG has no assets to checksum"
+            exit 1
+          fi
+
+          while IFS=$'\t' read -r id name; do
+            [ -n "$id" ] || continue
+            echo "downloading $name"
+            gh api -H "Accept: application/octet-stream" \
+              "repos/$REPO/releases/assets/$id" > "assets/$name"
+          done < manifest.tsv
+
+          ( cd assets && sha256sum -- * ) > SHA256SUMS.txt
+          cat SHA256SUMS.txt
+
+          gh api --method POST \
+            -H "Content-Type: text/plain" \
+            "https://uploads.github.com/repos/$REPO/releases/$release_id/assets?name=SHA256SUMS.txt" \
+            --input SHA256SUMS.txt
