@@ -4,12 +4,21 @@ Maintainer notes. Releases are cut by pushing a tag; nothing publishes itself.
 
 ## The short version
 
+`main` is protected and takes no direct pushes, so the release commit goes
+through a pull request like anything else. The tag is pushed afterwards, at the
+merge commit.
+
 ```
 # 1. write the changelog section for the version first
-# 2. then:
-pnpm release 0.2.0
-git push origin main v0.2.0
-# 3. review the draft on the releases page and publish it
+# 2. cut the release commit on a branch
+git checkout -b release/0.2.0
+pnpm release 0.2.0 --allow-branch --no-tag
+git push -u origin release/0.2.0
+# 3. open and merge the pull request, then tag the merged commit
+git checkout main && git pull --ff-only
+git tag -a v0.2.0 -m "CC Logins 0.2.0"
+git push origin v0.2.0
+# 4. review the draft on the releases page and publish it
 ```
 
 ## What the pieces do
@@ -23,13 +32,21 @@ checks they match the tag.
 
 `pnpm release <version>` is what keeps them in step. It bumps all four files,
 dates the changelog section, resets `[Unreleased]`, fixes the changelog link
-references, then commits and tags locally. It deliberately stops there — pushing
-the tag is what starts the build, and that stays a deliberate act.
+references, then commits. It deliberately stops before pushing — pushing the tag
+is what starts the build, and that stays a deliberate act.
 
-It refuses to run on a dirty tree, off `main`, behind `origin/main`, over an
-existing tag, or without a changelog section for the version. Use `--dry-run` to
-preview the edits (there the checkout checks soften to warnings), and
-`--allow-branch` to release from somewhere other than `main`.
+Flags:
+
+| Flag | Why |
+| --- | --- |
+| `--dry-run` | Preview the edits without writing. The checkout checks soften to warnings. |
+| `--allow-branch` | Release from somewhere other than `main`. Required for the branch flow above. |
+| `--no-tag` | Commit without tagging, for when the commit still has to go through a pull request. |
+
+It refuses to run on a dirty tree, off `main`, behind the upstream branch, over
+an existing tag, or without a changelog section for the version. It does **not**
+refuse when the files already carry the target version — that is what a first
+release looks like, and re-releasing is caught by the tag check instead.
 
 ## Step 1 — write the changelog first
 
@@ -49,24 +66,39 @@ section and uses it as the release body, and **fails the release if the section
 is missing** — an undocumented release stops at the version check rather than
 shipping with an empty description.
 
-## Step 2 — cut it
+## Step 2 — cut the release commit on a branch
+
+`main` is protected: it takes no direct pushes and requires the `CI passed`
+check, so the release commit goes through a pull request like any other change.
 
 ```
-pnpm release 0.2.0 --dry-run    # optional preview
-pnpm release 0.2.0
-git show v0.2.0                 # review the commit and tag
+git checkout -b release/0.2.0
+pnpm release 0.2.0 --allow-branch --no-tag --dry-run   # optional preview
+pnpm release 0.2.0 --allow-branch --no-tag
+git show HEAD                                          # review the commit
+git push -u origin release/0.2.0
 ```
 
-To undo anything before pushing:
+Open the pull request and merge it. To undo before pushing:
 
 ```
-git tag -d v0.2.0 && git reset --hard HEAD~1
+git reset --hard HEAD~1
 ```
 
-## Step 3 — push, which starts the build
+## Step 3 — tag the merged commit, which starts the build
+
+The tag has to point at what actually landed on `main`, not at the branch commit
+that went in:
 
 ```
-git push origin main v0.2.0
+git checkout main && git pull --ff-only
+git tag -a v0.2.0 -m "CC Logins 0.2.0"
+```
+
+Then push it:
+
+```
+git push origin v0.2.0
 ```
 
 The tag push triggers `.github/workflows/release.yml`, which:
