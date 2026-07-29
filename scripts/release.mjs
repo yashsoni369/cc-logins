@@ -85,8 +85,11 @@ if (!/^\d+\.\d+\.\d+(-[0-9A-Za-z.]+(\.[0-9A-Za-z.]+)*)?$/.test(version)) {
 const tag = `v${version}`
 const current = JSON.parse(readFileSync(path.join(root, 'package.json'), 'utf8')).version
 
+// Not an error. The first release ships the version the files were authored
+// with, and a hand-edited bump is legitimate too. Re-releasing is caught by the
+// tag check below, which is the guard that actually matters.
 if (version === current) {
-  die(`package.json is already at ${version}`, 'pick a new version, or check out an earlier commit.')
+  console.warn(`  note: version files already read ${version}; only the changelog and the tag will change`)
 }
 
 // ---- validate the working tree -------------------------------------------
@@ -216,8 +219,18 @@ if (dryRun) {
 
 for (const edit of edits) writeFileSync(edit.file, edit.after)
 
+// Every edit can legitimately be a no-op: releasing the version the files were
+// already authored with, against a changelog section that is already dated,
+// changes nothing. `git commit` fails on an empty index, so tag the commit
+// that is already there rather than inventing an empty one.
 git('add', ...edits.map((e) => path.relative(root, e.file)))
-git('commit', '-m', `release: ${version}`)
+
+if (git('diff', '--cached', '--name-only')) {
+  git('commit', '-m', `release: ${version}`)
+} else {
+  console.log('  nothing to change — tagging the current commit')
+}
+
 git('tag', '-a', tag, '-m', `CC Logins ${version}`)
 
 console.log(`
