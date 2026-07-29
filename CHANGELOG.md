@@ -11,7 +11,22 @@ A breaking change to any of those bumps the minor version, since major is pinned
 
 ## [Unreleased]
 
+Nothing yet.
+
+## [0.2.0]
+
 ### Added
+
+- A Dashboard home screen, and the app now opens on it. It answers the question no
+  per-account view can: where the fleet stands as a whole. A pooled runway estimate says
+  how long every account together lasts at the current burn rate, one row per account
+  carries a 24-hour sparkline and its 7-day figure, and a reset stagger plots every
+  account's 5-hour window on one clock — a vertical slice with no headroom in it is the
+  stretch that strands you, and nothing else surfaces it.
+- Per-account analytics behind any row: the 5-hour and 7-day windows plotted apart, a
+  weekly heatmap of when that account actually runs hot, and a 30-day range.
+- A clock-format setting. Times were following the OS in some views and not others;
+  12-hour, 24-hour and system are now one choice that every view obeys.
 
 - In-app updates. The app checks GitHub for a newer release shortly after launch and then
   once a day, notifies you once per version, and shows a dot on Settings while one is
@@ -28,6 +43,33 @@ A breaking change to any of those bumps the minor version, since major is pinned
   every update after it does not.
 
   `0.1.0` has no updater, so upgrading from it has to be done by hand once.
+
+### Changed
+
+- Installers carry the app's own identity. The Windows installer has a branded header and
+  welcome panel and its icon on both the installer and the uninstaller; the macOS disk
+  image opens on a laid-out window rather than a bare volume. The Windows installer still
+  installs per-user, so it never asks for administrator rights.
+- The rotation control on each account row is a labelled Enable/Disable button rather than
+  a bare switch. It sits beside Switch and Re-login, and a lone toggle among buttons read
+  as an odd one out.
+- This project is presented on its own terms. The upstream tool it was ported from is no
+  longer named in the README, the settings copy or log messages, and the app no longer
+  reads or writes that tool's store. Attribution is unchanged: the MIT notice and its
+  copyright line are intact in LICENSE.
+
+### Fixed
+
+- The dashboard could not be read. Measured against the running app rather than judged by
+  eye: the reset stagger drew its replenished stretch at 1.19:1 against the background
+  where meaningful graphics need 3:1, and no opacity reached it — so a band now carries a
+  neutral outline for its extent and fills only the consumed part. The "no samples" cells
+  in the heatmap sat at 1.22:1, making the one distinction that grid exists to draw
+  invisible, and every in-chart label was below the 4.5:1 text minimum.
+- Heatmap rows read `Night`/`Morning`/`Afternoon`/`Evening` instead of `Nig`/`Mor`/`Aft`/`Eve`.
+- Sample data ages with the clock. Every instant in the demo fixture was hardcoded, so
+  once those dates passed a first-run user saw every countdown collapsed to "now" and every
+  account drawn as fully replenished.
 
 ## [0.1.0] - 2026-07-29
 
