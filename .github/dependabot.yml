@@ -78,9 +78,13 @@ updates:
     schedule:
       interval: weekly
     open-pull-requests-limit: 5
+    # No `semver-*-days` here: Dependabot rejects those keys for
+    # github-actions, which it does not treat as a SemVer ecosystem for
+    # cooldown purposes even though `update-types` works fine above. An invalid
+    # config disables Dependabot for the whole repository rather than the one
+    # entry, so this is worth getting exactly right.
     cooldown:
       default-days: 7
-      semver-major-days: 14
     groups:
       actions-security:
         applies-to: security-updates
