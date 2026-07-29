@@ -1,53 +1,79 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
-import FleetView from "./dashboard/FleetView";
-import AccountAnalytics from "./dashboard/AccountAnalytics";
+import AccountRow, { type AccountDetail } from "./dashboard/AccountRow";
+import CapacityBand from "./dashboard/CapacityBand";
+import Insights from "./dashboard/Insights";
+import LoadBalance from "./dashboard/LoadBalance";
+import RangePicker from "./dashboard/RangePicker";
+import ResetStagger from "./dashboard/ResetStagger";
+import RotationChart from "./dashboard/RotationChart";
 import { historySamples, historySeries } from "../lib/api";
+import {
+  RANGES,
+  buildFleetSeries,
+  deriveInsights,
+  loadBalanceGrid,
+  type RangeKey,
+} from "../lib/dashboard";
 import { pooledRunway } from "../lib/runway";
 import { useNow } from "../lib/time";
 import { stableKey, type Account, type DayStat, type Sample, type Snapshot } from "../types";
 
-/** Trailing window the fleet sparklines and the burn estimate are drawn from. */
-const FLEET_HOURS = 24;
-/** Trailing window the account view charts. Wider than the fleet's, to show more than one 5-hour cycle. */
-const ACCOUNT_HOURS = 72;
-/** Daily-rollup range for the account view's range chart. */
-const ACCOUNT_DAYS = 30;
-
-/**
- * Which of the two views is on screen. The account view is reached by
- * clicking a fleet row and left by its own back control, so it is local
- * state here rather than a route — nothing outside this screen needs to know
- * which account is open, and a nav change would lose the fleet's scroll.
- */
-type View = { kind: "fleet" } | { kind: "account"; key: string; number: number };
+/** Trailing window the pooled burn estimate is measured over. Independent of
+ *  the display range: a runway projected from a month of averages would smooth
+ *  away the last hour, which is the only hour that predicts the next one. */
+const BURN_HOURS = 24;
+/** Intraday window an opened account charts. Wider than one 5-hour cycle. */
+const DETAIL_HOURS = 72;
+/** Daily-rollup range an opened account charts. */
+const DETAIL_DAYS = 30;
 
 interface DashboardScreenProps {
   snapshot: Snapshot;
-  /** Auto-switch threshold, drawn as a hairline on the account charts. */
+  /** Auto-switch threshold, drawn as a hairline on the charts. */
   settingsThreshold: number;
   /** True when the most recent background refresh failed; meters dim rather than blank. */
   degraded: boolean;
 }
 
+/** Settle every promise independently: one account's unreadable history must
+ *  not blank the fleet, so a failure becomes an empty series for that key. */
+async function gather<T>(
+  keys: string[],
+  load: (key: string) => Promise<{ data: T[] }>,
+): Promise<Map<string, T[]>> {
+  const entries = await Promise.all(
+    keys.map(async (key) => {
+      try {
+        return [key, (await load(key)).data] as const;
+      } catch {
+        return [key, [] as T[]] as const;
+      }
+    }),
+  );
+  return new Map(entries);
+}
+
 /**
- * The app's home screen: pooled capacity across every account, then one
- * account in depth.
+ * The app's home screen: pooled capacity, how the rotation is behaving, and
+ * any account opened in place beneath its own row.
  *
- * Usage percentages come from the snapshot `App` already owns — they are the
- * live reading, and refetching them here would let this screen and the
- * Accounts screen disagree. Only the recorded *history* is fetched here,
- * since that is a separate read path the snapshot does not carry.
+ * Live usage percentages come from the snapshot `App` already owns — they are
+ * the authoritative reading, and refetching them here would let this screen
+ * and the Accounts screen disagree. Only recorded *history* is fetched here.
  */
 export default function DashboardScreen({ snapshot, settingsThreshold, degraded }: DashboardScreenProps) {
-  const [view, setView] = useState<View>({ kind: "fleet" });
+  const [range, setRange] = useState<RangeKey>("7d");
+  const [expanded, setExpanded] = useState<Set<number>>(new Set());
   const [keyByNumber, setKeyByNumber] = useState<Map<number, string>>(new Map());
-  const [samplesByKey, setSamplesByKey] = useState<Map<string, Sample[]>>(new Map());
-  const [accountSamples, setAccountSamples] = useState<Sample[]>([]);
-  const [accountDaily, setAccountDaily] = useState<DayStat[]>([]);
-  const [accountLoading, setAccountLoading] = useState(false);
+
+  const [burnByKey, setBurnByKey] = useState<Map<string, Sample[]>>(new Map());
+  const [rangeSamples, setRangeSamples] = useState<Map<string, Sample[]>>(new Map());
+  const [rangeDaily, setRangeDaily] = useState<Map<string, DayStat[]>>(new Map());
+  const [detailByKey, setDetailByKey] = useState<Map<string, AccountDetail>>(new Map());
 
   const now = useNow();
+  const spec = RANGES[range];
 
   const accounts = useMemo(
     () => snapshot.environments.flatMap((environment) => environment.accounts),
@@ -69,132 +95,183 @@ export default function DashboardScreen({ snapshot, settingsThreshold, degraded 
     };
   }, [accounts]);
 
-  const keyFor = useCallback(
-    (account: Account) => keyByNumber.get(account.number),
-    [keyByNumber],
-  );
+  const keyFor = useCallback((account: Account) => keyByNumber.get(account.number), [keyByNumber]);
+  const keys = useMemo(() => [...keyByNumber.values()], [keyByNumber]);
 
-  // Fleet sparklines and the burn estimate. One account's history failing must
-  // not blank the fleet, so each settles independently into the map.
+  // The burn estimate's own fixed window, refetched only as accounts change.
   useEffect(() => {
-    if (keyByNumber.size === 0) return;
+    if (keys.length === 0) return;
     let cancelled = false;
-    void (async () => {
-      const entries = await Promise.all(
-        [...keyByNumber.values()].map(async (key) => {
-          try {
-            const result = await historySamples(key, FLEET_HOURS);
-            return [key, result.data] as const;
-          } catch {
-            return [key, [] as Sample[]] as const;
-          }
-        }),
-      );
-      if (!cancelled) setSamplesByKey(new Map(entries));
-    })();
+    void gather(keys, (key) => historySamples(key, BURN_HOURS)).then((map) => {
+      if (!cancelled) setBurnByKey(map);
+    });
     return () => {
       cancelled = true;
     };
-  }, [keyByNumber]);
+  }, [keys]);
 
-  // The open account's deeper history. Only fetched while that view is up.
+  // Whatever the selected range needs. Samples for short ranges; daily rollups
+  // for long ones, which are the only source that outlives pruning. Daily is
+  // fetched either way because the load-balance grid always wants it.
   useEffect(() => {
-    if (view.kind !== "account") return;
+    if (keys.length === 0) return;
     let cancelled = false;
-    setAccountLoading(true);
+
     void (async () => {
-      try {
-        const [samples, daily] = await Promise.all([
-          historySamples(view.key, ACCOUNT_HOURS),
-          historySeries(view.key, ACCOUNT_DAYS),
-        ]);
-        if (cancelled) return;
-        setAccountSamples(samples.data);
-        setAccountDaily(daily.data);
-      } catch {
-        // An unreadable history is "nothing recorded yet" for this account,
-        // not a failure of the screen — the view says so itself.
-        if (!cancelled) {
-          setAccountSamples([]);
-          setAccountDaily([]);
-        }
-      } finally {
-        if (!cancelled) setAccountLoading(false);
+      const daily = await gather(keys, (key) => historySeries(key, spec.days));
+      if (!cancelled) setRangeDaily(daily);
+
+      if (spec.source === "samples") {
+        const samples = await gather(keys, (key) => historySamples(key, spec.hours));
+        if (!cancelled) setRangeSamples(samples);
+      } else if (!cancelled) {
+        setRangeSamples(new Map());
       }
     })();
+
     return () => {
       cancelled = true;
     };
-  }, [view]);
+  }, [keys, spec]);
 
-  const runway = useMemo(
-    () => pooledRunway(accounts, samplesByKey, keyFor, now),
-    [accounts, samplesByKey, keyFor, now],
-  );
+  /**
+   * Load an opened account's deeper history, once.
+   *
+   * Deliberately not an effect. Opening a row is a user event, and an effect
+   * keyed on the expanded set would have to read the cache it also writes —
+   * which re-runs on its own output. The ref tracks what has been requested so
+   * a double-click cannot start two fetches for one account.
+   */
+  const requested = useRef<Set<string>>(new Set());
+  const loadDetail = useCallback(async (key: string) => {
+    if (requested.current.has(key)) return;
+    requested.current.add(key);
+    setDetailByKey((prev) => new Map(prev).set(key, { samples: [], daily: [], loading: true }));
 
-  const openAccount = useCallback((key: string, account: Account) => {
-    setAccountSamples([]);
-    setAccountDaily([]);
-    setView({ kind: "account", key, number: account.number });
+    const [samples, daily] = await Promise.all([
+      historySamples(key, DETAIL_HOURS).then((r) => r.data).catch(() => [] as Sample[]),
+      historySeries(key, DETAIL_DAYS).then((r) => r.data).catch(() => [] as DayStat[]),
+    ]);
+    if (!mounted.current) return;
+    setDetailByKey((prev) => new Map(prev).set(key, { samples, daily, loading: false }));
   }, []);
 
-  const backToFleet = useCallback(() => setView({ kind: "fleet" }), []);
+  // Accounts can disappear while their history is in flight; without this the
+  // late resolve would set state on an unmounted screen.
+  const mounted = useRef(true);
+  useEffect(() => {
+    mounted.current = true;
+    return () => {
+      mounted.current = false;
+    };
+  }, []);
 
-  if (view.kind === "account") {
-    const account = accounts.find((a) => a.number === view.number);
-    // The account vanished from the snapshot while its view was open — most
-    // likely it was removed elsewhere. Fall back rather than render an empty
-    // view of nothing.
-    if (!account) {
-      return (
-        <div className="pane">
-          <div className="pane-head">
-            <h3>Dashboard</h3>
-          </div>
-          <div className="empty">
-            <h3>That account is gone</h3>
-            <p>It was removed while you were looking at it.</p>
-            <button type="button" className="btn" onClick={backToFleet}>
-              Back to all accounts
-            </button>
-          </div>
-        </div>
-      );
-    }
+  // A removed account must not keep a stale drawer or a cached fetch alive.
+  useEffect(() => {
+    const live = new Set(accounts.map((a) => a.number));
+    setExpanded((prev) => {
+      const next = new Set([...prev].filter((n) => live.has(n)));
+      return next.size === prev.size ? prev : next;
+    });
+  }, [accounts]);
 
+  const runway = useMemo(
+    () => pooledRunway(accounts, burnByKey, keyFor, now),
+    [accounts, burnByKey, keyFor, now],
+  );
+
+  const series = useMemo(
+    () => buildFleetSeries(accounts, keyFor, rangeSamples, rangeDaily, spec),
+    [accounts, keyFor, rangeSamples, rangeDaily, spec],
+  );
+
+  const loadRows = useMemo(
+    () => loadBalanceGrid(accounts, keyFor, rangeDaily, Math.max(spec.days, 7), now),
+    [accounts, keyFor, rangeDaily, spec, now],
+  );
+
+  const insights = useMemo(
+    () => deriveInsights({ accounts, series, rows: loadRows, spec, threshold: settingsThreshold, now }),
+    [accounts, series, loadRows, spec, settingsThreshold, now],
+  );
+
+  const toggle = useCallback(
+    (number: number) => {
+      setExpanded((prev) => {
+        const next = new Set(prev);
+        if (next.has(number)) next.delete(number);
+        else next.add(number);
+        return next;
+      });
+      const key = keyByNumber.get(number);
+      if (key) void loadDetail(key);
+    },
+    [keyByNumber, loadDetail],
+  );
+
+  if (accounts.length === 0) {
     return (
       <div className="pane">
-        <AccountAnalytics
-          account={account}
-          samples={accountSamples}
-          daily={accountDaily}
-          rangeDays={ACCOUNT_DAYS}
-          threshold={settingsThreshold}
-          loading={accountLoading}
-          onBack={backToFleet}
-        />
+        <div className="pane-head">
+          <h3>Dashboard</h3>
+        </div>
+        <div className="empty">
+          <h3>No accounts yet</h3>
+          <p>Add an account and this fills in as usage is recorded.</p>
+        </div>
       </div>
     );
   }
 
   return (
-    <div className="pane">
+    <div className="pane dash">
       <div className="pane-head">
         <h3>Dashboard</h3>
+        <RangePicker value={range} onChange={setRange} />
       </div>
-      {/* FleetView renders a fragment; this owns the layout and the shared
-          column template its header and rows both read. */}
-      <div className="fleet">
-        <FleetView
-          accounts={accounts}
-          samplesByKey={samplesByKey}
-          keyFor={keyFor}
-          runway={runway}
-          onOpenAccount={openAccount}
-          degraded={degraded}
-          now={now}
-        />
-      </div>
+
+      <CapacityBand accounts={accounts} runway={runway} degraded={degraded} now={now} />
+
+      <section className="band">
+        <div className="band-head">
+          <h2>Rotation</h2>
+          <span className="sub">binding utilisation · {spec.phrase}</span>
+          <span className="spacer" />
+          <span className="sub">hover a line to isolate it</span>
+        </div>
+        <RotationChart series={series} spec={spec} threshold={settingsThreshold} />
+        <ResetStagger accounts={accounts} now={now} />
+      </section>
+
+      <section className="band">
+        <div className="band-head">
+          <h2>Accounts</h2>
+          <span className="sub">click to open in place</span>
+        </div>
+        <div className="rows">
+          {accounts.map((account) => {
+            const key = keyFor(account);
+            return (
+              <AccountRow
+                key={account.number}
+                account={account}
+                detail={key ? detailByKey.get(key) : undefined}
+                expanded={expanded.has(account.number)}
+                onToggle={() => toggle(account.number)}
+                threshold={settingsThreshold}
+                rangeDays={DETAIL_DAYS}
+                peers={accounts.filter((a) => a.number !== account.number)}
+                degraded={degraded}
+                now={now}
+              />
+            );
+          })}
+        </div>
+      </section>
+
+      <LoadBalance rows={loadRows} days={Math.max(spec.days, 7)} />
+
+      <Insights items={insights} />
     </div>
   );
 }

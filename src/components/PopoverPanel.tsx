@@ -14,7 +14,13 @@ import { useDaemonStatus } from "@/lib/useDaemonStatus";
 import { useSettings } from "@/lib/useSettings";
 import { useSnapshot } from "@/lib/useSnapshot";
 import { useTheme } from "@/lib/useTheme";
-import { ageLabel, bindingUtilisation, displayName, type UsageWindow } from "@/types";
+import {
+  bindingUtilisation,
+  bindingWindow,
+  displayName,
+  type Usage,
+  type UsageWindow,
+} from "@/types";
 
 function SampleDataBanner() {
   return (
@@ -65,7 +71,7 @@ function useSizeToContent(ref: { current: HTMLDivElement | null }) {
         currentPopoverWindow(),
         import("@tauri-apps/api/window"),
       ]);
-      await win.setSize(new LogicalSize(340, Math.max(1, Math.ceil(height))));
+      await win.setSize(new LogicalSize(364, Math.max(1, Math.ceil(height))));
     };
     const observer = new ResizeObserver((entries) => {
       const height = entries[0]?.contentRect.height;
@@ -89,6 +95,23 @@ function useSizeToContent(ref: { current: HTMLDivElement | null }) {
  */
 function resetLabel(usage: UsageWindow | undefined, now: number): string {
   return formatCountdown(usage?.resetsAt, now) ?? usage?.countdown ?? usage?.clock ?? "—";
+}
+
+/**
+ * When the window gating a *switch target* frees up, e.g. "3h 38m".
+ *
+ * A meter alone says an account is at 88% but not whether that clears in twenty
+ * minutes or six days, which is exactly the thing you need before choosing to
+ * switch. Read from `bindingWindow` so the time describes the same window the
+ * meter beside it measures.
+ *
+ * Null, not a dash, when nothing is known: these rows are switch buttons, and a
+ * column of em dashes reads as a broken readout rather than an absent one.
+ */
+function bindingReset(usage: Usage | undefined, now: number): string | null {
+  const binding = bindingWindow(usage);
+  if (!binding) return null;
+  return formatCountdown(binding.resetsAt, now) ?? binding.countdown ?? binding.clock ?? null;
 }
 
 interface SwitchErrorState {
@@ -203,7 +226,6 @@ export default function PopoverPanel() {
   const others = accounts.filter((account) => account.number !== activeAccount.number);
   const fiveHour = activeAccount.usage?.fiveHour;
   const sevenDay = activeAccount.usage?.sevenDay;
-  const activeAge = ageLabel(activeAccount.usageAgeSeconds);
   const dimStyle: CSSProperties | undefined = error ? { opacity: 0.55 } : undefined;
   const urgent = phase?.kind === "warning" || phase?.kind === "switching" || phase?.kind === "exhausted";
   const secondsLeft =
@@ -217,7 +239,9 @@ export default function PopoverPanel() {
 
       {phase?.kind === "warning" && (
         <div className="banner caution" role="status">
-          <span>Switch planned to {warningTarget ? displayName(warningTarget) : `account ${phase.to}`}</span>
+          <span title={warningTarget ? displayName(warningTarget) : undefined}>
+            Switch planned to {warningTarget ? displayName(warningTarget) : `account ${phase.to}`}
+          </span>
           <span className="sp" />
           <span className="num">{secondsLeft === 0 ? "switching now" : `switching in ${secondsLeft}s`}</span>
         </div>
@@ -249,11 +273,12 @@ export default function PopoverPanel() {
       <div className="pop-head">
         <div className="who">
           <span className="mark on" />
-          <span className="alias">{displayName(activeAccount)}</span>
+          <span className="alias" title={displayName(activeAccount)}>
+            {displayName(activeAccount)}
+          </span>
           <span className={`pill ${urgent ? "danger" : "on"}`}>
             {urgent && activeUtil != null ? `${Math.round(activeUtil)}%` : "active"}
           </span>
-          {activeAge && <span className="pill">{activeAge}</span>}
         </div>
         <div className="pop-win">
           {fiveHour && (
@@ -288,7 +313,9 @@ export default function PopoverPanel() {
           const unavailable = disabled || needsRelogin || recoveryBlocked;
           const isNext = phase?.kind === "warning" && phase.to === account.number;
           const isPending = pendingAccount === account.number;
-          const age = ageLabel(account.usageAgeSeconds);
+          // Suppressed while unavailable: when an account cannot be switched to,
+          // when its quota frees up is not the thing standing in the way.
+          const reset = unavailable ? null : bindingReset(account.usage, minuteNow);
           return (
             <button
               key={account.number}
@@ -298,14 +325,18 @@ export default function PopoverPanel() {
               onClick={() => handleSwitch(account.number)}
             >
               <span className="mark" />
-              <span className="alias">{displayName(account)}</span>
+              <span className="alias" title={displayName(account)}>{displayName(account)}</span>
               {disabled && <span className="pill">held out</span>}
-              {needsRelogin && <span className="pill danger">Re-login required</span>}
-              {hasForeignCredential && <span className="pill danger">credential mismatch</span>}
+              {needsRelogin && <span className="pill danger" title="Re-login required">Re-login</span>}
+              {hasForeignCredential && (
+                <span className="pill danger" title="Credential mismatch">mismatch</span>
+              )}
               {isNext && <span className="pill">next</span>}
               {isPending && <span className="pill">switching…</span>}
-              {!unavailable && !isPending && age && <span className="pill">{age}</span>}
-              <div style={dimStyle}><UsageMeter pct={bindingUtilisation(account.usage)} /></div>
+              <div className="pop-meter" style={dimStyle}>
+                <UsageMeter pct={bindingUtilisation(account.usage)} />
+              </div>
+              <span className="rst">{reset}</span>
             </button>
           );
         })}

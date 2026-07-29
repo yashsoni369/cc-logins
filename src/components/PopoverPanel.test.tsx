@@ -1,4 +1,4 @@
-import { fireEvent, render, screen } from "@testing-library/react";
+import { fireEvent, render, screen, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { DaemonStatus, Settings, Snapshot } from "@/types";
@@ -179,9 +179,12 @@ describe("PopoverPanel authoritative daemon phases", () => {
     fixture.environments[0]!.accounts[1]!.usageStatus = "reloginrequired";
     render(<PopoverPanel />);
 
-    const account = screen.getByRole("button", { name: /Next.*Re-login required/i });
+    // The pill is abbreviated to survive a 364px row. A title on an element
+    // that already has text does not reach the accessible name, so the button
+    // is named by the short form and the full phrase is hover-only.
+    const account = screen.getByRole("button", { name: /Next.*Re-login/i });
     expect(account).toBeDisabled();
-    expect(screen.getByText("Re-login required")).toBeInTheDocument();
+    expect(screen.getByTitle("Re-login required")).toBeInTheDocument();
     expect(screen.queryByText(/expired/i)).not.toBeInTheDocument();
     fireEvent.click(account);
     expect(mocks.switchAccount).not.toHaveBeenCalled();
@@ -237,5 +240,141 @@ describe("PopoverPanel reset readouts", () => {
     mocks.status = status({ kind: "monitoring" }, 3);
     rerender(<PopoverPanel />);
     expect(screen.getByText("—")).toBeInTheDocument();
+  });
+});
+
+/*
+ * A meter says a switch target sits at 88%; it cannot say whether that clears
+ * in twenty minutes or six days. These cover the readout that answers it.
+ */
+describe("PopoverPanel switch-target resets", () => {
+  const pinned = new Date("2026-07-28T12:00:00Z");
+  const target = () => fixture.environments[0]!.accounts[1]!;
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    vi.useFakeTimers();
+    vi.setSystemTime(pinned);
+    mocks.status = status({ kind: "monitoring" });
+    target().usageStatus = "ok";
+  });
+  afterEach(() => {
+    vi.useRealTimers();
+    target().usageStatus = "ok";
+    target().usage = { sevenDay: { pct: 10 } };
+  });
+
+  it("shows when the target's quota frees up", () => {
+    target().usage = {
+      sevenDay: { pct: 10, resetsAt: new Date(pinned.getTime() + 2 * 86_400_000).toISOString() },
+    };
+    render(<PopoverPanel />);
+
+    expect(screen.getByText("2d 0h")).toBeInTheDocument();
+  });
+
+  // The percentage comes from the binding window, so the time beside it must
+  // too — pairing 90% with the seven-day clock would describe neither.
+  it("reads the reset from the same window the meter measures", () => {
+    target().usage = {
+      fiveHour: { pct: 90, resetsAt: new Date(pinned.getTime() + 2 * 3_600_000).toISOString() },
+      sevenDay: { pct: 40, resetsAt: new Date(pinned.getTime() + 5 * 86_400_000).toISOString() },
+    };
+    render(<PopoverPanel />);
+
+    expect(screen.getByText("2h 0m")).toBeInTheDocument();
+    expect(screen.queryByText("5d 0h")).not.toBeInTheDocument();
+  });
+
+  // A column of em dashes reads as a broken readout rather than an absent one,
+  // and these rows are switch buttons, not a report. The active account's own
+  // readout keeps its dash — there the row exists to be read.
+  it("says nothing at all when the reset is unknown", () => {
+    target().usage = { sevenDay: { pct: 10 } };
+    render(<PopoverPanel />);
+
+    expect(screen.getByRole("button", { name: /Next/ }).textContent).not.toContain("—");
+  });
+
+  it("stays quiet for an account that cannot be switched to", () => {
+    target().usageStatus = "reloginrequired";
+    target().usage = {
+      sevenDay: { pct: 10, resetsAt: new Date(pinned.getTime() + 2 * 86_400_000).toISOString() },
+    };
+    render(<PopoverPanel />);
+
+    // When the account is unreachable, its quota is not what stands in the way.
+    expect(screen.queryByText("2d 0h")).not.toBeInTheDocument();
+    expect(screen.getByText("Re-login")).toBeInTheDocument();
+  });
+
+  // The staleness pill was the price of the reset column. Losing it silently
+  // from the active header too was the deliberate half of that trade.
+  it("no longer prints how old the reading is", () => {
+    render(<PopoverPanel />);
+
+    expect(screen.queryByText(/\d+[mhd] old/)).not.toBeInTheDocument();
+  });
+});
+
+/*
+ * Aliases are free text and domains have no length bound, so a name can be
+ * arbitrarily long. Truncation is CSS's job — jsdom has no layout — but the
+ * DOM contract that makes truncation safe is testable: the full value must
+ * still reach the accessibility tree and the title, or a clipped row becomes
+ * an unidentifiable one.
+ */
+describe("PopoverPanel long names", () => {
+  const LONG_DOMAIN = "yash@really-long-company-domain-name-with-subdomains.co.uk";
+  const LONG_ALIAS = "production-account-for-the-main-workspace-europe-west";
+  const target = () => fixture.environments[0]!.accounts[1]!;
+  const active = () => fixture.environments[0]!.accounts[0]!;
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mocks.status = status({ kind: "monitoring" });
+  });
+  afterEach(() => {
+    target().alias = "Next";
+    target().email = "next@example.com";
+    active().alias = "Active";
+    active().email = "active@example.com";
+  });
+
+  it("renders a long masked domain in full, and repeats it on the title", () => {
+    target().alias = undefined;
+    target().email = LONG_DOMAIN;
+    render(<PopoverPanel />);
+
+    const masked = "y•••@really-long-company-domain-name-with-subdomains.co.uk";
+    expect(screen.getByTitle(masked)).toHaveTextContent(masked);
+  });
+
+  it("does the same for a long alias on the active account", () => {
+    active().alias = LONG_ALIAS;
+    render(<PopoverPanel />);
+
+    expect(screen.getByTitle(LONG_ALIAS)).toHaveTextContent(LONG_ALIAS);
+  });
+
+  // The banner exists to show the countdown. A long name must not be able to
+  // take its place, so the name is the element that yields.
+  it("keeps the switch countdown alongside a long name in the warning banner", () => {
+    target().alias = LONG_ALIAS;
+    mocks.status = status({ kind: "warning", from: 1, to: 2, deadline: "2026-07-28T12:00:12Z" }, 2);
+    render(<PopoverPanel />);
+
+    // The name also appears on its own switch row, so scope to the banner.
+    const banner = screen.getByRole("status");
+    expect(within(banner).getByText(new RegExp(LONG_ALIAS))).toBeInTheDocument();
+    expect(within(banner).getByText(/switching in \d+s|switching now/)).toBeInTheDocument();
+  });
+
+  it("still shows a name with no @ in it rather than dropping the row", () => {
+    target().alias = undefined;
+    target().email = "not-an-email-address-just-a-long-token";
+    render(<PopoverPanel />);
+
+    expect(screen.getByTitle("not-an-email-address-just-a-long-token")).toBeInTheDocument();
   });
 });

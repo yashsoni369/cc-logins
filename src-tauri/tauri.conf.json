@@ -29,7 +29,7 @@
       {
         "label": "popover",
         "url": "popover.html",
-        "width": 340,
+        "width": 364,
         "height": 480,
         "resizable": false,
         "decorations": false,

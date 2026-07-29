@@ -535,7 +535,7 @@ table.accts tr.is-active td {
 .refresh-msg.err {
   color: var(--danger);
 }
-/* The popover is 340px wide, so a message beside the button would either
+/* The popover is 364px wide, so a message beside the button would either
    truncate or push the button off. Give it its own line instead — dropping it
    entirely would hide refresh failures. */
 .refresh.compact {
@@ -783,58 +783,86 @@ hr.rule {
   fill: var(--danger);
 }
 
-/* ─────────── dashboard: fleet ───────────
-   The fleet header and its rows share one column template, so they can only
-   drift together. Changing the grid means changing this one line. */
+/* ─────────── dashboard ───────────
+   Stacked bands, not cards. Each band is one question — how long does the
+   fleet last, how is the rotation behaving, which account, is the load
+   spread — and a rule between them is enough separation. Cards here would
+   box four answers that are meant to be read in sequence. */
 
-.fleet {
-  --fleet-cols: minmax(120px, 1.4fr) minmax(80px, 2fr) minmax(96px, 1fr) 78px;
-  display: flex;
-  flex-direction: column;
-  gap: 0;
+.dash .pane-head {
+  align-items: center;
 }
 
-/* Caption on its own line, the figure and its qualifier beneath it, and the
-   supporting numbers pushed right — all from one flat row of siblings. */
-.dash-headline {
+.rangepick {
   display: flex;
-  flex-wrap: wrap;
-  align-items: flex-end;
-  gap: 4px 12px;
-  padding-bottom: 18px;
-}
-.dash-cap {
-  font-family: var(--mono);
-  font-size: 10px;
-  letter-spacing: 0.1em;
-  text-transform: uppercase;
-  color: var(--faint);
-}
-.dash-headline > .dash-cap:first-child {
-  flex-basis: 100%;
-}
-.dash-headline > .dash-cap:last-child {
-  display: flex;
-  flex-direction: column;
-  align-items: flex-end;
+  align-items: baseline;
   gap: 2px;
   margin-left: auto;
-  text-align: right;
-  letter-spacing: 0.04em;
 }
-.dash-big {
+.rangepick .dot {
+  color: var(--faint);
+  font-size: 11px;
+}
+.rangepick button {
+  all: unset;
+  cursor: pointer;
+  padding: 2px 7px;
+  border-radius: var(--r);
   font-family: var(--mono);
-  font-variant-numeric: tabular-nums;
-  font-size: 34px;
-  line-height: 1.05;
-  letter-spacing: -0.02em;
+  font-size: 11px;
+  color: var(--muted);
 }
+.rangepick button:hover {
+  color: var(--ink);
+}
+.rangepick button[aria-pressed="true"] {
+  color: var(--ink);
+  background: var(--raised);
+}
+.rangepick button:focus-visible {
+  outline: 2px solid var(--interact);
+  outline-offset: 1px;
+}
+
+.band {
+  border-top: 1px solid var(--line-soft);
+  padding: 20px 0 6px;
+}
+.band:first-of-type {
+  border-top: 0;
+  padding-top: 4px;
+}
+.band-head {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  margin-bottom: 14px;
+  flex-wrap: wrap;
+}
+.band-head h2 {
+  margin: 0;
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.09em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+.band-head .sub {
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--faint);
+}
+.band-head .spacer {
+  flex: 1;
+}
+
 /* A projection, not a measurement. It has to look different from a number we
    actually read off the API — see PRODUCT.md's freshness rule. */
 .dash-qual {
   display: inline-flex;
   align-items: center;
   gap: 5px;
+  align-self: flex-start;
   font-size: 10px;
   letter-spacing: 0.06em;
   text-transform: uppercase;
@@ -842,105 +870,472 @@ hr.rule {
   border: 1px dashed var(--line);
   border-radius: 2px;
   padding: 1px 6px;
-  vertical-align: middle;
+}
+.dash-note {
+  margin: 14px 0 0;
+  font-size: 12px;
+  color: var(--muted);
+  max-width: 68ch;
 }
 
-.fleet-head {
-  display: grid;
-  grid-template-columns: var(--fleet-cols);
-  gap: 14px;
-  padding: 0 8px 7px;
+/* ── capacity ── */
+.cap {
+  display: flex;
+  align-items: flex-end;
+  gap: 14px 28px;
+  flex-wrap: wrap;
+}
+.cap-figure {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.cap-figure .lab {
   font-family: var(--mono);
   font-size: 10px;
-  letter-spacing: 0.08em;
+  letter-spacing: 0.1em;
   text-transform: uppercase;
-  color: var(--faint);
-  border-bottom: 1px solid var(--line);
+  color: var(--muted);
 }
-.fleet-head .r {
-  text-align: right;
+.cap-big {
+  font-size: 36px;
+  line-height: 1.05;
+  letter-spacing: -0.02em;
+}
+.cap-meta {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  padding-bottom: 4px;
+  font-size: 11px;
+  color: var(--muted);
 }
 
-.fleet-row {
-  display: grid;
-  grid-template-columns: var(--fleet-cols);
-  gap: 14px;
-  align-items: center;
+/* Headroom the switcher can actually reach, split by whose it is. Width
+   tracks free capacity, so the bar shrinks as the fleet is spent rather
+   than merely changing colour. */
+.pool {
+  flex: 1 1 300px;
+  min-width: 260px;
+}
+.pool-bar {
+  display: flex;
+  gap: 2px;
+  height: 16px;
+  margin-bottom: 7px;
+}
+.pool-seg {
+  position: relative;
+  flex-shrink: 1;
+  min-width: 3px;
+  background: var(--raised);
+  border-radius: 1px;
+  overflow: hidden;
+}
+.pool-seg i {
+  position: absolute;
+  inset: 0 auto 0 0;
+  display: block;
+  background: var(--ok-fill);
+}
+.pool-seg.caution i {
+  background: var(--caution-fill);
+}
+.pool-seg.danger i {
+  background: var(--danger-fill);
+}
+/* Unreadable usage is a distinct state, never a full or empty segment. */
+.pool-seg.unknown {
+  border: 1px dashed var(--line);
+}
+.pool-seg.unknown i {
+  display: none;
+}
+.pool-seg.out {
+  opacity: 0.4;
+}
+.pool-key {
+  display: flex;
+  gap: 6px 14px;
+  flex-wrap: wrap;
+  font-size: 11px;
+  color: var(--muted);
+}
+.pool-key b {
+  font-weight: 500;
+  color: var(--ink);
+}
+
+/* ── rotation chart ── */
+.chartwrap {
+  overflow-x: auto;
+}
+.fleetchart {
+  display: block;
   width: 100%;
-  padding: 9px 8px;
-  border: 0;
+  min-width: 480px;
+  height: 190px;
+}
+.grid-line {
+  stroke: var(--line-soft);
+  stroke-width: 1;
+}
+.axis-txt {
+  fill: var(--faint);
+  font-family: var(--mono);
+  font-size: 9px;
+}
+/* Identity by weight, never by hue — tokens.css reserves colour for quota
+   state, and a per-series palette would make 20% as loud as 95%. */
+.ln {
+  fill: none;
+  stroke: var(--faint);
+  stroke-width: 1.25;
+  stroke-linejoin: round;
+  stroke-linecap: round;
+}
+.ln.emph {
+  stroke: var(--ink);
+  stroke-width: 2;
+}
+.ln.dim {
+  stroke: var(--line);
+}
+.endcap {
+  fill: var(--ok);
+}
+.endcap.caution {
+  fill: var(--caution);
+}
+.endcap.danger {
+  fill: var(--danger);
+}
+.endlab {
+  font-family: var(--mono);
+  font-size: 9.5px;
+  fill: var(--muted);
+}
+.endlab.emph {
+  fill: var(--ink);
+}
+.thresh {
+  stroke: var(--caution);
+  stroke-width: 1;
+  stroke-dasharray: 2 3;
+  opacity: 0.55;
+}
+
+/* ── account rows ── */
+.rows {
+  display: flex;
+  flex-direction: column;
+}
+.row-shell {
   border-bottom: 1px solid var(--line-soft);
-  border-radius: 0;
-  background: transparent;
-  color: inherit;
-  font: inherit;
-  text-align: left;
+}
+.dash-row {
+  all: unset;
+  box-sizing: border-box;
+  display: grid;
+  width: 100%;
+  grid-template-columns: 14px minmax(90px, 1.5fr) auto 62px 78px;
+  align-items: center;
+  gap: 12px;
+  padding: 11px 8px;
+  font-size: 13px;
   cursor: pointer;
 }
-.fleet-row:hover {
+.dash-row:hover,
+.dash-row[aria-expanded="true"] {
   background: var(--surface);
 }
-.fleet-row:focus-visible {
+.dash-row:focus-visible {
   outline: 2px solid var(--interact);
   outline-offset: -2px;
 }
-/* The live account. Matches the accounts table's own active-row treatment so
-   "this is the one in use" reads the same on both screens. */
-.fleet-row.is-active {
-  background: var(--surface);
+.dash-row .chev {
+  color: var(--faint);
+  font-size: 9px;
+  display: inline-block;
 }
-.fleet-row.is-active:hover {
-  background: var(--raised);
+.dash-row[aria-expanded="true"] .chev {
+  color: var(--muted);
+  transform: rotate(90deg);
 }
-/* No stable key yet, so there is nothing to open. Must not look pressable. */
-.fleet-row:disabled,
-.fleet-row:not([role="button"]) {
-  cursor: default;
+@media (prefers-reduced-motion: no-preference) {
+  .dash-row .chev {
+    transition: transform 0.16s ease-out;
+  }
 }
-.fleet-row:disabled:hover,
-.fleet-row:not([role="button"]):hover {
-  background: transparent;
-}
-.fleet-row.is-active:not([role="button"]):hover {
-  background: var(--surface);
-}
-
-.fleet-who {
+.dash-row .row-who {
   display: flex;
   align-items: center;
-  gap: 6px;
+  gap: 8px;
   min-width: 0;
 }
-.fleet-who .alias {
+.dash-row .row-name {
+  font-weight: 550;
+  min-width: 56px;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  font-size: 13px;
 }
-
-.fleet-spark svg {
-  display: block;
-  width: 100%;
-  height: 24px;
+.dash-row .pill {
+  flex: none;
 }
-/* An account with no recorded history leaves this empty rather than drawing a
-   flat line at zero, which would read as "confirmed idle". */
-.fleet-spark:empty::after {
-  content: "";
-  display: block;
-  height: 24px;
-}
-
-.fleet-reset {
+.dash-row .row-cell {
   font-family: var(--mono);
   font-variant-numeric: tabular-nums;
   font-size: 12px;
   color: var(--muted);
   text-align: right;
 }
-.fleet-reset.unknown {
+.dash-row .row-cell small {
+  display: block;
+  font-size: 9px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
   color: var(--faint);
 }
+
+.drawer {
+  display: none;
+}
+.drawer.open {
+  display: block;
+  padding: 4px 8px 22px 34px;
+}
+@media (prefers-reduced-motion: no-preference) {
+  .drawer.open {
+    animation: drawer-drop 0.18s ease-out;
+  }
+  @keyframes drawer-drop {
+    from {
+      opacity: 0;
+      transform: translateY(-3px);
+    }
+    to {
+      opacity: 1;
+      transform: none;
+    }
+  }
+}
+.drawer .tabs {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  flex-wrap: wrap;
+  margin-bottom: 14px;
+}
+.drawer .tabs button {
+  all: unset;
+  cursor: pointer;
+  padding: 3px 9px;
+  border-radius: var(--r);
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--muted);
+}
+.drawer .tabs button:hover {
+  color: var(--ink);
+}
+.drawer .tabs button[aria-selected="true"] {
+  color: var(--ink);
+  background: var(--raised);
+}
+.drawer .tabs button:focus-visible {
+  outline: 2px solid var(--interact);
+  outline-offset: 1px;
+}
+.drawer .tabs .spacer {
+  flex: 1;
+}
+.drawer .narrow {
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--ink);
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: var(--r);
+  padding: 3px 6px;
+  cursor: pointer;
+}
+.duo {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(270px, 1fr));
+  gap: 18px;
+}
+.drawer .stats {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(190px, 1fr));
+  gap: 0 26px;
+  margin-top: 14px;
+}
+.drawer .stat {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  padding: 4px 0;
+  font-size: 12px;
+  border-bottom: 1px dotted var(--line-soft);
+}
+.drawer .stat .k {
+  color: var(--muted);
+}
+.drawer .stat .v {
+  margin-left: auto;
+  font-family: var(--mono);
+  font-variant-numeric: tabular-nums;
+  color: var(--ink);
+}
+.drawer .stat .v.caution {
+  color: var(--caution);
+}
+.drawer .stat .v.danger {
+  color: var(--danger);
+}
+
+.mrows {
+  display: flex;
+  flex-direction: column;
+  gap: 9px;
+}
+.mrow {
+  display: grid;
+  grid-template-columns: minmax(70px, 110px) 1fr 44px 58px;
+  align-items: center;
+  gap: 10px;
+}
+.mrow .mn {
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--ink);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.mrow .mt {
+  height: 6px;
+  background: var(--raised);
+  border-radius: 1px;
+  overflow: hidden;
+}
+.mrow .mt i {
+  display: block;
+  height: 100%;
+  background: var(--ok-fill);
+}
+.mrow .mt i.caution {
+  background: var(--caution-fill);
+}
+.mrow .mt i.danger {
+  background: var(--danger-fill);
+}
+.mrow .mv {
+  font-family: var(--mono);
+  font-variant-numeric: tabular-nums;
+  font-size: 11px;
+  text-align: right;
+  color: var(--muted);
+}
+.mrow .mr {
+  font-family: var(--mono);
+  font-size: 10px;
+  text-align: right;
+  color: var(--faint);
+}
+
+/* ── load balance ── */
+.lb-scroll {
+  overflow-x: auto;
+}
+.lb-grid {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 460px;
+}
+.lb-row {
+  display: grid;
+  grid-template-columns: 84px 1fr;
+  align-items: center;
+  gap: 10px;
+}
+.lb-lab {
+  font-family: var(--mono);
+  font-size: 10.5px;
+  color: var(--muted);
+  text-align: right;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.lb-cells {
+  display: grid;
+  gap: 2px;
+}
+.lb-c {
+  height: 13px;
+  border-radius: 1px;
+}
+.lb-foot {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  flex-wrap: wrap;
+  margin-top: 11px;
+  font-family: var(--mono);
+  font-size: 10px;
+  color: var(--muted);
+}
+.lb-key {
+  display: flex;
+  gap: 2px;
+}
+.lb-key i {
+  display: block;
+  width: 13px;
+  height: 13px;
+  border-radius: 1px;
+}
+.lb-foot-note {
+  margin-left: 10px;
+  color: var(--faint);
+}
+
+/* ── insights ── */
+.ins {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+  gap: 0 30px;
+}
+.ins-item {
+  padding: 11px 0;
+  border-bottom: 1px solid var(--line-soft);
+}
+.ins-hd {
+  margin: 0 0 3px;
+  font-size: 13px;
+  font-weight: 550;
+}
+.ins-hd b {
+  font-family: var(--mono);
+  font-variant-numeric: tabular-nums;
+  font-weight: 600;
+}
+.ins-hd b.caution {
+  color: var(--caution);
+}
+.ins-hd b.danger {
+  color: var(--danger);
+}
+.ins-bd {
+  margin: 0;
+  font-size: 12px;
+  color: var(--muted);
+  max-width: 62ch;
+}
+
 
 /* ─────────── dashboard: reset stagger ─────────── */
 
@@ -992,58 +1387,7 @@ text.stagger-axis {
   stroke-width: 1;
 }
 
-/* ─────────── dashboard: account analytics ─────────── */
-
-.analytics {
-  display: flex;
-  flex-direction: column;
-  gap: 18px;
-}
-.analytics-head {
-  display: flex;
-  align-items: center;
-  gap: 12px;
-  flex-wrap: wrap;
-}
-.analytics-head h3 {
-  margin: 0;
-}
-.btn-back {
-  font: inherit;
-  font-size: 12px;
-  padding: 4px 10px;
-  border: 1px solid var(--line);
-  border-radius: var(--r);
-  background: transparent;
-  color: var(--muted);
-  cursor: pointer;
-}
-.btn-back:hover {
-  background: var(--raised);
-  color: var(--ink);
-}
-.btn-back:focus-visible {
-  outline: 2px solid var(--interact);
-  outline-offset: 2px;
-}
-
-.split-grid {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
-  gap: 16px;
-}
-
-.model-rows {
-  display: flex;
-  flex-direction: column;
-  gap: 7px;
-}
-.model-rows .model-name {
-  font-size: 12px;
-  color: var(--muted);
-  width: 74px;
-  flex: none;
-}
+/* ─────────── dashboard: daily range chart ─────────── */
 
 .range-chart svg {
   display: block;
@@ -1326,6 +1670,22 @@ text.stagger-axis {
   line-height: 1.35;
 }
 /*
+ * "Switch planned to <alias>" carries a user-supplied name of any length. A
+ * flex item will not shrink below its content by default, so a long alias
+ * pushed the countdown out of a window that clips its overflow — losing the
+ * one number the banner exists to show. The message yields; the countdown
+ * never does.
+ */
+.pop .banner > span:first-child {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.pop .banner .num {
+  flex: none;
+}
+/*
  * The popover window (see src/popover.tsx, src/components/PopoverPanel.tsx)
  * is its own Vite/Tauri entry, but loads this same stylesheet so its markup
  * can reuse every primitive above (.pill, .btn, .banner, .sw, .meter via
@@ -1336,7 +1696,7 @@ text.stagger-axis {
 .pop {
   display: flex;
   flex-direction: column;
-  width: 340px;
+  width: 364px;
   background: var(--bg);
   color: var(--ink);
   border-radius: 6px;
@@ -1412,9 +1772,75 @@ text.stagger-axis {
 .pop-item.next {
   background: var(--surface);
 }
-/* UsageMeter's own .meter is reused unmodified; this just pins it right. */
-.pop-item .meter {
+/*
+ * Pins the meter and the reset time to the trailing edge as a group, so bars
+ * form a column down the list instead of each row packing from the left behind
+ * whatever pills it happens to carry.
+ *
+ * This has to sit on the WRAPPER, not on UsageMeter's own .meter. The meter is
+ * wrapped in a div to carry the dimming style, so the wrapper is the flex item
+ * — an auto margin on .meter applies inside that wrapper and moves nothing.
+ * The old rule did exactly that and had never taken effect.
+ */
+.pop-item .pop-meter {
   margin-left: auto;
+  flex: none;
+}
+.pop-item .pill {
+  flex: none;
+}
+
+/*
+ * When the window gating this account frees up. Fixed min-width so the times
+ * form a column and the meters above them stay aligned, rather than each row
+ * measuring itself against its own string.
+ *
+ * --muted, not --faint: at 11px --faint measures 3.04:1 dark and 3.66:1 light,
+ * under the 4.5:1 floor for body text.
+ */
+.pop-item .rst {
+  min-width: 44px;
+  flex: none;
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--muted);
+  text-align: right;
+  white-space: nowrap;
+}
+
+/*
+ * Aliases are free text and emails carry unbounded domains, so both ends of
+ * this need pinning. Without the shrink allowance a long name wraps the row to
+ * five lines; with an unbounded one it collapses to nothing behind a wide
+ * status pill, leaving a row you cannot identify. 64px is roughly eight
+ * characters — never the whole name, always enough to tell two accounts apart.
+ * The full value is on the element's title.
+ */
+.pop-item .alias {
+  min-width: 64px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+/*
+ * Same wrap, but here it shoves the entire quota block down the panel.
+ *
+ * No 64px floor: the header carries one narrow pill ("active" or a percentage)
+ * and nothing else competing, so the name cannot be squeezed out of existence.
+ * A floor here would only strand a short name a third of an inch from its own
+ * pill.
+ */
+.pop-head .who {
+  flex-wrap: nowrap;
+}
+.pop-head .who .alias {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.pop-head .who .pill {
+  flex: none;
 }
 .pop-item.dim {
   color: var(--faint);

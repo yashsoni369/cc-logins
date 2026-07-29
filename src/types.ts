@@ -144,13 +144,31 @@ export function bindingWindows(u: Usage | undefined): Array<[string, number]> {
 }
 
 /**
+ * The window that gates this account — the highest-utilised of them.
+ *
+ * Anything showing a percentage *and* a reset must read both from here. Taking
+ * the percentage from the binding window and the reset from `fiveHour` would
+ * pair a number with the wrong clock, which is worse than showing neither.
+ */
+export function bindingWindow(u: Usage | undefined): UsageWindow | null {
+  if (!u) return null;
+  const windows: UsageWindow[] = [];
+  if (u.fiveHour) windows.push(u.fiveHour);
+  if (u.sevenDay) windows.push(u.sevenDay);
+  for (const scoped of u.scoped ?? []) windows.push(scoped);
+
+  let binding: UsageWindow | null = null;
+  for (const candidate of windows) if (!binding || candidate.pct > binding.pct) binding = candidate;
+  return binding;
+}
+
+/**
  * Utilisation of the binding window — the highest of them. This is the number
  * the tray shows. Returns null when usage is unknown, which callers must treat
  * as "never auto-skip", never as zero.
  */
 export function bindingUtilisation(u: Usage | undefined): number | null {
-  const pcts = bindingWindows(u).map(([, p]) => p);
-  return pcts.length ? Math.max(...pcts) : null;
+  return bindingWindow(u)?.pct ?? null;
 }
 
 /** Remaining percentage before the account hits a limit. */
