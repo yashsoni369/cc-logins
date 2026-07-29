@@ -13,11 +13,13 @@ homepage = "https://github.com/yashsoni369/cc-logins"
 # This is an application, never a published crate.
 publish = false
 edition = "2021"
-# 1.81, not Tauri's own 1.77 floor: `resilience.rs`'s panic hook takes a
-# `std::panic::PanicHookInfo`, which was only stabilised (renamed from
-# `PanicInfo`) in 1.81. Declaring 1.77 was inaccurate — `cargo clippy` caught
-# it via `clippy::incompatible_msrv`.
-rust-version = "1.81"
+# 1.85, driven by `sha2`/`digest` 0.11, which both declare it. Cargo's v2
+# resolver does not enforce a dependency's `rust-version`, so leaving this at
+# the old 1.81 would not fail here — it would fail at compile time for anyone
+# on 1.81–1.84, which is exactly the kind of lie this field exists to prevent.
+# (1.81 was itself required by `resilience.rs`'s panic hook, which takes a
+# `std::panic::PanicHookInfo` — stabilised, renamed from `PanicInfo`, in 1.81.)
+rust-version = "1.85"
 license = "MIT"
 
 # Portions of the credential, path and usage logic are ported from

@@ -252,7 +252,7 @@ impl JournalStore {
 }
 
 pub fn sha256(bytes: &[u8]) -> String {
-    format!("sha256:{:x}", Sha256::digest(bytes))
+    format!("sha256:{}", crate::hex::lower(&Sha256::digest(bytes)))
 }
 
 fn validate(journal: &SwitchJournal) -> Result<(), JournalError> {

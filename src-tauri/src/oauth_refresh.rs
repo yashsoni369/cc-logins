@@ -54,7 +54,10 @@ pub enum CompareAndStore {
 }
 
 pub fn credential_generation(credentials: &str) -> String {
-    format!("sha256-full:{:x}", Sha256::digest(credentials.as_bytes()))
+    format!(
+        "sha256-full:{}",
+        crate::hex::lower(&Sha256::digest(credentials.as_bytes()))
+    )
 }
 
 pub trait GenerationStore: Send + Sync {
@@ -109,7 +112,10 @@ impl RefreshLeaseProvider for FileRefreshLeases {
         &'a self,
         stable_key: &'a str,
     ) -> oauth::OAuthFuture<'a, Result<Box<dyn LeaseGuard>, String>> {
-        let lock_name = format!("{:x}.lock", Sha256::digest(stable_key.as_bytes()));
+        let lock_name = format!(
+            "{}.lock",
+            crate::hex::lower(&Sha256::digest(stable_key.as_bytes()))
+        );
         let path = self.root.join(lock_name);
         let timeout = self.timeout;
         Box::pin(async move {

@@ -98,7 +98,7 @@ pub fn credential_fingerprint(credentials: &str) -> Option<String> {
 fn sha256_hex(input: &str) -> String {
     let mut hasher = Sha256::new();
     hasher.update(input.as_bytes());
-    format!("{:x}", hasher.finalize())
+    crate::hex::lower(&hasher.finalize())
 }
 
 /// Return whether an OAuth token is expired or about to expire (5-minute
