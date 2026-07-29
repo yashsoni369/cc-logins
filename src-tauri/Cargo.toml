@@ -60,7 +60,7 @@ tempfile = "3"
 tiny-skia = "0.12"
 
 # Local usage history. Bundled so no system SQLite is required.
-rusqlite = { version = "0.32", features = ["bundled", "chrono"] }
+rusqlite = { version = "0.40", features = ["bundled", "chrono"] }
 
 log = "0.4"
 env_logger = "0.11"
