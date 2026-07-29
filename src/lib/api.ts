@@ -497,6 +497,7 @@ export const DEFAULT_SETTINGS: Settings = {
   notifyOnExhausted: true,
   notifyOnExpiry: false,
   startAtLogin: false,
+  autoCheckUpdates: true,
   historyRetentionDays: 14,
   theme: "system",
 };

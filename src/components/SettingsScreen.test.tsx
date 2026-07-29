@@ -3,6 +3,7 @@ import { describe, expect, it, vi } from "vitest";
 
 import SettingsScreen from "@/components/SettingsScreen";
 import type { UseSettingsResult } from "@/lib/useSettings";
+import type { UseUpdateResult } from "@/lib/useUpdate";
 import type { SettingsSnapshot } from "@/types";
 
 const confirmed: SettingsSnapshot = {
@@ -20,6 +21,7 @@ const confirmed: SettingsSnapshot = {
     notifyOnExhausted: true,
     notifyOnExpiry: false,
     startAtLogin: false,
+    autoCheckUpdates: true,
     historyRetentionDays: 14,
     theme: "system",
   },
@@ -38,6 +40,17 @@ function owner(update: UseSettingsResult["update"]): UseSettingsResult {
   };
 }
 
+/** No update found, nothing in flight — the update row must not affect these assertions. */
+const noUpdate: UseUpdateResult = {
+  status: null,
+  checking: false,
+  install: { kind: "idle" },
+  blocked: null,
+  available: false,
+  check: async () => {},
+  startInstall: async () => {},
+};
+
 describe("SettingsScreen", () => {
   it("sends single-field toggle and debounced threshold patches", async () => {
     vi.useFakeTimers();
@@ -48,6 +61,7 @@ describe("SettingsScreen", () => {
         theme="system"
         onThemeChange={vi.fn()}
         themeError={null}
+        update={noUpdate}
       />,
     );
 
@@ -70,6 +84,7 @@ describe("SettingsScreen", () => {
         theme="system"
         onThemeChange={vi.fn()}
         themeError={null}
+        update={noUpdate}
       />,
     );
 

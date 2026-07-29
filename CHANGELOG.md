@@ -11,7 +11,23 @@ A breaking change to any of those bumps the minor version, since major is pinned
 
 ## [Unreleased]
 
-Nothing yet.
+### Added
+
+- In-app updates. The app checks GitHub for a newer release shortly after launch and then
+  once a day, notifies you once per version, and shows a dot on Settings while one is
+  waiting. Settings → About installs it: the download is verified against a signing key
+  compiled into this build, then the app restarts.
+
+  Automatic checking is a setting and can be turned off, leaving the manual check working.
+  Installing is refused while a switch is running, is about to run, or while credential
+  recovery is outstanding — an update restarts the app, and that must not interrupt a
+  credential rotation.
+
+  Because an update arrives through the app rather than a browser download, it carries no
+  mark of the web and never reaches Windows SmartScreen. The first install still warns;
+  every update after it does not.
+
+  `0.1.0` has no updater, so upgrading from it has to be done by hand once.
 
 ## [0.1.0] - 2026-07-29
 

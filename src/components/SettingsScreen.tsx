@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import AboutSection from "./AboutSection";
 import { IpcError } from "../lib/api";
 import type { UseSettingsResult } from "../lib/useSettings";
+import type { UseUpdateResult } from "../lib/useUpdate";
 import type { Theme } from "../lib/useTheme";
 import type { Settings } from "../types";
 
@@ -106,6 +107,8 @@ const THEME_OPTIONS: Array<SegOption<Theme>> = [
 
 interface SettingsScreenProps {
   runtime: UseSettingsResult;
+  /** Update lifecycle, owned by `useUpdate()` in `App.tsx` so the background scheduler and this screen show the same answer. */
+  update: UseUpdateResult;
   /** Current theme preference — owned by `useTheme()` in `App.tsx`, passed down so this control and the theme actually applied to the window never disagree. */
   theme: Theme;
   onThemeChange: (theme: Theme) => void;
@@ -126,7 +129,13 @@ interface SettingsScreenProps {
  * the backend's *returned* (clamped) settings rather than the value sent —
  * echoing the request would show a number that was not actually saved.
  */
-export default function SettingsScreen({ runtime, theme, onThemeChange, themeError }: SettingsScreenProps) {
+export default function SettingsScreen({
+  runtime,
+  theme,
+  onThemeChange,
+  themeError,
+  update: updater,
+}: SettingsScreenProps) {
   const { settings, live, loading, update } = runtime;
   const [saveError, setSaveError] = useState<string | null>(null);
 
@@ -320,9 +329,26 @@ export default function SettingsScreen({ runtime, theme, onThemeChange, themeErr
             </span>
           </div>
         </div>
+        <div className="field">
+          <div className="k">
+            Check for updates automatically
+            <i>Asks GitHub once a day. The only request this app makes outside Anthropic.</i>
+          </div>
+          <div className="v">
+            <Toggle
+              checked={settings.autoCheckUpdates}
+              onChange={(v) => commitField("autoCheckUpdates", v)}
+              label={settings.autoCheckUpdates ? "Enabled" : "Disabled"}
+            />
+            <span style={{ fontSize: 12, color: "var(--muted)", maxWidth: "52ch" }}>
+              Only the current version is sent, and nothing is installed without you asking.
+              Turning this off leaves the manual check below working.
+            </span>
+          </div>
+        </div>
       </div>
 
-      <AboutSection />
+      <AboutSection update={updater} />
     </div>
   );
 }
