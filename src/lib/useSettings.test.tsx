@@ -38,6 +38,7 @@ function snapshot(revision: number, threshold = 90): SettingsSnapshot {
       autoCheckUpdates: true,
       historyRetentionDays: 14,
       theme: "system",
+      clockFormat: "system",
     },
   };
 }

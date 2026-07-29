@@ -1,9 +1,11 @@
 import { useCallback, useEffect, useState, type ReactNode } from "react";
 import AccountsScreen from "./components/AccountsScreen";
-import HistoryScreen from "./components/HistoryScreen";
+import DashboardScreen from "./components/DashboardScreen";
 import EnvironmentsScreen from "./components/EnvironmentsScreen";
 import SettingsScreen from "./components/SettingsScreen";
 import FirstRunScreen from "./components/FirstRunScreen";
+import { LoadingPane } from "./components/Loading";
+import { ClockFormatProvider } from "./lib/clockFormat";
 import { useSnapshot } from "./lib/useSnapshot";
 import { useTheme, type Theme } from "./lib/useTheme";
 import { useSettings } from "./lib/useSettings";
@@ -20,11 +22,11 @@ import {
 } from "./lib/api";
 import type { DaemonPhase, Snapshot } from "./types";
 
-type Screen = "accounts" | "history" | "environments" | "settings";
+type Screen = "dashboard" | "accounts" | "environments" | "settings";
 
 const NAV_ITEMS: Array<{ id: Screen; label: string }> = [
+  { id: "dashboard", label: "Dashboard" },
   { id: "accounts", label: "Accounts" },
-  { id: "history", label: "History" },
   { id: "environments", label: "Environments" },
   { id: "settings", label: "Settings" },
 ];
@@ -117,7 +119,7 @@ interface EnableError {
 
 /** Shared across every mutation below: the backend's single credential lock is held elsewhere. */
 const BUSY_MESSAGE =
-  "Another process (very likely the cswap CLI) is using your accounts right now. Try again in a moment.";
+  "Another process is using your accounts right now. Try again in a moment.";
 
 export function daemonPhaseLabel(phase: DaemonPhase | undefined, strategy: string | undefined): string {
   const strategyLabel =
@@ -239,7 +241,7 @@ function SampleDataBanner() {
 }
 
 export default function App() {
-  const [screen, setScreen] = useState<Screen>("accounts");
+  const [screen, setScreen] = useState<Screen>("dashboard");
   const { snapshot, live, loading, error, refresh } = useSnapshot();
   const settings = useSettings();
   const daemon = useDaemonStatus();
@@ -413,8 +415,9 @@ export default function App() {
   if (loading && !snapshot) {
     return (
       <div className="win">
-        <div className="pane" style={{ justifyContent: "center", alignItems: "center" }}>
-          <span className="sub">Loading…</span>
+        {/* `.loading-pane` fills and centres itself, so the pane needs no inline centring. */}
+        <div className="pane">
+          <LoadingPane />
         </div>
       </div>
     );
@@ -461,72 +464,84 @@ export default function App() {
     );
   }
 
+  // Wraps every screen, so AccountsScreen and the two-levels-deep
+  // AccountDetails read the clock preference off context instead of it being
+  // prop-drilled through rows. Mounted only here, on the branch that renders
+  // real data: the early returns above (first-run, loading, error, no
+  // accounts) show no times at all, and `useClockFormat()` falls back to
+  // "system" without a provider anyway.
   return (
-    <div className={`win${!live ? " has-banner" : ""}`}>
-      {!live && <SampleDataBanner />}
-      <div className="winbody">
-        <div className="nav">
-          {NAV_ITEMS.map((item) => (
-            <button
-              key={item.id}
-              type="button"
-              className={`navlink${screen === item.id ? " is-active" : ""}`}
-              onClick={() => setScreen(item.id)}
-            >
-              {item.label}
-              {item.id === "settings" && update.available && (
-                <span className="navlink-dot" aria-label="Update available" />
-              )}
-            </button>
-          ))}
-          <div className="grp">Auto-switch</div>
-          <span>{daemonPhaseLabel(daemonPhase, settings.settings?.strategy)}</span>
+    <ClockFormatProvider value={settings.settings?.clockFormat ?? "system"}>
+      <div className={`win${!live ? " has-banner" : ""}`}>
+        {!live && <SampleDataBanner />}
+        <div className="winbody">
+          <div className="nav">
+            {NAV_ITEMS.map((item) => (
+              <button
+                key={item.id}
+                type="button"
+                className={`navlink${screen === item.id ? " is-active" : ""}`}
+                onClick={() => setScreen(item.id)}
+              >
+                {item.label}
+                {item.id === "settings" && update.available && (
+                  <span className="navlink-dot" aria-label="Update available" />
+                )}
+              </button>
+            ))}
+            <div className="grp">Auto-switch</div>
+            <span>{daemonPhaseLabel(daemonPhase, settings.settings?.strategy)}</span>
 
-          <NavThemeControl theme={theme.theme} onChange={theme.setTheme} />
+            <NavThemeControl theme={theme.theme} onChange={theme.setTheme} />
+          </div>
+
+          <main className="main-content">
+            {recoveryBlocked && <MainRecoveryBanner phase={daemonPhase} />}
+            {screen === "accounts" && (
+              <AccountsScreen
+                snapshot={displaySnapshot}
+                onSwitch={handleSwitch}
+                pendingAccount={pendingAccount}
+                switchError={switchError}
+                onAddAccount={handleAddAccount}
+                pendingAddAccount={pendingAddAccount}
+                addAccountError={addAccountError}
+                onAddToken={handleAddToken}
+                pendingAddToken={pendingAddToken}
+                addTokenError={addTokenError}
+                onInteractiveLogin={handleInteractiveLogin}
+                pendingInteractiveLogin={pendingInteractiveLogin}
+                interactiveLoginError={interactiveLoginError}
+                onRelogin={handleRelogin}
+                pendingReloginAccount={pendingReloginAccount}
+                reloginError={reloginError}
+                onSetEnabled={handleSetEnabled}
+                pendingEnableAccount={pendingEnableAccount}
+                enableError={enableError}
+                mutationInFlight={mutationInFlight}
+                degraded={error !== null}
+              />
+            )}
+            {screen === "dashboard" && (
+              <DashboardScreen
+                snapshot={displaySnapshot}
+                settingsThreshold={settings.settings?.threshold ?? 90}
+                degraded={error !== null}
+              />
+            )}
+            {screen === "environments" && <EnvironmentsScreen environments={displaySnapshot.environments} />}
+            {screen === "settings" && (
+              <SettingsScreen
+                runtime={settings}
+                theme={theme.theme}
+                onThemeChange={theme.setTheme}
+                themeError={theme.error}
+                update={update}
+              />
+            )}
+          </main>
         </div>
-
-        <main className="main-content">
-          {recoveryBlocked && <MainRecoveryBanner phase={daemonPhase} />}
-          {screen === "accounts" && (
-            <AccountsScreen
-              snapshot={displaySnapshot}
-              onSwitch={handleSwitch}
-              pendingAccount={pendingAccount}
-              switchError={switchError}
-              onAddAccount={handleAddAccount}
-              pendingAddAccount={pendingAddAccount}
-              addAccountError={addAccountError}
-              onAddToken={handleAddToken}
-              pendingAddToken={pendingAddToken}
-              addTokenError={addTokenError}
-              onInteractiveLogin={handleInteractiveLogin}
-              pendingInteractiveLogin={pendingInteractiveLogin}
-              interactiveLoginError={interactiveLoginError}
-              onRelogin={handleRelogin}
-              pendingReloginAccount={pendingReloginAccount}
-              reloginError={reloginError}
-              onSetEnabled={handleSetEnabled}
-              pendingEnableAccount={pendingEnableAccount}
-              enableError={enableError}
-              mutationInFlight={mutationInFlight}
-              degraded={error !== null}
-            />
-          )}
-          {screen === "history" && (
-            <HistoryScreen settingsThreshold={settings.settings?.threshold ?? 90} />
-          )}
-          {screen === "environments" && <EnvironmentsScreen environments={displaySnapshot.environments} />}
-          {screen === "settings" && (
-            <SettingsScreen
-              runtime={settings}
-              theme={theme.theme}
-              onThemeChange={theme.setTheme}
-              themeError={theme.error}
-              update={update}
-            />
-          )}
-        </main>
       </div>
-    </div>
+    </ClockFormatProvider>
   );
 }

@@ -44,7 +44,7 @@ pub enum IpcError {
     Unreachable(String),
     /// The credential store could not be read or written.
     Credential(String),
-    /// A lock is held by another process (very likely the `cswap` CLI).
+    /// A lock is held by another process (very likely Claude Code itself).
     Busy(String),
     /// The interactive login's terminal window closed before any credential
     /// appeared. The ordinary "the user changed their mind" outcome, not a
@@ -556,14 +556,6 @@ pub async fn set_account_enabled(
     Ok(snap)
 }
 
-// NOTE: `switcher::import_from_cswap` is deliberately NOT exposed as a command.
-//
-// It exists as a one-off migration utility, not a product feature. Offering
-// "import from cswap" in the UI would frame this app as a companion to that
-// CLI rather than a standalone tool, which is not what it is. The function
-// stays (it is tested, and useful for seeding a vault during development) but
-// nothing user-facing reaches it.
-
 // ─── application state ───────────────────────────────────────────────────────
 
 /// Long-lived state, created once at startup and injected into commands.
@@ -712,6 +704,32 @@ pub fn history_series(
         .map_err(|e| IpcError::Internal(e.to_string()))
 }
 
+/// Raw samples for one account over a recent window, for the Dashboard.
+///
+/// Unlike [`history_series`], this keeps the intraday shape, the 5h/7d split
+/// and the per-model scoped windows instead of averaging them into one number
+/// per day. Same failure posture: no history yet is an empty series, not an
+/// error, so the UI can say "no history yet" honestly.
+#[tauri::command]
+pub fn history_samples(
+    state: tauri::State<'_, AppState>,
+    account_key: String,
+    hours: Option<i64>,
+) -> IpcResult<Vec<crate::history::Sample>> {
+    let Some(h) = state.history.as_ref() else {
+        return Ok(Vec::new());
+    };
+    // Clamped to the raw retention window: asking for more would silently
+    // return only what survived pruning, which reads as a gap in usage.
+    let hours = hours
+        .unwrap_or(24)
+        .clamp(1, crate::history::DEFAULT_RAW_RETENTION_DAYS * 24);
+    let until = chrono::Utc::now();
+    let since = until - chrono::Duration::hours(hours);
+    h.series(&account_key, since, until)
+        .map_err(|e| IpcError::Internal(e.to_string()))
+}
+
 /// Whether history is actually available this session.
 ///
 /// The UI must be able to say "no history yet" honestly instead of rendering an
@@ -728,7 +746,7 @@ pub fn history_available(state: tauri::State<'_, AppState>) -> bool {
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DataLocations {
-    /// This app's own account vault — never the `cswap` CLI's directory.
+    /// This app's own account vault — never another tool's directory.
     pub account_vault: String,
     /// Settings file and history database.
     pub data_dir: String,

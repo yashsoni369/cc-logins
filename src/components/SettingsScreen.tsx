@@ -1,31 +1,13 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import AboutSection from "./AboutSection";
-import { IpcError } from "../lib/api";
-import type { UseSettingsResult } from "../lib/useSettings";
+import { Loading } from "./Loading";
+import Toggle from "./Toggle";
 import type { UseUpdateResult } from "../lib/useUpdate";
+import { IpcError } from "../lib/api";
+import type { ClockFormat } from "../lib/time";
+import type { UseSettingsResult } from "../lib/useSettings";
 import type { Theme } from "../lib/useTheme";
 import type { Settings } from "../types";
-
-/** A `.toggle`/`.sw` switch, made operable: click or Enter/Space to flip it. */
-function Toggle({ checked, onChange, label }: { checked: boolean; onChange: (v: boolean) => void; label: string }) {
-  return (
-    <span
-      className="toggle"
-      role="switch"
-      aria-checked={checked}
-      tabIndex={0}
-      onClick={() => onChange(!checked)}
-      onKeyDown={(e) => {
-        if (e.key === "Enter" || e.key === " ") {
-          e.preventDefault();
-          onChange(!checked);
-        }
-      }}
-    >
-      <span className={`sw${checked ? " on" : ""}`}></span> {label}
-    </span>
-  );
-}
 
 interface SegOption<T extends string> {
   id: T;
@@ -103,6 +85,12 @@ const THEME_OPTIONS: Array<SegOption<Theme>> = [
   { id: "day", label: "Day" },
   { id: "night", label: "Night" },
   { id: "system", label: "System" },
+];
+
+const CLOCK_FORMAT_OPTIONS: Array<SegOption<ClockFormat>> = [
+  { id: "system", label: "System" },
+  { id: "12h", label: "12-hour" },
+  { id: "24h", label: "24-hour" },
 ];
 
 interface SettingsScreenProps {
@@ -196,7 +184,7 @@ export default function SettingsScreen({
         <div className="pane-head">
           <h3>Settings</h3>
         </div>
-        <span className="sub">Loading…</span>
+        <Loading />
       </div>
     );
   }
@@ -226,6 +214,21 @@ export default function SettingsScreen({
           </div>
           <div className="v">
             <Segmented ariaLabel="Theme" value={theme} onChange={onThemeChange} options={THEME_OPTIONS} />
+          </div>
+        </div>
+
+        <div className="field">
+          <div className="k">
+            Time format
+            <i>How reset and measurement times are shown.</i>
+          </div>
+          <div className="v">
+            <Segmented
+              ariaLabel="Time format"
+              value={settings.clockFormat}
+              onChange={(v) => commitField("clockFormat", v)}
+              options={CLOCK_FORMAT_OPTIONS}
+            />
           </div>
         </div>
 
@@ -322,13 +325,14 @@ export default function SettingsScreen({
           </div>
           <div className="v">
             <span style={{ fontSize: 12, color: "var(--muted)", maxWidth: "52ch" }}>
-              This app keeps your accounts in its own folder, so a fault in either this app
-              or the <span className="num">cswap</span> CLI can only affect its own store.
+              This app keeps your accounts in its own folder, separate from any other
+              tool&apos;s, so a fault on either side can only affect its own store.
               Switching still installs the chosen login into Claude Code&apos;s official
-              location, which is the only thing the two tools share.
+              location, which is the only thing anything else here touches.
             </span>
           </div>
         </div>
+
         <div className="field">
           <div className="k">
             Check for updates automatically

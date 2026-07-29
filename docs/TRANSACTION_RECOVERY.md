@@ -9,18 +9,20 @@ switch as a recoverable transaction.
 
 The lock order is fixed:
 
-1. `<cswap-store>/.lock`, only when a real cswap store already exists;
-2. `<CLAUDE_CONFIG_DIR>/.oauth_refresh.lock`;
-3. the sibling legacy credential lock (normally `~/.claude.lock`);
-4. the global-config lock (normally `~/.claude.json.lock`);
-5. `<cc-logins-account-vault>/.lock`.
+1. `<CLAUDE_CONFIG_DIR>/.oauth_refresh.lock`;
+2. the sibling legacy credential lock (normally `~/.claude.lock`);
+3. the global-config lock (normally `~/.claude.json.lock`);
+4. `<cc-logins-account-vault>/.lock`.
 
-The Claude directory-lock paths and timing match Claude Code 2.1.218 as represented by pinned cswap
-commit `65d208081a4985b9fd1786bc258d5172d196bee2`: credential locks become stale after 60 seconds and
-the config lock after 10 seconds. CC Logins refreshes lock mtimes every three seconds. Switching and
-identity/usage lookups never hold the full lock set across network work. Active-token refresh is the
-same bounded exception as current cswap: its six-second grant POST holds only the optional cswap,
-Claude credential, and GUI vault locks; it never holds or later nests the config lock. A shared
+These coordinate with Claude Code and with other CC Logins processes. There is no
+coordination with any third-party switcher — this app does not read or lock another
+tool's store.
+
+The Claude directory-lock paths and timing match Claude Code 2.1.218: credential locks become stale
+after 60 seconds and the config lock after 10 seconds. CC Logins refreshes lock mtimes every three
+seconds. Switching and identity/usage lookups never hold the full lock set across network work.
+Active-token refresh is a bounded exception: its six-second grant POST holds only the Claude
+credential and GUI vault locks; it never holds or later nests the config lock. A shared
 per-account refresh lease precedes that set and also surrounds inactive refreshes, preventing a
 stale active/inactive classification from consuming one rotating grant twice.
 
@@ -30,8 +32,8 @@ Before a switch takes any mutation lock, CC Logins resolves the live OAuth profi
 that verdict is accepted only if the live credential generation is unchanged. Bytes positively
 attributed to another or recycled account are saved to the unclaimed safety store and are never
 written into the configured outgoing slot. Wiped token fields likewise cannot replace a usable slot
-backup. If the profile oracle is unavailable or incomplete, switching keeps cswap's fail-open rule
-for legitimate local token rotations.
+backup. If the profile oracle is unavailable or incomplete, switching fails open for legitimate
+local token rotations.
 
 Usage collection applies the same ownership boundary. A stored-backup lineage match is sufficient;
 otherwise, a successful usage response is assigned to the configured slot only when the profile

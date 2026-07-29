@@ -1,10 +1,9 @@
 //! Persisted application settings.
 //!
-//! Stored as JSON in the app's own data directory, deliberately NOT in
-//! `cswap`'s `settings.json`. Sharing that file would mean two processes
-//! writing the same config with no coordination, and a partial write from
-//! either could leave the CLI unable to start. Interop is a promise about
-//! *credential* state, not about config.
+//! Stored as JSON in the app's own data directory, never in another tool's
+//! settings file. Sharing one would mean two processes writing the same
+//! config with no coordination, and a partial write from either could leave
+//! the other unable to start.
 //!
 //! Key names and defaults deliberately mirror `cswap`'s (`autoswitch.threshold`
 //! and friends) so a user reading both tools sees the same vocabulary and the
@@ -83,6 +82,41 @@ impl<'de> Deserialize<'de> for Theme {
     }
 }
 
+/// How clock times are rendered across the app.
+///
+/// Persisted rather than read from the OS at each launch: the frontend shows
+/// times in several places at once (history, next-reset, tray tooltips) and
+/// they have to agree, so one stored answer beats each view guessing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize)]
+pub enum ClockFormat {
+    /// Follow the OS locale, live — the frontend formats without an explicit
+    /// `hour12`, so the user's regional setting governs.
+    #[default]
+    #[serde(rename = "system")]
+    System,
+    #[serde(rename = "12h")]
+    H12,
+    #[serde(rename = "24h")]
+    H24,
+}
+
+impl<'de> Deserialize<'de> for ClockFormat {
+    /// Tolerant, for the same reason as [`Theme`]: an unrecognised value in a
+    /// settings file must cost one field, never the whole file. The spellings
+    /// are the ones a human hand-editing the file or another tool writing it
+    /// would plausibly reach for, including the `hourCycle` names (`h12`/`h23`)
+    /// the frontend's own formatter uses.
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        let raw = String::deserialize(d)?;
+        Ok(match raw.trim().to_ascii_lowercase().as_str() {
+            "12h" | "12" | "12-hour" | "h12" | "ampm" => Self::H12,
+            "24h" | "24" | "24-hour" | "h23" | "military" => Self::H24,
+            "system" | "auto" | "locale" => Self::System,
+            _ => Self::default(),
+        })
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
 pub struct Settings {
@@ -131,6 +165,9 @@ pub struct Settings {
     /// Colour theme for the app windows.
     pub theme: Theme,
 
+    /// 12- or 24-hour clocks, so every view agrees on how a time reads.
+    pub clock_format: ClockFormat,
+
     /// Days of raw history kept before downsampling to daily rollups.
     pub history_retention_days: i64,
 }
@@ -152,6 +189,7 @@ impl Default for Settings {
             start_at_login: false,
             auto_check_updates: true,
             theme: Theme::default(),
+            clock_format: ClockFormat::default(),
             history_retention_days: 14,
         }
     }
@@ -203,6 +241,7 @@ pub struct SettingsPatch {
     pub start_at_login: Option<bool>,
     pub auto_check_updates: Option<bool>,
     pub theme: Option<Theme>,
+    pub clock_format: Option<ClockFormat>,
     pub history_retention_days: Option<i64>,
 }
 
@@ -395,6 +434,9 @@ fn apply_patch(settings: &mut Settings, patch: SettingsPatch) {
     if let Some(value) = patch.theme {
         settings.theme = value;
     }
+    if let Some(value) = patch.clock_format {
+        settings.clock_format = value;
+    }
     if let Some(value) = patch.history_retention_days {
         settings.history_retention_days = value;
     }
@@ -564,8 +606,8 @@ mod tests {
 
     #[test]
     fn an_old_file_with_the_removed_storage_mode_key_still_loads_with_its_other_fields_intact() {
-        // `storageMode` used to choose between this app's own vault and the
-        // shared `cswap` directory; that choice no longer exists (the vault
+        // `storageMode` used to choose between this app's own vault and a
+        // shared external directory; that choice no longer exists (the vault
         // is now always ours — see `paths::backup_root`), so the field is
         // gone from `Settings` entirely. A settings file a previous build
         // wrote still has this key on disk, though, and loading it must not
@@ -609,6 +651,73 @@ mod tests {
     }
 
     #[test]
+    fn clock_format_follows_the_system_by_default() {
+        assert_eq!(Settings::default().clock_format, ClockFormat::System);
+    }
+
+    #[test]
+    fn clock_format_round_trips_on_the_wire_as_12h_and_24h() {
+        // The frontend switches on these exact strings, so the spelling is
+        // part of the contract, not an implementation detail.
+        for (value, wire) in [(ClockFormat::H12, "12h"), (ClockFormat::H24, "24h")] {
+            let settings = Settings {
+                clock_format: value,
+                ..Settings::default()
+            };
+            let json = serde_json::to_value(&settings).unwrap();
+
+            assert_eq!(json["clockFormat"], wire);
+            assert_eq!(
+                serde_json::from_value::<Settings>(json)
+                    .unwrap()
+                    .clock_format,
+                value
+            );
+        }
+    }
+
+    #[test]
+    fn an_unrecognised_clock_format_costs_one_field_not_the_file() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            settings_path(dir.path()),
+            r#"{"threshold": 64, "clockFormat": "sundial"}"#,
+        )
+        .unwrap();
+
+        let loaded = load(dir.path());
+        assert_eq!(loaded.clock_format, ClockFormat::default());
+        assert_eq!(loaded.threshold, 64, "the rest of the file must survive");
+    }
+
+    #[test]
+    fn the_alternate_spellings_of_a_clock_format_are_understood() {
+        // What a human hand-editing the file, or another tool writing it,
+        // would plausibly put there.
+        for (raw, expected) in [
+            ("12", ClockFormat::H12),
+            ("12-hour", ClockFormat::H12),
+            ("h12", ClockFormat::H12),
+            ("ampm", ClockFormat::H12),
+            ("24", ClockFormat::H24),
+            ("24-hour", ClockFormat::H24),
+            ("h23", ClockFormat::H24),
+            ("military", ClockFormat::H24),
+            ("auto", ClockFormat::System),
+            ("locale", ClockFormat::System),
+            (" 24H ", ClockFormat::H24),
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            std::fs::write(
+                settings_path(dir.path()),
+                format!(r#"{{"clockFormat": "{raw}"}}"#),
+            )
+            .unwrap();
+            assert_eq!(load(dir.path()).clock_format, expected, "spelling {raw:?}");
+        }
+    }
+
+    #[test]
     fn unknown_keys_do_not_break_loading() {
         // A settings file written by a newer build must not brick an older one.
         let dir = tempfile::tempdir().unwrap();
@@ -640,6 +749,26 @@ mod tests {
         assert_eq!(result.settings.threshold, 77);
         assert_eq!(result.settings.theme, Theme::System);
         assert_eq!(result.settings.grace_seconds, 60);
+    }
+
+    #[test]
+    fn settings_store_patch_applies_a_clock_format() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = SettingsStore::new(dir.path().to_path_buf(), fixed_now());
+
+        let result = store
+            .update(
+                0,
+                SettingsPatch {
+                    clock_format: Some(ClockFormat::H24),
+                    ..SettingsPatch::default()
+                },
+                fixed_now(),
+            )
+            .unwrap();
+
+        assert_eq!(result.settings.clock_format, ClockFormat::H24);
+        assert_eq!(load(dir.path()).clock_format, ClockFormat::H24);
     }
 
     #[test]

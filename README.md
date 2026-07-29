@@ -6,6 +6,9 @@
 
 **Quota visibility and account switching for Claude Code**
 
+by [Yash Soni](https://github.com/yashsoni369), founder of
+[Apex36 Technologies](https://apex36tech.com/?utm_source=cc-logins)
+
 [![Release](https://img.shields.io/github/v/release/yashsoni369/cc-logins?style=flat-square&label=release)](https://github.com/yashsoni369/cc-logins/releases/latest)
 [![CI](https://img.shields.io/github/actions/workflow/status/yashsoni369/cc-logins/ci.yml?branch=main&style=flat-square&label=CI)](https://github.com/yashsoni369/cc-logins/actions/workflows/ci.yml)
 [![License](https://img.shields.io/github/license/yashsoni369/cc-logins?style=flat-square)](LICENSE)
@@ -217,8 +220,13 @@ before starting anything large. Security issues go through a
 [private advisory](https://github.com/yashsoni369/cc-logins/security/advisories/new), never a
 public issue; see [SECURITY.md](SECURITY.md).
 
+## Made by
+
+Built and maintained by [Yash Soni](https://github.com/yashsoni369), founder
+of [Apex36 Technologies](https://apex36tech.com/?utm_source=cc-logins). This is an independent
+project and is not affiliated with, endorsed by, or supported by Anthropic.
+
 ## License
 
-MIT — see [LICENSE](LICENSE). Portions are adapted from
-[claude-swap](https://github.com/realiti4/claude-swap) by Onur Cetinkol (`realiti4`) under the
-MIT License; full attribution is included in [LICENSE](LICENSE).
+MIT — see [LICENSE](LICENSE). Portions are adapted from third-party code by Onur Cetinkol under
+the MIT License; the required notice is included in [LICENSE](LICENSE).

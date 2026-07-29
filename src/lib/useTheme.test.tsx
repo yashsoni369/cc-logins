@@ -23,6 +23,7 @@ const confirmed: SettingsSnapshot = {
     autoCheckUpdates: true,
     historyRetentionDays: 14,
     theme: "system",
+    clockFormat: "system",
   },
 };
 

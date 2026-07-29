@@ -240,9 +240,9 @@ pub fn run() {
 
     // Point the vault at our own directory before anything reads it. Not a
     // setting, deliberately: this app once wrote its registry and credential
-    // backups into the `cswap` CLI's directory, which coupled the two tools'
-    // blast radius and destroyed a user's CLI accounts. The vault is ours
-    // unconditionally; the CLI's store is read-only territory.
+    // backups into another tool's directory, which coupled the two blast
+    // radii and destroyed a user's accounts there. The vault is ours
+    // unconditionally.
     paths::set_store_root(data_dir.join("accounts"));
     log::info!("account vault: {}", paths::backup_root().display());
 
@@ -304,6 +304,7 @@ pub fn run() {
             commands::set_account_enabled,
             commands::history_summary,
             commands::history_series,
+            commands::history_samples,
             commands::history_available,
             commands::get_settings,
             commands::get_daemon_status,
@@ -346,7 +347,7 @@ pub fn run() {
             }
 
             // A hard process termination leaves Claude Code's proper-lockfile
-            // directories behind. cswap/Claude deliberately protect a fresh
+            // directories behind. Claude Code deliberately protects a fresh
             // credential lock for 60 seconds, so the synchronous startup
             // attempt may truthfully defer recovery. Retry off the UI thread
             // until that compatibility boundary passes; stop after six

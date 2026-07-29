@@ -1,7 +1,7 @@
 import { fireEvent, render, screen } from "@testing-library/react";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import type { DaemonStatus, Snapshot } from "@/types";
+import type { DaemonStatus, Settings, Snapshot } from "@/types";
 
 const mocks = vi.hoisted(() => ({
   status: null as DaemonStatus | null,
@@ -26,7 +26,7 @@ vi.mock("@/lib/useSnapshot", () => ({
 vi.mock("@/lib/useSettings", () => ({
   useSettings: () => ({
     snapshot: null,
-    settings: null,
+    settings: settingsFixture,
     live: true,
     loading: false,
     error: null,
@@ -43,6 +43,26 @@ vi.mock("@/lib/api", async (importOriginal) => ({
 }));
 
 import PopoverPanel from "@/components/PopoverPanel";
+
+// The popover has no clock-format provider, so it reads the setting from here.
+const settingsFixture: Settings = {
+  autoSwitchEnabled: true,
+  autoSwitchPausedUntil: null,
+  threshold: 85,
+  cooldownSeconds: 300,
+  hysteresisPct: 5,
+  unhealthyTicks: 3,
+  strategy: "most-headroom",
+  graceSeconds: 60,
+  notifyOnSwitch: true,
+  notifyOnExhausted: true,
+  notifyOnExpiry: true,
+  startAtLogin: false,
+  autoCheckUpdates: true,
+  historyRetentionDays: 90,
+  theme: "system",
+  clockFormat: "24h",
+};
 
 const fixture: Snapshot = {
   schemaVersion: 1,
@@ -90,6 +110,7 @@ describe("PopoverPanel authoritative daemon phases", () => {
     vi.clearAllMocks();
     mocks.status = status({ kind: "monitoring" });
     fixture.environments[0]!.accounts[1]!.usageStatus = "ok";
+    fixture.environments[0]!.accounts[0]!.usage = { sevenDay: { pct: 99 } };
   });
 
   it("does not infer warning or exhaustion from high usage", () => {
@@ -164,5 +185,57 @@ describe("PopoverPanel authoritative daemon phases", () => {
     expect(screen.queryByText(/expired/i)).not.toBeInTheDocument();
     fireEvent.click(account);
     expect(mocks.switchAccount).not.toHaveBeenCalled();
+  });
+});
+
+describe("PopoverPanel reset readouts", () => {
+  const pinned = new Date("2026-07-28T12:00:00Z");
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    vi.useFakeTimers();
+    vi.setSystemTime(pinned);
+    mocks.status = status({ kind: "monitoring" });
+    fixture.environments[0]!.accounts[1]!.usageStatus = "ok";
+  });
+  afterEach(() => {
+    vi.useRealTimers();
+    fixture.environments[0]!.accounts[0]!.usage = { sevenDay: { pct: 99 } };
+  });
+
+  it("shows time remaining rather than the wall clock the backend sent", () => {
+    fixture.environments[0]!.accounts[0]!.usage = {
+      sevenDay: {
+        pct: 99,
+        resetsAt: new Date(pinned.getTime() + 3 * 3_600_000 + 5 * 60_000).toISOString(),
+        countdown: "stale countdown",
+        clock: "23:59",
+      },
+    };
+    render(<PopoverPanel />);
+
+    expect(screen.getByText(/3h/)).toBeInTheDocument();
+    expect(screen.queryByText("stale countdown")).not.toBeInTheDocument();
+    expect(screen.queryByText("23:59")).not.toBeInTheDocument();
+  });
+
+  // Stale beats blank: without a parseable instant we still say something.
+  it("falls back to the backend countdown, then its clock, then a dash", () => {
+    fixture.environments[0]!.accounts[0]!.usage = {
+      sevenDay: { pct: 99, countdown: "4h 21m", clock: "23:59" },
+    };
+    const { rerender } = render(<PopoverPanel />);
+    expect(screen.getByText("4h 21m")).toBeInTheDocument();
+    expect(screen.queryByText("23:59")).not.toBeInTheDocument();
+
+    fixture.environments[0]!.accounts[0]!.usage = { sevenDay: { pct: 99, clock: "23:59" } };
+    mocks.status = status({ kind: "monitoring" }, 2);
+    rerender(<PopoverPanel />);
+    expect(screen.getByText("23:59")).toBeInTheDocument();
+
+    fixture.environments[0]!.accounts[0]!.usage = { sevenDay: { pct: 99 } };
+    mocks.status = status({ kind: "monitoring" }, 3);
+    rerender(<PopoverPanel />);
+    expect(screen.getByText("—")).toBeInTheDocument();
   });
 });

@@ -9,10 +9,10 @@
 //! app would look in the new, empty directory, show first-run, and silently
 //! orphan a user's real accounts sitting one directory over.
 //!
-//! This has nothing to do with [`crate::paths::migrate_legacy_backup_dir`],
-//! which migrates the *`cswap` CLI's* legacy store layout. This module only
-//! ever moves bytes this app itself owns, between two directories both named
-//! after *this app's own* bundle identifiers (old and new).
+//! Despite the module name, this is not about migrating any other tool's
+//! store: it only ever moves bytes this app itself owns, between two
+//! directories both named after *this app's own* bundle identifiers (old and
+//! new).
 //!
 //! # Safety model
 //!
@@ -45,8 +45,7 @@
 //!    left exactly as they landed: `old_dir` was never touched, and the
 //!    (untrustworthy) partial/failed copy at `new_dir` is left in place
 //!    rather than silently deleted, so there is something on disk for a
-//!    human to inspect. This mirrors [`crate::paths::migrate_legacy_backup_dir`]'s
-//!    existing collision handling: refuse and leave evidence, don't guess.
+//!    human to inspect: refuse and leave evidence, don't guess.
 //!    An error is logged and a failure outcome returned; nothing is
 //!    half-migrated.
 

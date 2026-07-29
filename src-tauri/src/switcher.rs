@@ -4,7 +4,7 @@
 //! Ported from claude-swap (MIT) — <https://github.com/realiti4/claude-swap>,
 //! `claude_swap/switcher.py` (`ClaudeAccountSwitcher`). This is a narrow slice
 //! of a much larger module. The GUI ports the switch invariants it depends on:
-//! coordinated Claude/cswap locks, generation validation, outgoing credential
+//! coordinated Claude Code locks, generation validation, outgoing credential
 //! provenance, durable journaling/rollback/recovery, and usage attribution.
 //! CLI-only surfaces such as aliases, sessions, and interactive import/export
 //! remain outside this module.
@@ -29,12 +29,6 @@
 //! discipline) but never touches the live credential/config and never sets
 //! `activeAccountNumber` — see its own doc comment for why.
 //!
-//! [`import_from_cswap`] is not a port of anything upstream — it is this
-//! app's own bridge for a user who already has accounts registered with the
-//! `cswap` CLI: it copies them into OUR vault ([`crate::paths::backup_root`])
-//! without ever mutating the CLI's own store, so both tools keep working
-//! afterward.
-//!
 //! # Reused, not reimplemented
 //!
 //! - [`crate::model`] — [`Account`], [`Usage`], [`UsageWindow`], [`Environment`],
@@ -47,12 +41,11 @@
 //!   Python's `_prepare_credentials_for_activation`.
 //! - [`crate::locking`] — [`crate::locking::acquire_or_err`] guards every
 //!   mutation. Two *different* locks are in play here, not one shared between
-//!   this app and `cswap` — see the "Locking" section further down this file
-//!   (in `crate::switch_transaction`) for the full split.
+//!   this app and the external store — see the "Locking" section further down
+//!   this file (in `crate::switch_transaction`) for the full split.
 //! - [`crate::paths`] — every on-disk location comes from here, never
-//!   hand-rolled: [`crate::paths::backup_root`] for OUR vault,
-//!   [`crate::paths::cswap_store_root`] for the CLI's (read-only interop
-//!   only), and `global_config_path`/`credentials_path`/`claude_config_home`
+//!   hand-rolled: [`crate::paths::backup_root`] for OUR vault, and
+//!   `global_config_path`/`credentials_path`/`claude_config_home`
 //!   for Claude Code's official files.
 //! - [`crate::oauth`] — usage fetch, token refresh, and (new) profile lookup.
 //!   Inactive refreshes use the generation coordinator; active refreshes use
@@ -68,16 +61,14 @@
 //!
 //! 1. **Lock the whole mutate.** Every mutating function in this module
 //!    acquires a [`crate::locking::FileLock`] before touching any file and
-//!    holds it for the entire operation. [`switch_to`] (and
-//!    [`import_from_cswap`], which also reads the CLI's store) hold its two
-//!    source/destination locks
-//!    — see the "Locking" section below.
+//!    holds it for the entire operation. [`switch_to`] holds the complete
+//!    live-state lock set — see the "Locking" section below.
 //! 2. **Keep network work outside mutation locks, except active refresh.**
 //!    Profile/usage calls and switch target freshening run without the full
-//!    live-state lock set. Current cswap's bounded exception is reproduced:
-//!    an active refresh grant holds the optional cswap lock, Claude's
-//!    credential locks, and the GUI vault lock so the refresh generation
-//!    cannot be consumed twice; it never holds the config lock.
+//!    live-state lock set. Upstream's bounded exception is reproduced:
+//!    an active refresh grant holds Claude's credential locks and the GUI
+//!    vault lock so the refresh generation cannot be consumed twice; it never
+//!    holds the config lock.
 //!    [`add_current_account`],
 //!    [`add_token`], and [`add_oauth_credential`] are the exception to "no
 //!    mutating function makes a network call": each resolves account
@@ -92,7 +83,7 @@
 //!    [`atomic_write`] (write-temp-then-rename), matching `credentials.rs`.
 //! 5. **Serialize every refresh of one account.** Active and inactive paths
 //!    share the per-account refresh lease. Active refresh then takes the
-//!    cswap, Claude credential, and GUI vault locks in that order and re-reads
+//!    Claude credential and GUI vault locks in that order and re-reads
 //!    identity and credentials before consuming a grant.
 //! 6. **`.claude.json` lives at the home dir, not inside `.claude/`.** Always
 //!    resolved via [`crate::paths::global_config_path`], never hand-rolled.
@@ -147,8 +138,7 @@ fn account_config_path(account_num: &str, email: &str) -> PathBuf {
 }
 
 /// Same layout as [`account_config_path`], parameterized on the store root so
-/// it can also address an account config backup inside the `cswap` CLI's
-/// store (see [`import_from_cswap`]).
+/// a caller can address a backup under a root other than the live vault.
 fn account_config_path_at(root: &Path, account_num: &str, email: &str) -> PathBuf {
     root.join("configs")
         .join(format!(".claude-config-{account_num}-{email}.json"))
@@ -157,9 +147,7 @@ fn account_config_path_at(root: &Path, account_num: &str, email: &str) -> PathBu
 /// [`StoreHost`] for this crate's [`CredentialStore`]: platform is detected
 /// live (never cached across calls, matching the trait's contract), and
 /// `credentials_dir` is OUR OWN `<backup_root>/credentials` — this app's
-/// vault, never the `cswap` CLI's. [`CswapStoreHost`] (below, near
-/// [`import_from_cswap`]) is the read-only counterpart pointed at the CLI's
-/// own credentials directory.
+/// vault, and the only credential store this app ever reads or writes.
 pub(crate) struct GuiStoreHost;
 
 impl StoreHost for GuiStoreHost {
@@ -186,8 +174,7 @@ impl StoreHost for GuiStoreHost {
     fn credentials_dir(&self) -> PathBuf {
         credentials_dir()
     }
-    /// Our own namespace. The default is the CLI's, and sharing it made
-    /// `import_from_cswap` overwrite the CLI's own Keychain backups on macOS.
+    /// Our own Keychain namespace — see [`crate::credentials::GUI_SECURITY_SERVICE`].
     fn keychain_service(&self) -> &str {
         crate::credentials::GUI_SECURITY_SERVICE
     }
@@ -291,9 +278,8 @@ fn read_sequence_data() -> Option<Map<String, Value>> {
     read_sequence_data_at(&paths::backup_root())
 }
 
-/// Same as [`read_sequence_data`], parameterized on the store root so it can
-/// also read the `cswap` CLI's registry (see [`import_from_cswap`]) without
-/// ever writing there.
+/// Same as [`read_sequence_data`], parameterized on the store root so a
+/// caller can read a registry under a root other than the live vault.
 fn read_sequence_data_at(root: &Path) -> Option<Map<String, Value>> {
     let text = std::fs::read_to_string(root.join("sequence.json")).ok()?;
     match serde_json::from_str::<Value>(&text) {
@@ -1276,48 +1262,17 @@ fn to_model_usage(u: &oauth::UsageResult) -> Usage {
 //   touch this file, so locking it only ever contends with another instance
 //   of this app.
 // - CLAUDE CODE'S OFFICIAL FILES (`.credentials.json`, `.claude.json`) are
-//   also written by the `cswap` CLI. Mutual exclusion against it therefore
-//   cannot use a lock file of our choosing — it requires locking a path the
-//   CLI itself honours, which is `<cswap_store_root>/.lock` (see
-//   `crate::locking`'s module doc: both tools lock that exact path with the
-//   exact same OS primitive, which is the entire interop contract).
+//   read and written by Claude Code itself. Mutual exclusion against it
+//   therefore cannot use a lock file of our choosing — it requires locking the
+//   directories Claude Code itself honours (see `crate::claude_locks`).
 //
 // So any function that writes the official files — today, only [`switch_to`]
-// — holds the complete lock set from `crate::switch_transaction`: cswap's
-// account lock, Claude's primary + legacy credential locks, Claude's config
-// lock, then our vault lock. A function that only ever touches our own vault (`add_current_account`,
-// `add_token`, `set_account_enabled`) has no reason to take the cswap lock at
-// all — there is nothing there for another process to race it on — so those
-// take [`vault_lock_path`] alone.
-//
-// The cswap lock is acquired only when `<cswap_store_root>` already exists on
-// disk. If a user has no `cswap` install, there is no directory and nothing
-// to coordinate with — creating one purely to place a `.lock` file inside it
-// would conjure a fake `cswap` installation out of nothing. This is also the
-// one write this module ever makes under the `cswap` directory at all:
-// taking a lock cannot corrupt anything (unlike writing account data there
-// would), which is exactly why it is safe to share a *lock file* in a place
-// this app otherwise never touches — see [`import_from_cswap`]'s doc for the
-// read side of that same directory.
-
-/// Import-only coordination: lock cswap's source store before this GUI's
-/// destination vault. Imports never touch Claude's live credential/config,
-/// so the Claude directory locks deliberately are not part of this helper.
-fn acquire_import_locks(
-    timeout: Duration,
-) -> Result<(Option<crate::locking::FileLock>, crate::locking::FileLock), SwitchError> {
-    let cswap_root = paths::cswap_store_root();
-    let cswap_lock = if cswap_root.exists() {
-        Some(crate::locking::acquire_or_err(
-            cswap_root.join(".lock"),
-            timeout,
-        )?)
-    } else {
-        None
-    };
-    let vault_lock = crate::locking::acquire_or_err(vault_lock_path(), timeout)?;
-    Ok((cswap_lock, vault_lock))
-}
+// — holds the complete lock set from `crate::switch_transaction`: Claude's
+// primary + legacy credential locks, Claude's config lock, then our vault
+// lock. A function that only ever touches our own vault
+// (`add_current_account`, `add_token`, `set_account_enabled`) has no reason to
+// take Claude's locks at all — there is nothing there for another process to
+// race it on — so those take [`vault_lock_path`] alone.
 
 // ---------------------------------------------------------------------------
 // Switch.
@@ -1325,7 +1280,7 @@ fn acquire_import_locks(
 
 /// Switch the live login to `target`'s stored credential.
 ///
-/// Holds the complete cswap/Claude/vault lock set for the whole mutation —
+/// Holds the complete Claude/vault lock set for the whole mutation —
 /// see `crate::switch_transaction` for the canonical order.
 /// OAuth freshening is the only network phase and completes before those
 /// mutation locks are acquired. Order of operations:
@@ -1757,40 +1712,11 @@ fn add_to_sequence(data: &mut Map<String, Value>, slot: u32) {
     }
 }
 
-/// Return the slot number of an already-registered account whose stored
-/// backup credential has the same identity fingerprint as `live_fingerprint`,
-/// or `None` if no such slot exists.
-///
-/// Comparing by [`oauth::credential_fingerprint`] rather than by email is the
-/// point: it survives OAuth access-token rotation (fingerprint prefers the
-/// refresh-token hash), so re-adding an account whose access token has since
-/// refreshed is still correctly recognised as a duplicate.
-fn find_registered_slot_by_fingerprint(
-    store: &mut CredentialStore<GuiStoreHost>,
-    accounts: &Map<String, Value>,
-    live_fingerprint: &str,
-) -> Option<String> {
-    for (num, record) in accounts {
-        let email = record
-            .get("email")
-            .and_then(Value::as_str)
-            .unwrap_or_default();
-        let existing = store.read_account_credentials(num, email);
-        if existing.is_empty() {
-            continue;
-        }
-        if oauth::credential_fingerprint(&existing).as_deref() == Some(live_fingerprint) {
-            return Some(num.clone());
-        }
-    }
-    None
-}
-
 // ---------------------------------------------------------------------------
 // Duplicate detection by account identity (not credential bytes).
 //
-// `find_registered_slot_by_fingerprint` above compares raw credential bytes,
-// and that is not enough on its own: `oauth::try_refresh_oauth_credentials`
+// Comparing raw credential bytes is not enough on its own:
+// `oauth::try_refresh_oauth_credentials`
 // rotates the refresh token whenever the server issues a new one, and
 // `oauth::credential_fingerprint` hashes the refresh token when one is
 // present — so the SAME account's fingerprint changes across a refresh-token
@@ -1802,9 +1728,9 @@ fn find_registered_slot_by_fingerprint(
 //
 // [`find_registered_slot_by_identity`] is the fix: it compares account
 // identity (`uuid`, then `organizationUuid` + email) resolved via
-// [`oauth::fetch_oauth_profile`], and only falls back to the fingerprint
-// comparison above when neither side of a given pair has resolvable
-// identity at all.
+// [`oauth::fetch_oauth_profile`], and only falls back to a fingerprint
+// comparison when neither side of a given pair has resolvable identity at
+// all.
 // ---------------------------------------------------------------------------
 
 /// Identity used to detect a duplicate account registration, independent of
@@ -1831,8 +1757,7 @@ impl From<oauth::TokenAccount> for ResolvedIdentity {
 /// The identity a registry record already carries, read straight out of its
 /// `sequence.json` fields (`uuid`, `organizationUuid`, `email`) — the same
 /// shape as [`ResolvedIdentity`] so both sides of a comparison line up. A
-/// record written before this fix (or copied in by [`import_from_cswap`]
-/// from a source that never had one) may have no `uuid` key at all; that gap
+/// record written before this fix may have no `uuid` key at all; that gap
 /// is exactly why [`find_registered_slot_by_identity`] falls back to
 /// `organizationUuid` + email rather than requiring `uuid` on both sides.
 fn identity_from_record(record: &Map<String, Value>) -> ResolvedIdentity {
@@ -2026,8 +1951,8 @@ fn add_current_account_with_timeout(
         .unwrap_or_default();
 
     // Only our own vault is written here (the live login is read, never
-    // written) — no cswap-compat lock needed, see the module-level locking
-    // locking section above.
+    // written) — no Claude Code lock needed, see the module-level locking
+    // section above.
     let _lock = crate::locking::acquire_or_err(vault_lock_path(), timeout)?;
     refuse_pending_recovery()?;
 
@@ -2747,198 +2672,6 @@ fn set_account_enabled_with_timeout(
 }
 
 // ---------------------------------------------------------------------------
-// Import from the cswap CLI's store.
-// ---------------------------------------------------------------------------
-
-/// [`StoreHost`] pointed at the `cswap` CLI's OWN credential backups
-/// (`<cswap_store_root>/credentials`), used only to *read* — see
-/// [`import_from_cswap`]. Never constructed as the destination of a write in
-/// this module; [`GuiStoreHost`] is always the write side.
-struct CswapStoreHost;
-
-impl StoreHost for CswapStoreHost {
-    /// Pinned to the file backend under test, same as [`GuiStoreHost`].
-    fn platform(&self) -> CredPlatform {
-        #[cfg(test)]
-        {
-            CredPlatform::Linux
-        }
-        #[cfg(not(test))]
-        {
-            CredPlatform::detect()
-        }
-    }
-    fn credentials_dir(&self) -> PathBuf {
-        paths::cswap_store_root().join("credentials")
-    }
-}
-
-/// Result of [`import_from_cswap`]: how many accounts were copied in, and how
-/// many were left alone because they were already present.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub struct ImportOutcome {
-    pub imported: u32,
-    pub skipped: u32,
-}
-
-/// Copy every account from the `cswap` CLI's store into ours.
-///
-/// # Read-only on the source, always
-///
-/// This function only ever reads `<cswap_store_root>/sequence.json` and the
-/// credential/config backups it references, and only ever writes into OUR OWN
-/// vault ([`paths::backup_root`]). It never moves, deletes, or rewrites
-/// anything under the `cswap` directory — the one exception, taking the
-/// cswap-compat lock (see below), is not a data write and cannot corrupt
-/// anything there. A user who has both tools installed must be able to keep
-/// using the `cswap` CLI exactly as before, immediately after running this.
-///
-/// # No-op when there is nothing to import
-///
-/// If `<cswap_store_root>` does not exist at all, this returns
-/// `Ok(ImportOutcome::default())` without taking any lock and without
-/// touching the filesystem — same reasoning as
-/// `acquire_import_locks`: no directory means no `cswap` install to
-/// import from, and we must not go looking for one by creating it.
-///
-/// # Locking
-///
-/// When the source directory does exist, this acquires the cswap-compat lock
-/// (for a consistent read of a registry the CLI might be concurrently
-/// mutating) and then our own vault lock (we are about to write into it) —
-/// via `acquire_import_locks`: source first, then destination.
-///
-/// # Duplicate detection
-///
-/// An account already present in our vault is skipped rather than imported a
-/// second time, compared by [`oauth::credential_fingerprint`] exactly the way
-/// [`add_current_account`] already detects a duplicate registration — this
-/// survives OAuth access-token rotation, so an account added to one store and
-/// later refreshed is still recognised as the same login when found in the
-/// other.
-///
-/// A source account whose registry entry exists but whose credential backup
-/// is missing or unreadable is also counted as skipped rather than failing
-/// the whole import — one bad slot in the CLI's store must not block every
-/// other account from coming across.
-pub fn import_from_cswap() -> Result<ImportOutcome, SwitchError> {
-    import_from_cswap_with_timeout(crate::locking::DEFAULT_TIMEOUT)
-}
-
-fn import_from_cswap_with_timeout(timeout: Duration) -> Result<ImportOutcome, SwitchError> {
-    let cswap_root = paths::cswap_store_root();
-    if !cswap_root.exists() {
-        return Ok(ImportOutcome::default());
-    }
-
-    let (_cswap_lock, _lock) = acquire_import_locks(timeout)?;
-    refuse_pending_recovery()?;
-
-    let Some(source_data) = read_sequence_data_at(&cswap_root) else {
-        return Ok(ImportOutcome::default());
-    };
-    let source_accounts = match source_data.get("accounts").and_then(Value::as_object) {
-        Some(m) => m.clone(),
-        None => return Ok(ImportOutcome::default()),
-    };
-
-    let mut dest_data = read_sequence_data().unwrap_or_default();
-    ensure_accounts_object(&mut dest_data);
-    let dest_accounts_snapshot = dest_data
-        .get("accounts")
-        .and_then(Value::as_object)
-        .cloned()
-        .unwrap_or_default();
-
-    let mut source_store = CredentialStore::new(CswapStoreHost);
-    let mut dest_store = CredentialStore::new(GuiStoreHost);
-
-    // Deterministic order (numeric slot), so a re-run over a partially
-    // imported store processes accounts the same way every time.
-    let mut nums: Vec<String> = source_accounts.keys().cloned().collect();
-    nums.sort_by_key(|s| s.parse::<u64>().unwrap_or(u64::MAX));
-
-    let mut imported = 0u32;
-    let mut skipped = 0u32;
-    let mut replaced_generations = Vec::new();
-
-    for source_num in nums {
-        let Some(record) = source_accounts.get(&source_num).and_then(Value::as_object) else {
-            continue;
-        };
-        let email = record
-            .get("email")
-            .and_then(Value::as_str)
-            .unwrap_or_default()
-            .to_string();
-
-        let credential = source_store.read_account_credentials(&source_num, &email);
-        if credential.is_empty() {
-            skipped += 1;
-            continue;
-        }
-
-        if let Some(fp) = oauth::credential_fingerprint(&credential) {
-            if find_registered_slot_by_fingerprint(&mut dest_store, &dest_accounts_snapshot, &fp)
-                .is_some()
-            {
-                skipped += 1;
-                continue;
-            }
-        }
-
-        let config_text = read_account_config_at(&cswap_root, &source_num, &email);
-
-        let slot = next_free_slot(&dest_data);
-        let dest_num = slot.to_string();
-
-        // Same ordering discipline as `add_current_account`: the recoverable
-        // backup write happens before the registry commits to the new slot.
-        dest_store.write_account_credentials(&dest_num, &email, &credential)?;
-        if let Some(config_text) = &config_text {
-            write_account_config(&dest_num, &email, config_text)?;
-        }
-
-        let mut new_record = record.clone();
-        new_record.insert(
-            "importedFrom".to_string(),
-            Value::String("cswap".to_string()),
-        );
-        new_record.insert(
-            "imported".to_string(),
-            Value::String(chrono::Utc::now().to_rfc3339()),
-        );
-
-        dest_data
-            .get_mut("accounts")
-            .and_then(Value::as_object_mut)
-            .expect("ensure_accounts_object guarantees this")
-            .insert(dest_num, Value::Object(new_record));
-        add_to_sequence(&mut dest_data, slot);
-        let organization_uuid = record
-            .get("organizationUuid")
-            .and_then(Value::as_str)
-            .map(str::to_string);
-        replaced_generations.push((email, organization_uuid, credential));
-
-        imported += 1;
-    }
-
-    if imported > 0 {
-        dest_data.insert(
-            "lastUpdated".to_string(),
-            Value::String(chrono::Utc::now().to_rfc3339()),
-        );
-        write_sequence_data(&dest_data)?;
-        for (email, organization_uuid, credential) in replaced_generations {
-            clear_replaced_quarantine(&email, organization_uuid.as_deref(), &credential);
-        }
-    }
-
-    Ok(ImportOutcome { imported, skipped })
-}
-
-// ---------------------------------------------------------------------------
 // Target selection.
 // ---------------------------------------------------------------------------
 
@@ -3470,14 +3203,9 @@ mod tests {
     /// `claude_config_home`) into fresh temp directories, isolated from the
     /// real machine.
     ///
-    /// `paths::cswap_store_root()` is not separately redirected: it derives
-    /// from `HOME`/`USERPROFILE`, so pointing those at a temp dir isolates it
-    /// too — *provided* `XDG_DATA_HOME` is unset. On Linux that variable is
-    /// consulted first, and CI runners set it, so leaving it alone let a real
-    /// `$XDG_DATA_HOME/claude-swap` escape the sandbox: `guard_real_store`
-    /// would panic, and an import/live lock helper could create a `.lock`
-    /// in the user's actual directory. `WSL_DISTRO_NAME` is pinned for the
-    /// same reason — it flips `Platform::detect()`.
+    /// `XDG_DATA_HOME` and `WSL_DISTRO_NAME` are pinned too: both can steer
+    /// path resolution away from the temp `HOME` on Linux, and CI runners set
+    /// them.
     ///
     /// Serialized on `crate::test_support::ENV_LOCK`, the single crate-wide
     /// lock shared with `paths.rs` and `credentials.rs`, so this module's
@@ -3942,7 +3670,6 @@ mod tests {
         seed_two_accounts();
         // The pre-network target-identity read uses only our vault lock and
         // therefore fails before the complete mutation lock set is entered.
-        assert!(!paths::cswap_store_root().exists());
 
         let _held =
             crate::locking::acquire_or_err(vault_lock_path(), Duration::from_secs(5)).unwrap();
@@ -3963,32 +3690,25 @@ mod tests {
         assert_eq!(store.read_account_credentials("1", "alpha@example.com"), "");
     }
 
-    // -- lock ordering (task 2): cswap-compat lock, then ours, always -----------
+    // -- lock ordering: Claude Code's locks, then ours, always ------------------
 
     #[test]
-    fn switch_to_is_blocked_by_an_externally_held_cswap_compat_lock_when_a_cswap_store_exists() {
+    fn switch_to_is_blocked_by_an_externally_held_claude_credential_lock() {
         let _env = setup_env();
         seed_two_accounts();
 
-        // Simulate a machine that also has a `cswap` install: the directory
-        // exists, so switch_to must coordinate with it.
-        let cswap_root = paths::cswap_store_root();
-        std::fs::create_dir_all(&cswap_root).unwrap();
-        let _held =
-            crate::locking::acquire_or_err(cswap_root.join(".lock"), Duration::from_secs(5))
-                .unwrap();
+        // Claude Code's credential lock is acquired FIRST, so failing to get
+        // it must short-circuit before any effect on OUR vault or the live
+        // login — proving the ordering, not just that both locks exist.
+        std::fs::create_dir_all(paths::oauth_refresh_lock_dir()).unwrap();
 
         let err = switch_to_with_timeout(&bravo_target(), Duration::from_millis(200)).unwrap_err();
         assert!(matches!(err, SwitchError::LiveStateLock(_)));
 
-        // The cswap-compat lock is acquired FIRST (see
-        // the full live-state coordinator), so failing to get it must
-        // short-circuit before any effect on OUR vault or the live login —
-        // proving the ordering, not just that both locks exist.
         assert_eq!(
             std::fs::read_to_string(paths::credentials_path()).unwrap(),
             "original-active-creds-for-account-1",
-            "the live login must never be touched when the cswap-compat lock can't be acquired"
+            "the live login must never be touched when Claude's lock can't be acquired"
         );
         let seq: Value =
             serde_json::from_str(&std::fs::read_to_string(accounts_file()).unwrap()).unwrap();
@@ -3997,23 +3717,7 @@ mod tests {
         assert_eq!(
             store.read_account_credentials("1", "alpha@example.com"),
             "",
-            "our vault must be untouched — the vault lock is acquired second, after cswap"
-        );
-    }
-
-    #[test]
-    fn switch_to_never_creates_a_cswap_directory_that_does_not_exist() {
-        let _env = setup_env();
-        seed_two_accounts();
-        let cswap_root = paths::cswap_store_root();
-        assert!(!cswap_root.exists());
-
-        switch_to_with_timeout(&bravo_target(), Duration::from_secs(5)).unwrap();
-
-        assert!(
-            !cswap_root.exists(),
-            "switch_to must never create a directory for a tool the user doesn't have, \
-             just to place a lock file in it"
+            "our vault must be untouched — the vault lock is acquired last"
         );
     }
 
@@ -4878,8 +4582,7 @@ mod tests {
     #[test]
     fn add_current_account_refuses_duplicate_matched_by_org_and_email_when_existing_slot_has_no_uuid(
     ) {
-        // A record written before this fix (or copied in via
-        // `import_from_cswap` from a source that never had one) carries
+        // A record written before this fix carries
         // `organizationUuid` + email but no `uuid` at all — this is exactly
         // the gap the confirmed bug exploited ("slot 1 carries a `uuid`
         // field, slot 2 has none"). The duplicate check must still catch it
@@ -5725,211 +5428,5 @@ mod tests {
 
         let err = set_account_enabled(99, false).unwrap_err();
         assert!(matches!(err, SwitchError::UnknownAccount(ref n) if n == "99"));
-    }
-
-    // -- import_from_cswap -------------------------------------------------------
-
-    /// Seed a `cswap`-shaped store (registry + per-account credential/config
-    /// backups) at `paths::cswap_store_root()`, using the exact on-disk
-    /// layout `import_from_cswap` reads. Returns that root for convenience.
-    fn seed_cswap_store(accounts: &[(&str, &str, &str)]) -> PathBuf {
-        let cswap_root = paths::cswap_store_root();
-
-        let mut accounts_map = Map::new();
-        let mut sequence = Vec::new();
-        for (num, email, _) in accounts {
-            accounts_map.insert(
-                num.to_string(),
-                serde_json::json!({
-                    "email": email,
-                    "organizationUuid": format!("org-{num}"),
-                    "organizationName": format!("Org {num}"),
-                }),
-            );
-            sequence.push(Value::from(num.parse::<u64>().unwrap()));
-        }
-        write_json_file(
-            &cswap_root.join("sequence.json"),
-            &serde_json::json!({
-                "activeAccountNumber": Value::Null,
-                "sequence": sequence,
-                "accounts": accounts_map,
-            }),
-        );
-
-        let mut store = CredentialStore::new(CswapStoreHost);
-        for (num, email, creds) in accounts {
-            store.write_account_credentials(num, email, creds).unwrap();
-            write_json_file(
-                &account_config_path_at(&cswap_root, num, email),
-                &serde_json::json!({"oauthAccount": {"emailAddress": email, "organizationUuid": format!("org-{num}")}}),
-            );
-        }
-
-        cswap_root
-    }
-
-    #[test]
-    fn import_from_cswap_is_a_no_op_when_the_cswap_store_does_not_exist() {
-        let _env = setup_env();
-        let cswap_root = paths::cswap_store_root();
-        assert!(!cswap_root.exists());
-
-        let outcome = import_from_cswap().unwrap();
-        assert_eq!(
-            outcome,
-            ImportOutcome {
-                imported: 0,
-                skipped: 0
-            }
-        );
-
-        assert!(
-            !cswap_root.exists(),
-            "must not create a directory for a tool the user doesn't have"
-        );
-        assert!(read_accounts().unwrap().is_empty());
-    }
-
-    #[test]
-    fn import_from_cswap_copies_accounts_without_mutating_the_source() {
-        let _env = setup_env();
-        let cswap_root = seed_cswap_store(&[
-            ("1", "alpha@example.com", "alpha-live-creds"),
-            ("2", "bravo@example.com", "bravo-live-creds"),
-        ]);
-
-        let source_seq_before = std::fs::read_to_string(cswap_root.join("sequence.json")).unwrap();
-        let source_alpha_config_before = std::fs::read_to_string(account_config_path_at(
-            &cswap_root,
-            "1",
-            "alpha@example.com",
-        ))
-        .unwrap();
-
-        let outcome = import_from_cswap().unwrap();
-        assert_eq!(
-            outcome,
-            ImportOutcome {
-                imported: 2,
-                skipped: 0
-            }
-        );
-
-        // The source is byte-for-byte untouched: sequence.json, the config
-        // backup, and (via a fresh read through the source-side store) the
-        // credential backup itself.
-        assert_eq!(
-            std::fs::read_to_string(cswap_root.join("sequence.json")).unwrap(),
-            source_seq_before
-        );
-        assert_eq!(
-            std::fs::read_to_string(account_config_path_at(
-                &cswap_root,
-                "1",
-                "alpha@example.com"
-            ))
-            .unwrap(),
-            source_alpha_config_before
-        );
-        let mut source_store = CredentialStore::new(CswapStoreHost);
-        assert_eq!(
-            source_store.read_account_credentials("1", "alpha@example.com"),
-            "alpha-live-creds"
-        );
-        assert_eq!(
-            source_store.read_account_credentials("2", "bravo@example.com"),
-            "bravo-live-creds"
-        );
-
-        // Our vault now has both accounts, with matching credentials, under
-        // whatever slots it chose to allocate.
-        let dest_accounts = read_accounts().unwrap();
-        assert_eq!(dest_accounts.len(), 2);
-        let mut dest_store = CredentialStore::new(GuiStoreHost);
-        let alpha = dest_accounts
-            .iter()
-            .find(|a| a.email == "alpha@example.com")
-            .unwrap();
-        assert_eq!(
-            dest_store.read_account_credentials(&alpha.number.to_string(), "alpha@example.com"),
-            "alpha-live-creds"
-        );
-        let bravo = dest_accounts
-            .iter()
-            .find(|a| a.email == "bravo@example.com")
-            .unwrap();
-        assert_eq!(
-            dest_store.read_account_credentials(&bravo.number.to_string(), "bravo@example.com"),
-            "bravo-live-creds"
-        );
-    }
-
-    #[test]
-    fn import_from_cswap_skips_an_account_already_registered_by_credential_fingerprint() {
-        let _env = setup_env();
-        // Same login (same refresh-token lineage), registered in OUR vault
-        // under slot 5 already.
-        let shared_creds = oauth_creds_json("shared-refresh", "our-access-token");
-        write_json_file(
-            &accounts_file(),
-            &serde_json::json!({
-                "sequence": [5],
-                "accounts": {"5": {"email": "dup@example.com", "organizationUuid": "org-dup"}}
-            }),
-        );
-        let mut dest_store = CredentialStore::new(GuiStoreHost);
-        dest_store
-            .write_account_credentials("5", "dup@example.com", &shared_creds)
-            .unwrap();
-
-        // cswap has the same login (rotated access token) plus one genuinely
-        // new account.
-        seed_cswap_store(&[
-            (
-                "1",
-                "dup@example.com",
-                &oauth_creds_json("shared-refresh", "cswap-rotated-access"),
-            ),
-            ("2", "fresh@example.com", "fresh-creds"),
-        ]);
-
-        let outcome = import_from_cswap().unwrap();
-        assert_eq!(
-            outcome,
-            ImportOutcome {
-                imported: 1,
-                skipped: 1
-            }
-        );
-
-        // Still exactly two accounts total: the pre-existing slot 5, plus
-        // the one genuinely new import. No duplicate of "dup@example.com".
-        let accounts = read_accounts().unwrap();
-        assert_eq!(accounts.len(), 2);
-        assert_eq!(
-            accounts
-                .iter()
-                .filter(|a| a.email == "dup@example.com")
-                .count(),
-            1
-        );
-        assert!(accounts.iter().any(|a| a.email == "fresh@example.com"));
-    }
-
-    #[test]
-    fn import_from_cswap_is_blocked_by_an_externally_held_cswap_compat_lock() {
-        let _env = setup_env();
-        let cswap_root = seed_cswap_store(&[("1", "alpha@example.com", "alpha-creds")]);
-
-        let _held =
-            crate::locking::acquire_or_err(cswap_root.join(".lock"), Duration::from_secs(5))
-                .unwrap();
-
-        let err = import_from_cswap_with_timeout(Duration::from_millis(200)).unwrap_err();
-        assert!(matches!(err, SwitchError::Locking(_)));
-
-        // No partial import: our vault must still be empty.
-        assert!(read_accounts().unwrap().is_empty());
     }
 }

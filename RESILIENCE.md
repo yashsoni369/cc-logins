@@ -207,7 +207,7 @@ malformed journals, missing/tampered before-images, and incomplete rollback all 
 and automatic switching remain disabled and the daemon reports `recoveryRequired` until recovery
 succeeds.
 
-The lock protocol is intentionally the same as current cswap/Claude Code. A hard termination leaves
+The lock protocol matches what Claude Code and any other writer on this machine use. A hard termination leaves
 proper-lockfile directories behind; fresh credential locks are not stolen for 60 seconds. Startup
 tries once, then bounded background retries cross that staleness window without blocking the UI.
 

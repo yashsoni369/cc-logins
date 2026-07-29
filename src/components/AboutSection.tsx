@@ -1,12 +1,15 @@
 import { useEffect, useState, type ReactNode } from "react";
 import { appVersion, dataLocations, openExternal } from "../lib/api";
+import { Loading } from "./Loading";
 import UpdateCheck from "./UpdateCheck";
 import type { UseUpdateResult } from "../lib/useUpdate";
 import type { DataLocations } from "../types";
 
 const REPO_URL = "https://github.com/yashsoni369/cc-logins";
+/** Attribution targets. Only the Apex36 site is tagged — GitHub drops the parameter. */
+const MAKER_URL = "https://github.com/yashsoni369";
+const APEX_URL = "https://apex36tech.com/?utm_source=cc-logins";
 const ISSUE_URL = `${REPO_URL}/issues/new/choose`;
-const UPSTREAM_URL = "https://github.com/realiti4/claude-swap";
 
 /** Release notes for the running build, falling back to the index when the version is unknown. */
 function releaseNotesUrl(version: string | null): string {
@@ -104,6 +107,26 @@ export default function AboutSection({ update }: { update: UseUpdateResult }) {
           </div>
         </div>
 
+        <div className="field">
+          <div className="k">
+            Made by
+            <i>Who builds this, and where to find them.</i>
+          </div>
+          <div className="v">
+            {/* The names carry the links — a bare URL beside them would say the
+                same thing twice and wrap badly in this column. */}
+            <span>
+              <ExternalLink href={MAKER_URL} onFail={setLinkError}>
+                Yash Soni
+              </ExternalLink>
+              , founder of{" "}
+              <ExternalLink href={APEX_URL} onFail={setLinkError}>
+                Apex36 Technologies
+              </ExternalLink>
+            </span>
+          </div>
+        </div>
+
         <UpdateCheck update={update} />
 
         <div className="field">
@@ -130,7 +153,12 @@ export default function AboutSection({ update }: { update: UseUpdateResult }) {
             <i>Everything this app writes lives under these paths.</i>
           </div>
           <div className="v">
-            {locations === undefined && <span className="about-note">Loading…</span>}
+            {/* Keeps `.about-note` around the shared indicator so it matches the muted type of the sibling states below. */}
+            {locations === undefined && (
+              <span className="about-note">
+                <Loading />
+              </span>
+            )}
             {locations === null && (
               <span className="about-note">
                 Unavailable — only the desktop app can resolve these paths.
@@ -153,11 +181,8 @@ export default function AboutSection({ update }: { update: UseUpdateResult }) {
           </div>
           <div className="v">
             <span className="about-note">
-              Portions of the credential, path, locking and usage logic are ported from{" "}
-              <ExternalLink href={UPSTREAM_URL} onFail={setLinkError}>
-                claude-swap
-              </ExternalLink>{" "}
-              by Onur Cetinkol, also MIT licensed.
+              Portions of the credential, path, locking and usage logic are adapted from
+              third-party code by Onur Cetinkol, also MIT licensed.
             </span>
           </div>
         </div>

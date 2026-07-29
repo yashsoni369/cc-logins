@@ -1,17 +1,11 @@
+import { useClockFormat } from "../lib/clockFormat";
+import { formatInstant } from "../lib/time";
 import type { Account } from "../types";
 import { ageLabel } from "../types";
 import UsageMeter from "./UsageMeter";
 
 interface AccountDetailsProps {
   account: Account;
-}
-
-/** Exact instant, formatted for a human. `"—"` when unknown — never fabricated. */
-function formatInstant(iso: string | undefined): string {
-  if (!iso) return "—";
-  const d = new Date(iso);
-  if (Number.isNaN(d.getTime())) return "—";
-  return d.toLocaleString(undefined, { dateStyle: "medium", timeStyle: "short" });
 }
 
 /**
@@ -25,6 +19,10 @@ export default function AccountDetails({ account }: AccountDetailsProps) {
   const usage = account.usage;
   const scoped = usage?.scoped ?? [];
   const age = ageLabel(account.usageAgeSeconds);
+  const clockFormat = useClockFormat();
+  // Absolute instants throughout — countdowns belong to the popover. `"—"` when
+  // unknown; a time is never fabricated.
+  const instant = (iso: string | undefined) => formatInstant(iso, clockFormat) ?? "—";
 
   return (
     <div className="acct-details">
@@ -35,16 +33,16 @@ export default function AccountDetails({ account }: AccountDetailsProps) {
         </div>
         <div className="acct-details-field">
           <span className="lab">5-hour resets</span>
-          <span className="val num">{formatInstant(usage?.fiveHour?.resetsAt)}</span>
+          <span className="val num">{instant(usage?.fiveHour?.resetsAt)}</span>
         </div>
         <div className="acct-details-field">
           <span className="lab">7-day resets</span>
-          <span className="val num">{formatInstant(usage?.sevenDay?.resetsAt)}</span>
+          <span className="val num">{instant(usage?.sevenDay?.resetsAt)}</span>
         </div>
         <div className="acct-details-field">
           <span className="lab">Measured</span>
           <span className="val num">
-            {formatInstant(account.usageFetchedAt)}
+            {instant(account.usageFetchedAt)}
             {age ? ` · ${age}` : ""}
           </span>
         </div>
@@ -59,7 +57,7 @@ export default function AccountDetails({ account }: AccountDetailsProps) {
             <div key={s.name} className="acct-details-model-row">
               <span className="acct-details-model-name">{s.name}</span>
               <UsageMeter pct={s.pct} />
-              <span className="acct-details-reset num">resets {formatInstant(s.resetsAt)}</span>
+              <span className="acct-details-reset num">resets {instant(s.resetsAt)}</span>
             </div>
           ))
         )}

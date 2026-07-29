@@ -60,16 +60,12 @@ use serde_json::{Map, Value};
 // Constants (mirroring the module-level constants in credentials.py).
 // ---------------------------------------------------------------------------
 
-/// Service name for per-account backup credentials in the macOS Keychain.
-/// Deliberately distinct from any legacy `keyring`-based service name so old
-/// and new items can coexist during a migration.
-pub const SECURITY_SERVICE: &str = "claude-swap";
-
-/// This app's OWN Keychain service, distinct from the CLI's above.
+/// This app's OWN Keychain service for per-account backup credentials.
 ///
-/// Sharing `claude-swap` made `import_from_cswap` overwrite the CLI's backups
-/// whenever slot number and email matched — the normal case — contradicting its
-/// documented "read-only on the source" guarantee on macOS only.
+/// Deliberately its own namespace: Keychain items are keyed by service +
+/// account alone, so any service name shared with another tool would mean
+/// both writing over each other's backups whenever slot number and email
+/// matched — the normal case.
 pub const GUI_SECURITY_SERVICE: &str = "cc-logins";
 
 /// Service name of Claude Code's *active* OAuth credential in the macOS
@@ -182,11 +178,10 @@ pub trait StoreHost {
     ///
     /// Keychain items are keyed by service + account only — `credentials_dir`
     /// is ignored on that backend — so two hosts sharing a service name share
-    /// one namespace no matter how separate their directories are. Defaults to
-    /// the CLI's, which is right for [`CswapStoreHost`]; this app overrides it.
-    fn keychain_service(&self) -> &str {
-        SECURITY_SERVICE
-    }
+    /// one namespace no matter how separate their directories are. Required,
+    /// not defaulted, so a new host cannot silently land in someone else's
+    /// namespace.
+    fn keychain_service(&self) -> &str;
 }
 
 /// Which backend the most recent active-credential write landed on. Mirrors
@@ -293,7 +288,7 @@ pub fn shared_credential_fields(credentials: Option<&str>) -> Option<Map<String,
         if !unrecognized.is_empty() {
             unrecognized.sort_unstable();
             log::debug!(
-                "Live credential has sibling keys cswap does not recognize \
+                "Live credential has sibling keys this build does not recognize \
                  (a newer Claude Code?), treating them as slot-owned: {unrecognized:?}"
             );
         }
@@ -1581,7 +1576,7 @@ impl<H: StoreHost> CredentialStore<H> {
     //
     // Two backends for per-account backups: versioned-envelope `.enc` files
     // (see the envelope doc comment near [`CredentialEnvelope`]) under
-    // `credentials_dir` and the macOS Keychain (`SECURITY_SERVICE`). On
+    // `credentials_dir` and the macOS Keychain (`GUI_SECURITY_SERVICE`). On
     // macOS reads are `.enc`-wins: a fallback `.enc` (written while the
     // Keychain was unusable) is authoritative over a possibly-stale Keychain
     // copy, so a Keychain that recovers can't shadow a newer file. A
@@ -2284,6 +2279,9 @@ mod tests {
         }
         fn credentials_dir(&self) -> PathBuf {
             self.credentials_dir.clone()
+        }
+        fn keychain_service(&self) -> &str {
+            GUI_SECURITY_SERVICE
         }
     }
 

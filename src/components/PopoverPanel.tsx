@@ -5,14 +5,16 @@
 
 import { useCallback, useEffect, useRef, useState, type CSSProperties } from "react";
 
+import { Loading } from "@/components/Loading";
 import { RefreshButton } from "@/components/RefreshButton";
 import UsageMeter from "@/components/UsageMeter";
 import { hasBackend, IpcError, switchAccount } from "@/lib/api";
+import { formatClock, formatCountdown, useNow } from "@/lib/time";
 import { useDaemonStatus } from "@/lib/useDaemonStatus";
 import { useSettings } from "@/lib/useSettings";
 import { useSnapshot } from "@/lib/useSnapshot";
 import { useTheme } from "@/lib/useTheme";
-import { ageLabel, bindingUtilisation, displayName } from "@/types";
+import { ageLabel, bindingUtilisation, displayName, type UsageWindow } from "@/types";
 
 function SampleDataBanner() {
   return (
@@ -79,10 +81,14 @@ function useSizeToContent(ref: { current: HTMLDivElement | null }) {
   }, [ref]);
 }
 
-function clock(iso: string): string {
-  const date = new Date(iso);
-  if (Number.isNaN(date.getTime())) return "an unknown time";
-  return new Intl.DateTimeFormat(undefined, { hour: "numeric", minute: "2-digit" }).format(date);
+/**
+ * "in 4h 21m" for a window's reset, recomputed locally so it stays honest
+ * between the backend's ~5-minute polls. Falls back to the backend's own
+ * strings when `resetsAt` is missing or unparseable — stale beats blank, the
+ * same order `fresh_reset_strings` uses in src-tauri/src/oauth.rs.
+ */
+function resetLabel(usage: UsageWindow | undefined, now: number): string {
+  return formatCountdown(usage?.resetsAt, now) ?? usage?.countdown ?? usage?.clock ?? "—";
 }
 
 interface SwitchErrorState {
@@ -103,6 +109,12 @@ export default function PopoverPanel() {
   const [switchError, setSwitchError] = useState<SwitchErrorState | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
   const [now, setNow] = useState(Date.now);
+  // Minute-resolution ticker for the reset countdowns, which must keep running
+  // in every phase — distinct from the 1s `now` below, armed only while warning.
+  const minuteNow = useNow();
+  // This window mounts PopoverPanel alone (src/popover.tsx) with no clock-format
+  // provider, so take the setting from the settings feed rather than context.
+  const clockFormat = settings.settings?.clockFormat ?? "system";
 
   const phase = daemon.status?.phase;
   const recoveryBlocked = phase?.kind === "recoveryRequired";
@@ -156,7 +168,7 @@ export default function PopoverPanel() {
   if (loading && !snapshot) {
     return (
       <div className="pop" ref={rootRef}>
-        <div style={{ padding: "22px 14px", fontSize: 13, color: "var(--muted)" }}>Loading…</div>
+        <div style={{ padding: "22px 14px" }}><Loading /></div>
       </div>
     );
   }
@@ -212,8 +224,16 @@ export default function PopoverPanel() {
       )}
       {phase?.kind === "switching" && <div className="banner caution">Switching accounts now…</div>}
       {phase?.kind === "exhausted" && <div className="banner danger">All accounts at their limit</div>}
-      {phase?.kind === "paused" && <div className="banner caution">Paused until {clock(phase.until)}</div>}
-      {phase?.kind === "cooldown" && <div className="banner caution">Cooldown until {clock(phase.until)}</div>}
+      {phase?.kind === "paused" && (
+        <div className="banner caution">
+          Paused until {formatClock(phase.until, clockFormat) ?? "an unknown time"}
+        </div>
+      )}
+      {phase?.kind === "cooldown" && (
+        <div className="banner caution">
+          Cooldown until {formatClock(phase.until, clockFormat) ?? "an unknown time"}
+        </div>
+      )}
       {phase?.kind === "degraded" && (
         <div className="banner caution">
           {phase.reason === "usageUnknown" ? "Usage is currently unknown" : "The latest usage fetch failed"}
@@ -240,21 +260,21 @@ export default function PopoverPanel() {
             <div className="row">
               <span className="lab">5h</span>
               <div style={dimStyle}><UsageMeter pct={fiveHour.pct} /></div>
-              <span className="rst">{fiveHour.clock ?? "—"}</span>
+              <span className="rst">{resetLabel(fiveHour, minuteNow)}</span>
             </div>
           )}
           {sevenDay && (
             <div className="row">
               <span className="lab">7d</span>
               <div style={dimStyle}><UsageMeter pct={sevenDay.pct} /></div>
-              <span className="rst">{sevenDay.clock ?? "—"}</span>
+              <span className="rst">{resetLabel(sevenDay, minuteNow)}</span>
             </div>
           )}
         </div>
         {phase?.kind === "exhausted" && (
           <p style={{ margin: "12px 0 0", fontSize: 12, color: "var(--muted)" }}>
             {phase.earliestReset
-              ? `The earliest known reset is ${clock(phase.earliestReset)}.`
+              ? `The earliest known reset is ${formatClock(phase.earliestReset, clockFormat) ?? "an unknown time"}.`
               : "Nothing can be selected automatically until a quota resets."}
           </p>
         )}
