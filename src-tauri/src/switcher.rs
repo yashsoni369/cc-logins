@@ -4,7 +4,7 @@
 //! Ported from claude-swap (MIT) — <https://github.com/realiti4/claude-swap>,
 //! `claude_swap/switcher.py` (`ClaudeAccountSwitcher`). This is a narrow slice
 //! of a much larger module. The GUI ports the switch invariants it depends on:
-//! coordinated Claude/cswap locks, generation validation, outgoing credential
+//! coordinated Claude/external-store locks, generation validation, outgoing credential
 //! provenance, durable journaling/rollback/recovery, and usage attribution.
 //! CLI-only surfaces such as aliases, sessions, and interactive import/export
 //! remain outside this module.
@@ -29,12 +29,6 @@
 //! discipline) but never touches the live credential/config and never sets
 //! `activeAccountNumber` — see its own doc comment for why.
 //!
-//! [`import_from_cswap`] is not a port of anything upstream — it is this
-//! app's own bridge for a user who already has accounts registered with the
-//! `cswap` CLI: it copies them into OUR vault ([`crate::paths::backup_root`])
-//! without ever mutating the CLI's own store, so both tools keep working
-//! afterward.
-//!
 //! # Reused, not reimplemented
 //!
 //! - [`crate::model`] — [`Account`], [`Usage`], [`UsageWindow`], [`Environment`],
@@ -47,12 +41,12 @@
 //!   Python's `_prepare_credentials_for_activation`.
 //! - [`crate::locking`] — [`crate::locking::acquire_or_err`] guards every
 //!   mutation. Two *different* locks are in play here, not one shared between
-//!   this app and `cswap` — see the "Locking" section further down this file
-//!   (in `crate::switch_transaction`) for the full split.
+//!   this app and the external store — see the "Locking" section further down
+//!   this file (in `crate::switch_transaction`) for the full split.
 //! - [`crate::paths`] — every on-disk location comes from here, never
 //!   hand-rolled: [`crate::paths::backup_root`] for OUR vault,
-//!   [`crate::paths::cswap_store_root`] for the CLI's (read-only interop
-//!   only), and `global_config_path`/`credentials_path`/`claude_config_home`
+//!   [`crate::paths::external_store_root`] for the interlock file only, and
+//!   `global_config_path`/`credentials_path`/`claude_config_home`
 //!   for Claude Code's official files.
 //! - [`crate::oauth`] — usage fetch, token refresh, and (new) profile lookup.
 //!   Inactive refreshes use the generation coordinator; active refreshes use

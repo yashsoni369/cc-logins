@@ -13,10 +13,15 @@ A breaking change to any of those bumps the minor version, since major is pinned
 
 ### Added
 
-- In-app updates. Settings → About has a **Check for updates** control that fetches the
-  latest release, verifies it against a signing key compiled into this build, installs it
-  and restarts. The check runs only when you press the button — nothing contacts the
-  network on a timer or at startup.
+- In-app updates. The app checks GitHub for a newer release shortly after launch and then
+  once a day, notifies you once per version, and shows a dot on Settings while one is
+  waiting. Settings → About installs it: the download is verified against a signing key
+  compiled into this build, then the app restarts.
+
+  Automatic checking is a setting and can be turned off, leaving the manual check working.
+  Installing is refused while a switch is running, is about to run, or while credential
+  recovery is outstanding — an update restarts the app, and that must not interrupt a
+  credential rotation.
 
   Because an update arrives through the app rather than a browser download, it carries no
   mark of the web and never reaches Windows SmartScreen. The first install still warns;
