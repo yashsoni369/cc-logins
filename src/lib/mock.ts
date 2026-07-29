@@ -1,9 +1,9 @@
 import type { Environment, Snapshot } from "../types";
 
 /**
- * Static demo data for the Accounts screen, shaped exactly like the
- * `cswap --json` contract. Mirrors the four accounts shown in wireframe
- * screen 04 (naim / personal / work / spare).
+ * Static demo data for the Accounts screen, shaped exactly like the snapshot
+ * contract. Mirrors the four accounts shown in wireframe screen 04
+ * (naim / personal / work / spare).
  */
 export const mockSnapshot: Snapshot = {
   schemaVersion: 1,

@@ -87,7 +87,7 @@ export class IpcError extends Error {
     return this.kind === "notConfigured";
   }
 
-  /** A lock is held elsewhere — very likely the `cswap` CLI mid-operation. */
+  /** A lock is held elsewhere — another process is mid-operation on the same store. */
   get isBusy() {
     return this.kind === "busy";
   }

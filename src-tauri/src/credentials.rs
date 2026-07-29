@@ -293,7 +293,7 @@ pub fn shared_credential_fields(credentials: Option<&str>) -> Option<Map<String,
         if !unrecognized.is_empty() {
             unrecognized.sort_unstable();
             log::debug!(
-                "Live credential has sibling keys cswap does not recognize \
+                "Live credential has sibling keys this build does not recognize \
                  (a newer Claude Code?), treating them as slot-owned: {unrecognized:?}"
             );
         }

@@ -1,8 +1,7 @@
 /**
  * Account and usage shapes.
  *
- * These mirror the `cswap --json` contract (schemaVersion 1) field for field,
- * so this app and the CLI describe the same machine state the same way. The
+ * These mirror the snapshot contract (schemaVersion 1) field for field. The
  * Rust side serialises into exactly these shapes.
  *
  * Rule inherited from that contract: ignore unknown fields rather than
