@@ -50,21 +50,33 @@ release looks like, and re-releasing is caught by the tag check instead.
 
 ## Step 1 — write the changelog first
 
-`CHANGELOG.md` is the source of the release notes, not an afterthought. Add a
-section for the version before running anything:
+`CHANGELOG.md` is the source of the release notes, not an afterthought. The
+release workflow reads the section for the tag and uses it as the release body,
+and **fails the release if the section is missing** — an undocumented release
+stops at the version check rather than shipping with an empty description.
 
-```markdown
-## [0.2.0]
+`pnpm changelog <version>` drafts the section from the conventional-commit
+subjects since the last tag:
 
-### Added
-
-- ...
+```
+pnpm changelog 0.2.0 --dry-run   # preview
+pnpm changelog 0.2.0             # write it
 ```
 
-Leave the date off; the script fills it in. The release workflow reads this
-section and uses it as the release body, and **fails the release if the section
-is missing** — an undocumented release stops at the version check rather than
-shipping with an empty description.
+It maps `feat:` to Added, `fix:` to Fixed, and `perf:`/`refactor:`/`revert:` to
+Changed; `!` marks an entry breaking. Merge commits are ignored. Internal
+commits (`docs`, `test`, `chore`, `ci`, `build`, `style`) are left out but
+printed, so you can see what was dropped. Anything it cannot parse lands under
+an **Uncategorised** heading rather than being discarded quietly — triage that
+heading and delete it before releasing.
+
+**Then edit what it wrote.** Commit subjects are addressed to reviewers and
+changelog entries are read by users; the generator exists so nothing is
+forgotten, not so the writing is skipped. Leave the date off — `pnpm release`
+fills that in.
+
+Writing the section by hand instead is fine; nothing downstream cares how it got
+there.
 
 ## Step 2 — cut the release commit on a branch
 
