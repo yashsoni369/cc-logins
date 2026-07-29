@@ -11,10 +11,9 @@ A breaking change to any of those bumps the minor version, since major is pinned
 
 ## [Unreleased]
 
-Nothing released yet. `0.1.0` below describes the state of the first tagged build
-when it happens.
+Nothing yet.
 
-## [0.1.0] - Unreleased
+## [0.1.0] - 2026-07-29
 
 ### Added
 
@@ -63,4 +62,5 @@ when it happens.
   otherwise.
 - Builds are unsigned. See [SECURITY.md](SECURITY.md).
 
-[Unreleased]: https://github.com/yashsoni369/cc-logins/compare/main...HEAD
+[Unreleased]: https://github.com/yashsoni369/cc-logins/compare/v0.1.0...HEAD
+[0.1.0]: https://github.com/yashsoni369/cc-logins/releases/tag/v0.1.0
