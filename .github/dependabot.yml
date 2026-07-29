@@ -4,17 +4,52 @@ version: 2
 # For github-actions that is `/` — Dependabot finds `.github/workflows/`
 # itself, and pointing it at `/.github/workflows` silently matches nothing.
 #
-# Minor and patch bumps are grouped into one PR per ecosystem so a solo
-# maintainer gets one thing to review a week instead of twenty. Majors are
-# deliberately left ungrouped: those are the ones that break a build or change
-# behaviour, and each deserves its own PR and its own CI run.
+# Two kinds of update arrive here, and they are configured separately:
+#
+#   Version updates  — scheduled, routine, and the source of any noise.
+#   Security updates — driven by an advisory, and the reason this file exists
+#                      at all. They ignore `cooldown` and any `ignore` rules,
+#                      so nothing below can delay or suppress a fix.
+#
+# That distinction matters more here than it would for a service. These
+# dependencies are compiled into binaries that sit on users' machines: a
+# vulnerable transitive crate cannot be hot-fixed the way a server can, and is
+# only gone once each user updates.
+#
+# Grouping, per ecosystem:
+#
+#   *-security     one pull request for a batch of advisories rather than one
+#                  per CVE. Without `applies-to: security-updates` a group has
+#                  no effect on security pull requests at all — that default is
+#                  easy to miss, and it is the main thing this file fixes.
+#   *-minor-patch  one routine pull request a week instead of twenty.
+#
+# Majors are deliberately left ungrouped and un-ignored. They are the updates
+# that break a build or change behaviour, so each deserves its own pull request
+# and its own CI run: `tauri-apps/tauri-action` v0 → v1 renamed the very input
+# `release.yml` relies on for stable asset names, which is exactly the kind of
+# change that must not arrive folded into a batch. Ignoring majors would be
+# safe for security — advisories bypass `ignore` — but would also hide that
+# such a release exists at all.
+#
+# Cooldown holds a *version* update back until a release has been on the
+# registry long enough for a poisoned package to be noticed. GitHub's default
+# is three days; an app that handles credentials can afford to wait longer, and
+# longer still before taking a major.
 updates:
   - package-ecosystem: cargo
     directory: /src-tauri
     schedule:
       interval: weekly
     open-pull-requests-limit: 5
+    cooldown:
+      default-days: 7
+      semver-major-days: 14
     groups:
+      cargo-security:
+        applies-to: security-updates
+        patterns:
+          - "*"
       cargo-minor-patch:
         update-types:
           - minor
@@ -25,7 +60,14 @@ updates:
     schedule:
       interval: weekly
     open-pull-requests-limit: 5
+    cooldown:
+      default-days: 7
+      semver-major-days: 14
     groups:
+      npm-security:
+        applies-to: security-updates
+        patterns:
+          - "*"
       npm-minor-patch:
         update-types:
           - minor
@@ -36,7 +78,14 @@ updates:
     schedule:
       interval: weekly
     open-pull-requests-limit: 5
+    cooldown:
+      default-days: 7
+      semver-major-days: 14
     groups:
+      actions-security:
+        applies-to: security-updates
+        patterns:
+          - "*"
       actions-minor-patch:
         update-types:
           - minor
