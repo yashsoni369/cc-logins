@@ -189,7 +189,7 @@ impl Account {
                 // same account, and without this a padded email forks the
                 // history series.
                 let digest = Sha256::digest(self.email.trim().to_ascii_lowercase().as_bytes());
-                format!("email:{digest:x}")
+                format!("email:{}", crate::hex::lower(&digest))
             }
         }
     }

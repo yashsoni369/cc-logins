@@ -2073,7 +2073,7 @@ impl<H: StoreHost> CredentialStore<H> {
         let ts = now.format("%Y%m%dT%H%M%S").to_string();
         let mut hasher = Sha256::new();
         hasher.update(credentials.as_bytes());
-        let digest = format!("{:x}", hasher.finalize());
+        let digest = crate::hex::lower(&hasher.finalize());
         let digest_short = &digest[..12];
         // Nonce keeps ids unique even for identical bytes preserved in the
         // same second — append-only means no write may ever land on an

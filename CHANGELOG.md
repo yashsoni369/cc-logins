@@ -11,8 +11,28 @@ A breaking change to any of those bumps the minor version, since major is pinned
 
 ## [Unreleased]
 
+Nothing yet.
+
+## [0.2.0] - 2026-07-29
+
 ### Added
 
+- A Dashboard home screen, and the app now opens on it. It answers the question no
+  per-account view can: where the fleet stands as a whole. A pooled runway estimate says
+  how long every account together lasts at the current burn rate, one row per account
+  carries a sparkline and its 7-day figure, and a reset stagger plots every account's
+  5-hour window on one clock — a vertical slice with no headroom in it is the stretch that
+  strands you, and nothing else surfaces it.
+- Per-account detail opens **in place** beneath its own row, so the rest of the fleet stays
+  on screen to compare against: the 5-hour and 7-day windows plotted apart, per-model
+  weekly limits, and a heatmap of when that account actually runs hot. One range control
+  scopes every panel on the screen.
+- A load-balance grid showing each account's daily peak, which answers whether the rotation
+  is spreading work or quietly draining one account — a question no per-account chart can.
+- A findings section that says in words what the charts imply: which account is carrying
+  the fleet, how often one reached its limit, whether the resets cluster.
+- A clock-format setting. Times were following the OS in some views and not others;
+  12-hour, 24-hour and system are now one choice that every view obeys.
 - Support for enterprise accounts, which are limited by a monthly spend cap instead of
   5-hour and 7-day windows. These report no rate-limit windows at all, so until now they
   showed no usage anywhere and could never be switched away from however much of the cap
@@ -20,12 +40,6 @@ A breaking change to any of those bumps the minor version, since major is pinned
   see it — and appears on every screen that shows usage, with an `[E]` badge marking the
   account. It stays out of the pooled runway, which projects hours and would be swamped by
   a monthly figure.
-
-- A reworked dashboard. Accounts open in place rather than replacing the screen, one range
-  control scopes every panel, and a findings section says in words what the charts imply.
-  Pooled headroom is drawn against the fleet's real capacity, so the bar's length finally
-  means something.
-
 - Last-known usage survives a failed fetch. Readings are cached, so opening the app during
   a cold start, a network blip or a rate-limit backoff shows what was true a moment ago
   with its age, instead of a screen of blanks. How long a reading stays trusted depends on
@@ -50,26 +64,47 @@ A breaking change to any of those bumps the minor version, since major is pinned
 
   `0.1.0` has no updater, so upgrading from it has to be done by hand once.
 
+### Changed
+
+- Installers carry the app's own identity. The Windows installer has a branded header and
+  welcome panel and its icon on both the installer and the uninstaller; the macOS disk
+  image opens on a laid-out window rather than a bare volume. The Windows installer still
+  installs per-user, so it never asks for administrator rights.
+- The rotation control on each account row is a labelled Enable/Disable button rather than
+  a bare switch. It sits beside Switch and Re-login, and a lone toggle among buttons read
+  as an odd one out.
+- This project is presented on its own terms. The upstream tool it was ported from is no
+  longer named in the README, the settings copy or log messages, and the app no longer
+  reads or writes that tool's store. Attribution is unchanged: the MIT notice and its
+  copyright line are intact in LICENSE.
+
 ### Fixed
 
+- The dashboard could not be read. Measured against the running app rather than judged by
+  eye: the reset stagger drew its replenished stretch at 1.19:1 against the background
+  where meaningful graphics need 3:1, and no opacity reached it — so a band now carries a
+  neutral outline for its extent and fills only the consumed part. The "no samples" cells
+  in the heatmap sat at 1.22:1, making the one distinction that grid exists to draw
+  invisible, and every in-chart label was below the 4.5:1 text minimum.
+- Heatmap rows read `Night`/`Morning`/`Afternoon`/`Evening` instead of `Nig`/`Mor`/`Aft`/`Eve`.
+- Sample data ages with the clock. Every instant in the demo fixture was hardcoded, so
+  once those dates passed a first-run user saw every countdown collapsed to "now" and every
+  account drawn as fully replenished.
 - Usage readings for an account with no rate-limit windows were recorded as a measured
   zero. Every reading of an enterprise account was stored as "idle" and drawn on the charts
   as a flat, fictional line. Unknown is now a gap in the record rather than a zero in it.
-
 - The rate-limit backoff reacted to the wrong events. It fired whenever any account failed
   to read this tick — a dropped connection counted — and cleared one tick after a genuine
   refusal. It now reacts to real rate-limit responses over the full window, and honours the
   server's own retry hint with a margin rather than retrying at the exact instant it names.
-
 - Relaunching no longer assumes a rested token. The endpoint budgets requests over a
   trailing hour that capacity ages out of, and every launch used to start as though none
   had been spent, so a machine that restarted often spent the hour on launches alone.
-
 - The pooled-capacity bar reported "0%" when no usage could be read at all, which asserts
   no capacity left where the truth is that nothing is known yet.
-
 - Long account names wrapped a row to five lines, and end labels on the fleet chart were
-  clipped below the axis. Charts no longer stretch their own type when the window widens.
+  clipped below the axis. Charts no longer stretch their own type when the window widens,
+  and every screen now uses the whole window rather than a fixed column.
 
 ## [0.1.0] - 2026-07-29
 
@@ -120,5 +155,6 @@ A breaking change to any of those bumps the minor version, since major is pinned
   otherwise.
 - Builds are unsigned. See [SECURITY.md](SECURITY.md).
 
-[Unreleased]: https://github.com/yashsoni369/cc-logins/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/yashsoni369/cc-logins/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/yashsoni369/cc-logins/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/yashsoni369/cc-logins/releases/tag/v0.1.0
