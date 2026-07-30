@@ -22,7 +22,7 @@ all day. It shows which account is active and how much 5-hour and 7-day quota ea
 left, and switches between them — one click, or automatically before a limit lands. Windows,
 macOS, and Linux.
 
-This project is young. `0.1.0` is the first tagged release; expect rough edges, and see
+This project is young; expect rough edges, and see
 [Before you install this](#before-you-install-this-what-it-does-with-your-tokens) for what it does
 with your credentials.
 
@@ -54,6 +54,28 @@ servers that pool tokens and impersonate the official client to multiple users o
 once. Running several accounts you legitimately hold is not itself a violation; evading rate
 limits through token sharing or relaying is. This app only ever does the former: it moves
 credentials on your own machine, into the same binary you'd otherwise run by hand.
+
+### The one request it makes with your token
+
+Read the paragraph above alongside this one. In **February 2026** Anthropic updated its
+documentation to say that OAuth tokens from Free, Pro and Max plans are for use with Claude Code
+and claude.ai only, and deployed server-side blocking against third-party clients that route model
+requests through them. That enforcement targets tools which *spend your subscription* — external
+harnesses that send prompts using your login.
+
+This app sends no prompts. It does make one API call with your token: a read of Anthropic's usage
+endpoint, to know how much quota each account has left. That is the entire network surface, and
+it is the reason the app can tell you anything at all.
+
+Two things follow, and both are deliberate:
+
+- It identifies itself honestly. The `User-Agent` is `cc-logins/<version>` — never Claude Code's.
+  The usage endpoint is more generous to the first-party client, and presenting as one would be
+  circumventing the blocking above, with the consequences landing on your account rather than on
+  this project. The app lives inside the limit it is given instead.
+- It stays well under that limit. Requests are paced to roughly twenty an hour against a measured
+  cap of about thirty, the budget is remembered across restarts so relaunching cannot spend it
+  twice, and a rate-limit response backs the app off rather than retrying into it.
 
 That's a description of what the app does, not a legal opinion — read Anthropic's terms yourself
 if you're deciding whether multi-account use fits your situation. This project takes no position

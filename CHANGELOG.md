@@ -13,6 +13,27 @@ A breaking change to any of those bumps the minor version, since major is pinned
 
 ### Added
 
+- Support for enterprise accounts, which are limited by a monthly spend cap instead of
+  5-hour and 7-day windows. These report no rate-limit windows at all, so until now they
+  showed no usage anywhere and could never be switched away from however much of the cap
+  was gone. The cap now counts as a real limit — auto-switch, exhaustion and recovery all
+  see it — and appears on every screen that shows usage, with an `[E]` badge marking the
+  account. It stays out of the pooled runway, which projects hours and would be swamped by
+  a monthly figure.
+
+- A reworked dashboard. Accounts open in place rather than replacing the screen, one range
+  control scopes every panel, and a findings section says in words what the charts imply.
+  Pooled headroom is drawn against the fleet's real capacity, so the bar's length finally
+  means something.
+
+- Last-known usage survives a failed fetch. Readings are cached, so opening the app during
+  a cold start, a network blip or a rate-limit backoff shows what was true a moment ago
+  with its age, instead of a screen of blanks. How long a reading stays trusted depends on
+  why the fetch failed: a rate-limit response says nothing about your quota, so the figures
+  hold until the window they describe resets; any other failure gets an hour. Past that the
+  reading is dropped rather than shown, because a stale number that looks live is worse
+  than an honest gap.
+
 - In-app updates. The app checks GitHub for a newer release shortly after launch and then
   once a day, notifies you once per version, and shows a dot on Settings while one is
   waiting. Settings → About installs it: the download is verified against a signing key
@@ -28,6 +49,27 @@ A breaking change to any of those bumps the minor version, since major is pinned
   every update after it does not.
 
   `0.1.0` has no updater, so upgrading from it has to be done by hand once.
+
+### Fixed
+
+- Usage readings for an account with no rate-limit windows were recorded as a measured
+  zero. Every reading of an enterprise account was stored as "idle" and drawn on the charts
+  as a flat, fictional line. Unknown is now a gap in the record rather than a zero in it.
+
+- The rate-limit backoff reacted to the wrong events. It fired whenever any account failed
+  to read this tick — a dropped connection counted — and cleared one tick after a genuine
+  refusal. It now reacts to real rate-limit responses over the full window, and honours the
+  server's own retry hint with a margin rather than retrying at the exact instant it names.
+
+- Relaunching no longer assumes a rested token. The endpoint budgets requests over a
+  trailing hour that capacity ages out of, and every launch used to start as though none
+  had been spent, so a machine that restarted often spent the hour on launches alone.
+
+- The pooled-capacity bar reported "0%" when no usage could be read at all, which asserts
+  no capacity left where the truth is that nothing is known yet.
+
+- Long account names wrapped a row to five lines, and end labels on the fleet chart were
+  clipped below the axis. Charts no longer stretch their own type when the window widens.
 
 ## [0.1.0] - 2026-07-29
 

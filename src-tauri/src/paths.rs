@@ -284,6 +284,15 @@ pub fn backup_root() -> PathBuf {
     resolved
 }
 
+/// Where the last-good usage readings are cached.
+///
+/// Inside this app's own vault directory, so it inherits [`backup_root`]'s
+/// `guard_real_store` assertion — a test that reached the real store would
+/// abort here rather than write to it.
+pub fn usage_cache_path() -> PathBuf {
+    backup_root().join("usage-cache.json")
+}
+
 fn backup_root_inner() -> PathBuf {
     #[cfg(test)]
     {

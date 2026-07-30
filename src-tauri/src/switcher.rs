@@ -1098,7 +1098,35 @@ fn clear_replaced_quarantine(email: &str, organization_uuid: Option<&str>, crede
 /// `credentials.rs` are the only reused modules in scope — so "last-known"
 /// degrades to "no reading, marked Stale" rather than serving a genuinely
 /// cached prior measurement; see the port report.)
+/// A snapshot, plus what the usage fetch behind it actually did.
+///
+/// The snapshot alone collapses every fetch failure into
+/// [`UsageStatus::Stale`]/[`UsageStatus::Unavailable`], which is right for the
+/// UI — a reader does not care whether the network dropped or the endpoint
+/// refused — and wrong for the poller, which has to back off for one of those
+/// and not the other. Only the cadence planner needs this; everything else
+/// keeps calling [`read_snapshot`].
+#[derive(Debug)]
+pub struct SnapshotFetch {
+    pub snapshot: Snapshot,
+    /// Any account's usage fetch came back HTTP 429.
+    pub rate_limited: bool,
+}
+
+/// [`read_snapshot`], keeping the fetch diagnostics.
+pub async fn read_snapshot_reporting() -> Result<SnapshotFetch, SwitchError> {
+    read_snapshot_inner().await
+}
+
 pub async fn read_snapshot() -> Result<Snapshot, SwitchError> {
+    read_snapshot_inner().await.map(|f| f.snapshot)
+}
+
+async fn read_snapshot_inner() -> Result<SnapshotFetch, SwitchError> {
+    let mut rate_limited = false;
+    // Last-good readings, so a failed fetch shows what was true a moment ago
+    // rather than a screen of blanks. See usage_cache for the trust model.
+    let mut cache = crate::usage_cache::UsageCache::load();
     let accounts = read_accounts()?;
     let coordinator = production_refresh_coordinator(Duration::from_secs(10));
 
@@ -1177,7 +1205,9 @@ pub async fn read_snapshot() -> Result<Snapshot, SwitchError> {
 
         match result {
             Some(Ok(result)) => {
-                account.usage = Some(to_model_usage(&result));
+                let usage = to_model_usage(&result);
+                cache.record_success(&account.stable_key(), &usage, chrono::Utc::now());
+                account.usage = Some(usage);
                 account.usage_fetched_at = Some(chrono::Utc::now().to_rfc3339());
                 account.usage_age_seconds = Some(0.0);
                 if account.usage_status != UsageStatus::Disabled {
@@ -1190,9 +1220,40 @@ pub async fn read_snapshot() -> Result<Snapshot, SwitchError> {
                 }
             }
             Some(Err(oauth_refresh::RefreshCoordinatorError::Missing)) | None => {}
-            Some(Err(_)) => {
-                if account.usage_status != UsageStatus::Disabled {
-                    account.usage_status = UsageStatus::Unavailable;
+            Some(Err(err)) => {
+                // Why it failed decides two things: whether the cadence backs
+                // off, and how long the cached reading stays believable. A 429
+                // said nothing about the quota; a timeout said nothing at all.
+                let throttled = matches!(
+                    err,
+                    oauth_refresh::RefreshCoordinatorError::Usage(oauth::UsageError::Http(429))
+                );
+                if throttled {
+                    rate_limited = true;
+                }
+                let key = account.stable_key();
+                cache.record_failure(
+                    &key,
+                    if throttled { crate::usage_cache::RATE_LIMITED } else { "fetch-failed" },
+                );
+
+                // Serve what was true a moment ago rather than nothing. Stale
+                // is documented to mean "showing you the last known values";
+                // until now there were none to show, which is why a cold start
+                // read as a broken app.
+                match cache.serve(&key, chrono::Utc::now()) {
+                    Some((usage, age_s)) => {
+                        account.usage = Some(usage);
+                        account.usage_age_seconds = Some(age_s);
+                        if account.usage_status != UsageStatus::Disabled {
+                            account.usage_status = UsageStatus::Stale;
+                        }
+                    }
+                    None => {
+                        if account.usage_status != UsageStatus::Disabled {
+                            account.usage_status = UsageStatus::Unavailable;
+                        }
+                    }
                 }
             }
         }
@@ -1214,7 +1275,12 @@ pub async fn read_snapshot() -> Result<Snapshot, SwitchError> {
         has_credentials: None,
     };
 
-    Ok(Snapshot::new(vec![environment]))
+    cache.save();
+
+    Ok(SnapshotFetch {
+        snapshot: Snapshot::new(vec![environment]),
+        rate_limited,
+    })
 }
 
 fn to_usage_window(w: &oauth::Window) -> UsageWindow {

@@ -22,6 +22,7 @@ pub mod oauth;
 pub mod oauth_quarantine;
 pub mod oauth_refresh;
 pub mod paths;
+pub mod poll_budget;
 pub mod poller;
 pub mod recovery_store;
 pub mod resilience;
@@ -31,6 +32,7 @@ pub mod switch_journal;
 pub mod switch_transaction;
 pub mod switcher;
 pub mod tray;
+pub mod usage_cache;
 pub mod wsl;
 
 #[cfg(test)]
