@@ -1,7 +1,7 @@
 import { useClockFormat } from "../lib/clockFormat";
 import { formatInstant } from "../lib/time";
 import type { Account } from "../types";
-import { ageLabel } from "../types";
+import { ageLabel, formatSpend, isEnterprise } from "../types";
 import UsageMeter from "./UsageMeter";
 
 interface AccountDetailsProps {
@@ -31,14 +31,29 @@ export default function AccountDetails({ account }: AccountDetailsProps) {
           <span className="lab">Organisation</span>
           <span className="val">{account.organizationName ?? "—"}</span>
         </div>
-        <div className="acct-details-field">
-          <span className="lab">5-hour resets</span>
-          <span className="val num">{instant(usage?.fiveHour?.resetsAt)}</span>
-        </div>
-        <div className="acct-details-field">
-          <span className="lab">7-day resets</span>
-          <span className="val num">{instant(usage?.sevenDay?.resetsAt)}</span>
-        </div>
+        {isEnterprise(usage) && usage?.spend ? (
+          <>
+            <div className="acct-details-field">
+              <span className="lab">Spend cap</span>
+              <span className="val num">{formatSpend(usage.spend)}</span>
+            </div>
+            <div className="acct-details-field">
+              <span className="lab">Cap resets</span>
+              <span className="val num">{instant(usage.spend.resetsAt)}</span>
+            </div>
+          </>
+        ) : (
+          <>
+            <div className="acct-details-field">
+              <span className="lab">5-hour resets</span>
+              <span className="val num">{instant(usage?.fiveHour?.resetsAt)}</span>
+            </div>
+            <div className="acct-details-field">
+              <span className="lab">7-day resets</span>
+              <span className="val num">{instant(usage?.sevenDay?.resetsAt)}</span>
+            </div>
+          </>
+        )}
         <div className="acct-details-field">
           <span className="lab">Measured</span>
           <span className="val num">

@@ -20,13 +20,33 @@ Nothing yet.
 - A Dashboard home screen, and the app now opens on it. It answers the question no
   per-account view can: where the fleet stands as a whole. A pooled runway estimate says
   how long every account together lasts at the current burn rate, one row per account
-  carries a 24-hour sparkline and its 7-day figure, and a reset stagger plots every
-  account's 5-hour window on one clock — a vertical slice with no headroom in it is the
-  stretch that strands you, and nothing else surfaces it.
-- Per-account analytics behind any row: the 5-hour and 7-day windows plotted apart, a
-  weekly heatmap of when that account actually runs hot, and a 30-day range.
+  carries a sparkline and its 7-day figure, and a reset stagger plots every account's
+  5-hour window on one clock — a vertical slice with no headroom in it is the stretch that
+  strands you, and nothing else surfaces it.
+- Per-account detail opens **in place** beneath its own row, so the rest of the fleet stays
+  on screen to compare against: the 5-hour and 7-day windows plotted apart, per-model
+  weekly limits, and a heatmap of when that account actually runs hot. One range control
+  scopes every panel on the screen.
+- A load-balance grid showing each account's daily peak, which answers whether the rotation
+  is spreading work or quietly draining one account — a question no per-account chart can.
+- A findings section that says in words what the charts imply: which account is carrying
+  the fleet, how often one reached its limit, whether the resets cluster.
 - A clock-format setting. Times were following the OS in some views and not others;
   12-hour, 24-hour and system are now one choice that every view obeys.
+- Support for enterprise accounts, which are limited by a monthly spend cap instead of
+  5-hour and 7-day windows. These report no rate-limit windows at all, so until now they
+  showed no usage anywhere and could never be switched away from however much of the cap
+  was gone. The cap now counts as a real limit — auto-switch, exhaustion and recovery all
+  see it — and appears on every screen that shows usage, with an `[E]` badge marking the
+  account. It stays out of the pooled runway, which projects hours and would be swamped by
+  a monthly figure.
+- Last-known usage survives a failed fetch. Readings are cached, so opening the app during
+  a cold start, a network blip or a rate-limit backoff shows what was true a moment ago
+  with its age, instead of a screen of blanks. How long a reading stays trusted depends on
+  why the fetch failed: a rate-limit response says nothing about your quota, so the figures
+  hold until the window they describe resets; any other failure gets an hour. Past that the
+  reading is dropped rather than shown, because a stale number that looks live is worse
+  than an honest gap.
 
 - In-app updates. The app checks GitHub for a newer release shortly after launch and then
   once a day, notifies you once per version, and shows a dot on Settings while one is
@@ -70,6 +90,21 @@ Nothing yet.
 - Sample data ages with the clock. Every instant in the demo fixture was hardcoded, so
   once those dates passed a first-run user saw every countdown collapsed to "now" and every
   account drawn as fully replenished.
+- Usage readings for an account with no rate-limit windows were recorded as a measured
+  zero. Every reading of an enterprise account was stored as "idle" and drawn on the charts
+  as a flat, fictional line. Unknown is now a gap in the record rather than a zero in it.
+- The rate-limit backoff reacted to the wrong events. It fired whenever any account failed
+  to read this tick — a dropped connection counted — and cleared one tick after a genuine
+  refusal. It now reacts to real rate-limit responses over the full window, and honours the
+  server's own retry hint with a margin rather than retrying at the exact instant it names.
+- Relaunching no longer assumes a rested token. The endpoint budgets requests over a
+  trailing hour that capacity ages out of, and every launch used to start as though none
+  had been spent, so a machine that restarted often spent the hour on launches alone.
+- The pooled-capacity bar reported "0%" when no usage could be read at all, which asserts
+  no capacity left where the truth is that nothing is known yet.
+- Long account names wrapped a row to five lines, and end labels on the fleet chart were
+  clipped below the axis. Charts no longer stretch their own type when the window widens,
+  and every screen now uses the whole window rather than a fixed column.
 
 ## [0.1.0] - 2026-07-29
 

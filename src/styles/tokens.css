@@ -44,6 +44,10 @@
      4.5:1. Measures 6.29:1 against --raised (the worst adjacent surface — rows
      go --bg -> --surface -> --raised on hover) and 7.40:1 against the knob. */
   --switch-on: oklch(0.680 0.140 150);
+  /* Plan badge. NOT a quota colour: it marks what kind of account this is, not
+     how full it is. Held at a distinctly warmer hue than --caution (75) so an
+     enterprise account at 2% is never mistaken for one nearing its limit. */
+  --plan-badge: oklch(0.800 0.150 95);
 
   --ok-fill:      oklch(0.560 0.018 150);
   --caution-fill: oklch(0.700 0.140 75);
@@ -79,7 +83,8 @@
     --interact:  oklch(0.500 0.120 250);
     /* Same 3:1 non-text bar as the dark value: 3.83:1 against --raised and
        4.81:1 against the --bg knob. Light is the tighter of the two themes. */
-    --switch-on: oklch(0.520 0.140 150);
+    
+  --plan-badge: oklch(0.560 0.130 88);
 
     --ok-fill:      oklch(0.640 0.028 150);
     --caution-fill: oklch(0.680 0.150 70);
@@ -101,7 +106,8 @@
   --caution:   oklch(0.500 0.140 65);
   --danger:    oklch(0.500 0.190 27);
   --interact:  oklch(0.500 0.120 250);
-  --switch-on: oklch(0.520 0.140 150);
+  
+  --plan-badge: oklch(0.560 0.130 88);
   --ok-fill:      oklch(0.640 0.028 150);
   --caution-fill: oklch(0.680 0.150 70);
   --danger-fill:  oklch(0.560 0.190 27);
@@ -121,6 +127,7 @@
   --danger:    oklch(0.640 0.190 27);
   --interact:  oklch(0.720 0.085 235);
   --switch-on: oklch(0.680 0.140 150);
+  --plan-badge: oklch(0.800 0.150 95);
   --ok-fill:      oklch(0.560 0.018 150);
   --caution-fill: oklch(0.700 0.140 75);
   --danger-fill:  oklch(0.580 0.185 27);

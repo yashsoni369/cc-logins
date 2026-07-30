@@ -16,10 +16,10 @@
       {
         "label": "main",
         "title": "CC Logins",
-        "width": 1000,
-        "height": 660,
-        "minWidth": 720,
-        "minHeight": 480,
+        "width": 1120,
+        "height": 700,
+        "minWidth": 860,
+        "minHeight": 540,
         "resizable": true,
         "center": true,
         "decorations": true,
@@ -29,7 +29,7 @@
       {
         "label": "popover",
         "url": "popover.html",
-        "width": 340,
+        "width": 364,
         "height": 480,
         "resizable": false,
         "decorations": false,

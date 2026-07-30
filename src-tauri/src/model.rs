@@ -43,6 +43,35 @@ pub struct UsageWindow {
     pub name: Option<String>,
 }
 
+/// A pay-per-use spend cap, as enterprise accounts report it.
+///
+/// Money rather than requests, and a monthly cycle rather than hours — but it
+/// gates the account just as firmly, and on an enterprise account it is the
+/// *only* limit. Those accounts report `five_hour: null`, `seven_day: null` and
+/// `limits: []`, so without this they have no measurable usage at all.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct SpendWindow {
+    /// Major currency units already spent, e.g. 3.08.
+    pub used: f64,
+    /// The cap they count against, e.g. 200.0.
+    pub limit: f64,
+    /// Utilisation 0..=100 of the cap, as the API reports it.
+    pub pct: f64,
+    /// ISO-4217 code, e.g. "USD".
+    pub currency: String,
+    /// The API's own severity word, carried so this app and the web UI agree.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub severity: Option<String>,
+    /// Derived from the monthly cycle: the response carries no reset field.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub resets_at: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub countdown: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub clock: Option<String>,
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct Usage {
@@ -53,6 +82,9 @@ pub struct Usage {
     /// Per-model weekly limits. Absent on older API responses.
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub scoped: Option<Vec<UsageWindow>>,
+    /// Present on enterprise accounts, which have no rate-limit windows at all.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub spend: Option<SpendWindow>,
 }
 
 /// Why an account cannot currently be used or measured.
@@ -185,6 +217,13 @@ impl Account {
         }
         for s in u.scoped.iter().flatten() {
             out.push((s.name.clone().unwrap_or_else(|| "model".into()), s.pct));
+        }
+        // An enterprise account has no rate-limit windows, so without this it
+        // has no binding utilisation at all: unmeasurable, never switched away
+        // from however much of the cap is gone, and contributing nothing to
+        // pooled capacity. The cap is the limit on those accounts.
+        if let Some(s) = &u.spend {
+            out.push(("spend".to_string(), s.pct));
         }
         out
     }
@@ -330,6 +369,7 @@ mod tests {
             number: 1,
             email: "alpha@example.com".into(),
             usage: Some(Usage {
+                spend: None,
                 five_hour: Some(win(pcts.0)),
                 seven_day: Some(win(pcts.1)),
                 scoped: Some(

@@ -81,19 +81,31 @@ use thiserror::Error;
 use crate::model::{Snapshot, Usage};
 
 /// The highest utilisation across every window that gates an account —
-/// five-hour, seven-day, and every scoped per-model window. Mirrors
-/// `bindingUtilisation()` in `src/types.ts`: this is the number that
-/// actually decides when the account gets skipped, not any single window.
-fn binding_pct(usage: &Usage) -> f64 {
-    let mut best = 0.0_f64;
+/// five-hour, seven-day, every scoped per-model window, and an enterprise
+/// spend cap. Mirrors `bindingUtilisation()` in `src/types.ts`: this is the
+/// number that actually decides when the account gets skipped, not any single
+/// window.
+///
+/// `None` when nothing about the account was measurable. This used to start at
+/// `0.0` and take a maximum, which returned a confident zero for an account
+/// with no windows and then wrote it to `samples` as a measurement — so every
+/// reading of an enterprise account was stored as "idle" and drawn on the
+/// charts as a flat, entirely fictional zero.
+fn binding_pct(usage: &Usage) -> Option<f64> {
+    let mut best: Option<f64> = None;
+    let mut consider = |pct: f64| best = Some(best.map_or(pct, |b: f64| b.max(pct)));
+
     if let Some(w) = &usage.five_hour {
-        best = best.max(w.pct);
+        consider(w.pct);
     }
     if let Some(w) = &usage.seven_day {
-        best = best.max(w.pct);
+        consider(w.pct);
     }
     for w in usage.scoped.iter().flatten() {
-        best = best.max(w.pct);
+        consider(w.pct);
+    }
+    if let Some(s) = &usage.spend {
+        consider(s.pct);
     }
     best
 }
@@ -384,7 +396,12 @@ impl HistoryStore {
                 let account_key = account.stable_key();
                 let five_hour_pct = usage.five_hour.as_ref().map(|w| w.pct);
                 let seven_day_pct = usage.seven_day.as_ref().map(|w| w.pct);
-                let binding = binding_pct(usage);
+                // No measurable window is not a reading of zero. Skipping the
+                // row leaves a gap, which every chart already draws as a break
+                // rather than as idle time.
+                let Some(binding) = binding_pct(usage) else {
+                    continue;
+                };
 
                 let changes = tx.execute(
                     "INSERT OR IGNORE INTO samples \
@@ -813,6 +830,7 @@ mod tests {
                     active: false,
                     usage_status: UsageStatus::Ok,
                     usage: Some(Usage {
+                        spend: None,
                         five_hour: Some(UsageWindow {
                             pct: five_hour_pct,
                             ..Default::default()

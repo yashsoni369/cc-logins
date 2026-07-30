@@ -26,7 +26,7 @@
  */
 
 import { formatCountdown } from "@/lib/time";
-import { headroom, type Account, type Sample } from "@/types";
+import { windowHeadroom, type Account, type Sample } from "@/types";
 
 /**
  * How far back a burn rate is measured. Long enough to survive the gaps
@@ -51,6 +51,18 @@ const UNUSABLE_STATUSES: ReadonlySet<string> = new Set([
 
 /** `Date` cannot represent an instant beyond this many milliseconds. */
 const MAX_DATE_MS = 8.64e15;
+
+/**
+ * Past this, the projection stops meaning anything and is reported as a floor.
+ *
+ * Two reasons, and either alone would justify it. Quota replenishes: the 7-day
+ * window resets inside this horizon, so a figure reaching past it is describing
+ * a tank that refills before it drains. And the arithmetic is headroom over
+ * rate, so a near-flat slope divides by almost nothing — 0.01 points/hour of
+ * measurement noise across four accounts yields "1583d 8h", which is precision
+ * the reading cannot support.
+ */
+const RUNWAY_HORIZON_SECONDS = 7 * 86_400;
 
 export interface AccountBurn {
   /** Utilisation points consumed per hour, or null when it cannot be derived. */
@@ -190,7 +202,11 @@ export function pooledRunway(
     // Unusable accounts are not a gap in the estimate; they are outside it.
     if (UNUSABLE_STATUSES.has(account.usageStatus)) continue;
 
-    const remaining = headroom(account.usage);
+    // Rate-limit windows only. An enterprise spend cap gates the account and
+    // counts as binding everywhere else, but it resets monthly — folding 98%
+    // of a $200 budget into an hourly projection reports a runway of weeks and
+    // buries the account that actually strands you this afternoon.
+    const remaining = windowHeadroom(account.usage);
     if (remaining === null) {
       // Usable but unmeasured — no usage at all, or none this build can read.
       // Its headroom is missing from the pool, so the headline is an
@@ -220,8 +236,8 @@ export function pooledRunway(
 }
 
 /**
- * `"2d 3h"` / `"6h 20m"` / `"18m"`, `"now"` once the pool is spent, and
- * `"unknown"` for null.
+ * `"2d 3h"` / `"6h 20m"` / `"18m"`, `"now"` once the pool is spent, `"> 7d"`
+ * beyond the useful horizon, and `"unknown"` for null.
  *
  * The buckets are not restated here: the duration is anchored at the epoch and
  * handed to `formatCountdown`, which mirrors `oauth.rs::reset_strings`. Two
@@ -229,6 +245,8 @@ export function pooledRunway(
  */
 export function formatRunway(seconds: number | null): string {
   if (seconds === null || !Number.isFinite(seconds)) return "unknown";
+  // A floor, not a measurement — see RUNWAY_HORIZON_SECONDS.
+  if (seconds > RUNWAY_HORIZON_SECONDS) return "> 7d";
   // Clamped only so a near-flat slope cannot hand `Date` an unrepresentable
   // instant and throw inside the Dashboard's headline figure.
   const ms = Math.min(Math.max(seconds, 0) * 1_000, MAX_DATE_MS);

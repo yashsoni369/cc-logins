@@ -88,7 +88,7 @@ use tauri::image::Image;
 use tauri::{AppHandle, Emitter, Manager};
 
 use crate::history::HistoryStore;
-use crate::model::{Account, Snapshot, UsageStatus};
+use crate::model::{Account, Snapshot};
 use crate::switcher::{self, Strategy};
 use crate::tray::{self, AmbientTheme, IconSpec, State as TrayState};
 
@@ -445,6 +445,12 @@ fn account_reset_windows(account: &Account) -> Vec<(f64, Option<&str>)> {
         }
         for w in usage.scoped.iter().flatten() {
             out.push((w.pct, w.resets_at.as_deref()));
+        }
+        // Enterprise accounts are gated by the spend cap and nothing else, so
+        // omitting it made them look permanently unblocked — never exhausted,
+        // and never recovering, because they never appeared to hit anything.
+        if let Some(sp) = &usage.spend {
+            out.push((sp.pct, sp.resets_at.as_deref()));
         }
     }
     out
@@ -1124,10 +1130,27 @@ pub async fn run(
     );
 
     let history = open_history(&app);
+    let mut budget = open_budget(&app);
     let mut state = PollerLoopState::new(initial_policy);
     let mut prev_binding_pct: Option<f64> = None;
-    let mut interval_s = poll_policy::DEFAULT_INTERVAL_S.max(poll_policy::MIN_INTERVAL_S);
-    let mut next_poll_at = tokio::time::Instant::now();
+
+    // Resume where the last run left off. The endpoint budgets a *trailing
+    // hour* per token, which a fresh process has no way to know it already
+    // spent — so a relaunch used to start at full cadence against a token it
+    // had just drained, and a restart loop never escaped the 429s it caused.
+    let now0 = Utc::now();
+    let mut interval_s = budget
+        .resume_interval(now0)
+        .unwrap_or(poll_policy::DEFAULT_INTERVAL_S)
+        .max(poll_policy::MIN_INTERVAL_S);
+    let startup_wait_s = budget.wait_for_capacity(now0);
+    if startup_wait_s > 0.0 {
+        log::info!(
+            "poller: {} request(s) already spent in the trailing hour; first poll deferred {startup_wait_s:.0}s",
+            budget.spent(now0)
+        );
+    }
+    let mut next_poll_at = tokio::time::Instant::now() + Duration::from_secs_f64(startup_wait_s);
 
     loop {
         let wall_now = Utc::now();
@@ -1200,7 +1223,11 @@ pub async fn run(
 
         let visible = window_visible(&app);
 
-        let snapshot = match fetch_snapshot_guarded().await {
+        // Counted before the outcome is known: a request that came back 429
+        // was still a request, and the endpoint's window counts attempts.
+        budget.record_request(Utc::now());
+
+        let fetched = match fetch_snapshot_guarded().await {
             Some(s) => s,
             None => {
                 let now = Utc::now();
@@ -1211,6 +1238,15 @@ pub async fn run(
                 continue;
             }
         };
+
+        if fetched.rate_limited {
+            budget.record_rate_limited(Utc::now(), None);
+            log::info!(
+                "poller: usage endpoint rate-limited us; {} request(s) spent in the trailing hour",
+                budget.spent(Utc::now())
+            );
+        }
+        let snapshot = fetched.snapshot;
 
         if let Some(store) = &history {
             match std::panic::catch_unwind(AssertUnwindSafe(|| store.record(&snapshot))) {
@@ -1282,11 +1318,11 @@ pub async fn run(
 
         let active = snapshot.active_account();
         let new_binding_pct = active.and_then(|a| a.binding_utilisation());
-        let recent_failure = snapshot
-            .environments
-            .iter()
-            .flat_map(|e| e.accounts.iter())
-            .any(|a| a.usage_status == UsageStatus::Stale);
+        // What used to stand in for "was there a 429 recently": any account
+        // marked Stale, evaluated for this tick alone. It fired on a dropped
+        // connection and cleared one tick after a genuine refusal, so the AIMD
+        // backoff reacted to the wrong events in both directions. The ledger
+        // now answers it from real 429s over the whole window.
         let limiting_reset = active.and_then(active_limiting_reset_ts);
         let now_epoch = datetime_epoch_seconds(now);
         let earliest_future_reset =
@@ -1298,7 +1334,10 @@ pub async fn run(
             new_binding_pct,
             is_active: true,
             threshold: state.policy.threshold,
-            recent_429: recent_failure,
+            // A real 429 seen inside the trailing window, not "some account is
+            // Stale this tick" — that proxy fired on any network blip and
+            // cleared one tick after a genuine refusal.
+            recent_429: budget.recently_rate_limited(now),
         };
         let (planned_poll_epoch, next_interval) =
             std::panic::catch_unwind(AssertUnwindSafe(|| {
@@ -1366,9 +1405,9 @@ async fn perform_switch(app: &AppHandle, snapshot: &Snapshot, from: u32, to: u32
 /// any kind is held across this call — `read_snapshot` itself never holds
 /// one across its network I/O (see its doc comment), and nothing above it in
 /// this file holds one either.
-async fn fetch_snapshot_guarded() -> Option<Snapshot> {
-    match tokio::spawn(switcher::read_snapshot()).await {
-        Ok(Ok(snap)) => Some(snap),
+async fn fetch_snapshot_guarded() -> Option<switcher::SnapshotFetch> {
+    match tokio::spawn(switcher::read_snapshot_reporting()).await {
+        Ok(Ok(fetched)) => Some(fetched),
         Ok(Err(e)) => {
             log::warn!("poller: snapshot read failed: {e}");
             None
@@ -1394,6 +1433,19 @@ fn find_account(snapshot: &Snapshot, number: u32) -> Option<&Account> {
         .iter()
         .flat_map(|e| e.accounts.iter())
         .find(|a| a.number == number)
+}
+
+/// The persisted request ledger, or an in-memory one when the data directory
+/// cannot be resolved. A budget that cannot be saved is still worth keeping for
+/// the life of the process.
+fn open_budget(app: &AppHandle) -> crate::poll_budget::PollBudget {
+    match app.path().app_data_dir() {
+        Ok(dir) => crate::poll_budget::PollBudget::load(&dir),
+        Err(e) => {
+            log::warn!("poller: no data dir for the request budget ({e}); not persisting it");
+            crate::poll_budget::PollBudget::ephemeral()
+        }
+    }
 }
 
 fn open_history(app: &AppHandle) -> Option<HistoryStore> {
@@ -1570,6 +1622,7 @@ mod tests {
         resets_at: Option<&str>,
     ) -> Account {
         let usage = seven_day_pct.map(|p| Usage {
+            spend: None,
             five_hour: None,
             seven_day: Some(window(p, resets_at)),
             scoped: None,

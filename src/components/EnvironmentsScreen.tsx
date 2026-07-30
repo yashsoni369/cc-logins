@@ -1,5 +1,6 @@
 import type { Environment } from "../types";
-import { ageLabel, displayName } from "../types";
+import { ageLabel, bindingUtilisation, displayName } from "../types";
+import PlanBadge from "./PlanBadge";
 import UsageMeter from "./UsageMeter";
 
 interface EnvironmentsScreenProps {
@@ -30,11 +31,12 @@ function LiveBody({ env }: { env: Environment }) {
                 <div className="who">
                   <span className={`mark${account.active ? " on" : ""}`}></span>
                   <span className="alias">{displayName(account)}</span>
+                  <PlanBadge usage={account.usage} />
                   {account.active && <span className="pill on">active</span>}
                 </div>
               </td>
               <td>
-                <UsageMeter pct={account.usage?.fiveHour?.pct} />
+                <UsageMeter pct={bindingUtilisation(account.usage)} />
               </td>
               <td className="r">
                 <button className="btn ghost">Switch</button>
@@ -83,9 +85,9 @@ function AsleepBody({ env }: { env: Environment }) {
             Last known reading is <span className="num">{age ?? "just now"}</span>: <b>{displayName(known)}</b>{" "}
             active at{" "}
             <span className="num">
-              {known.usage?.fiveHour?.pct == null
+              {bindingUtilisation(known.usage) == null
                 ? "an unrecorded level"
-                : `${Math.round(known.usage.fiveHour.pct)}%`}
+                : `${Math.round(bindingUtilisation(known.usage) ?? 0)}%`}
             </span>
             .
           </>

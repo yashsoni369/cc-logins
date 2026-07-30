@@ -38,11 +38,33 @@ export interface ScopedWindow extends SevenDayWindow {
   name: string;
 }
 
+/**
+ * A pay-per-use spend cap, as enterprise accounts report it.
+ *
+ * Money rather than requests, and a monthly cycle rather than hours — but it
+ * gates the account just as firmly, and on an enterprise account it is the
+ * *only* limit: those report `fiveHour: null`, `sevenDay: null` and no scoped
+ * windows at all. Shaped like a `UsageWindow` on purpose so it can join the
+ * binding windows without a special case at every call site.
+ */
+export interface SpendWindow extends UsageWindow {
+  /** Major currency units already spent, e.g. 3.08. */
+  used: number;
+  /** The cap they count against, e.g. 200. */
+  limit: number;
+  /** ISO-4217 code, e.g. "USD". */
+  currency: string;
+  /** The API's own severity word, when it supplied one. */
+  severity?: string;
+}
+
 export interface Usage {
   fiveHour?: UsageWindow;
   sevenDay?: SevenDayWindow;
   /** Per-model weekly limits. Absent on older responses. */
   scoped?: ScopedWindow[];
+  /** Present on enterprise accounts, which have no rate-limit windows at all. */
+  spend?: SpendWindow;
 }
 
 /**
@@ -140,7 +162,31 @@ export function bindingWindows(u: Usage | undefined): Array<[string, number]> {
   if (u.fiveHour) out.push(["5h", u.fiveHour.pct]);
   if (u.sevenDay) out.push(["7d", u.sevenDay.pct]);
   for (const s of u.scoped ?? []) out.push([s.name, s.pct]);
+  // Mirrors Account::binding_windows in src-tauri/src/model.rs. An enterprise
+  // account has nothing else, so omitting it made the account unmeasurable
+  // rather than simply limited by something different.
+  if (u.spend) out.push(["spend", u.spend.pct]);
   return out;
+}
+
+/**
+ * The window that gates this account — the highest-utilised of them.
+ *
+ * Anything showing a percentage *and* a reset must read both from here. Taking
+ * the percentage from the binding window and the reset from `fiveHour` would
+ * pair a number with the wrong clock, which is worse than showing neither.
+ */
+export function bindingWindow(u: Usage | undefined): UsageWindow | null {
+  if (!u) return null;
+  const windows: UsageWindow[] = [];
+  if (u.fiveHour) windows.push(u.fiveHour);
+  if (u.sevenDay) windows.push(u.sevenDay);
+  for (const scoped of u.scoped ?? []) windows.push(scoped);
+  if (u.spend) windows.push(u.spend);
+
+  let binding: UsageWindow | null = null;
+  for (const candidate of windows) if (!binding || candidate.pct > binding.pct) binding = candidate;
+  return binding;
 }
 
 /**
@@ -149,14 +195,53 @@ export function bindingWindows(u: Usage | undefined): Array<[string, number]> {
  * as "never auto-skip", never as zero.
  */
 export function bindingUtilisation(u: Usage | undefined): number | null {
-  const pcts = bindingWindows(u).map(([, p]) => p);
-  return pcts.length ? Math.max(...pcts) : null;
+  return bindingWindow(u)?.pct ?? null;
 }
 
 /** Remaining percentage before the account hits a limit. */
 export function headroom(u: Usage | undefined): number | null {
   const b = bindingUtilisation(u);
   return b === null ? null : 100 - b;
+}
+
+/**
+ * Headroom from the rate-limit windows alone, ignoring any spend cap.
+ *
+ * The pooled runway projects *hours*, from a burn measured over the last few
+ * of them. A monthly spend cap sits on a different clock entirely: 98% of a
+ * $200 budget remaining, divided by a rate derived from five-hour windows,
+ * reports a runway of weeks and drowns out every account that could actually
+ * strand you this afternoon. The cap still gates the account — see
+ * bindingWindows — it just has no business in an hourly projection.
+ */
+export function windowHeadroom(u: Usage | undefined): number | null {
+  if (!u) return null;
+  const pcts: number[] = [];
+  if (u.fiveHour) pcts.push(u.fiveHour.pct);
+  if (u.sevenDay) pcts.push(u.sevenDay.pct);
+  for (const s of u.scoped ?? []) pcts.push(s.pct);
+  return pcts.length ? 100 - Math.max(...pcts) : null;
+}
+
+/**
+ * True when the account is gated by a spend cap and nothing else.
+ *
+ * Not "has a spend cap": a consumer plan with pay-as-you-go overage reports
+ * one too, alongside its rate-limit windows. What marks an enterprise
+ * pay-per-use account is the absence of those windows — confirmed against a
+ * live response, which returned `five_hour: null`, `seven_day: null` and
+ * `limits: []`.
+ */
+export function isEnterprise(usage: Usage | undefined): boolean {
+  if (!usage?.spend) return false;
+  return !usage.fiveHour && !usage.sevenDay && (usage.scoped?.length ?? 0) === 0;
+}
+
+/** "$3.08 of $200.00" — the cap in the words the web UI uses. */
+export function formatSpend(spend: SpendWindow): string {
+  const money = (v: number) =>
+    new Intl.NumberFormat(undefined, { style: "currency", currency: spend.currency || "USD" }).format(v);
+  return `${money(spend.used)} of ${money(spend.limit)}`;
 }
 
 export type QuotaState = "ok" | "caution" | "danger";
