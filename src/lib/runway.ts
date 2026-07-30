@@ -26,7 +26,7 @@
  */
 
 import { formatCountdown } from "@/lib/time";
-import { headroom, type Account, type Sample } from "@/types";
+import { windowHeadroom, type Account, type Sample } from "@/types";
 
 /**
  * How far back a burn rate is measured. Long enough to survive the gaps
@@ -202,7 +202,11 @@ export function pooledRunway(
     // Unusable accounts are not a gap in the estimate; they are outside it.
     if (UNUSABLE_STATUSES.has(account.usageStatus)) continue;
 
-    const remaining = headroom(account.usage);
+    // Rate-limit windows only. An enterprise spend cap gates the account and
+    // counts as binding everywhere else, but it resets monthly — folding 98%
+    // of a $200 budget into an hourly projection reports a runway of weeks and
+    // buries the account that actually strands you this afternoon.
+    const remaining = windowHeadroom(account.usage);
     if (remaining === null) {
       // Usable but unmeasured — no usage at all, or none this build can read.
       // Its headroom is missing from the pool, so the headline is an

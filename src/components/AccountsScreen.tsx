@@ -1,8 +1,9 @@
 import { Fragment, useState, type CSSProperties, type KeyboardEvent } from "react";
 import type { Account, Snapshot } from "../types";
-import { ageLabel, displayName, maskEmail } from "../types";
+import { ageLabel, displayName, formatSpend, isEnterprise, maskEmail } from "../types";
 import UsageMeter from "./UsageMeter";
 import AccountDetails from "./AccountDetails";
+import PlanBadge from "./PlanBadge";
 import AddTokenDialog from "./AddTokenDialog";
 import SignInFlow from "./SignInFlow";
 import { RefreshButton } from "./RefreshButton";
@@ -226,6 +227,7 @@ export default function AccountsScreen({
                       <div>
                         <div className="alias" style={isHeldOut ? { color: "var(--faint)" } : undefined}>
                           {displayName(account)}{" "}
+                          <PlanBadge usage={account.usage} />{" "}
                           {account.active && <span className="pill on">active</span>}
                           {isHeldOut && <span className="pill">held out</span>}
                           {hasForeignCredential && <span className="pill danger">credential mismatch</span>}
@@ -241,16 +243,32 @@ export default function AccountsScreen({
                       </div>
                     </div>
                   </td>
-                  <td>
-                    <div style={meterStyle}>
-                      <UsageMeter pct={account.usage?.fiveHour?.pct} />
-                    </div>
-                  </td>
-                  <td>
-                    <div style={meterStyle}>
-                      <UsageMeter pct={account.usage?.sevenDay?.pct} />
-                    </div>
-                  </td>
+                  {/* An enterprise account has neither window — its only limit is a
+                      monthly spend cap — so the two cells merge into the one
+                      figure that exists rather than showing a pair of blanks. */}
+                  {isEnterprise(account.usage) && account.usage?.spend ? (
+                    <td colSpan={2}>
+                      <div className="spend-cell" style={meterStyle}>
+                        <UsageMeter pct={account.usage.spend.pct} />
+                        <span className="amt">
+                          <b>{formatSpend(account.usage.spend)}</b> spend cap
+                        </span>
+                      </div>
+                    </td>
+                  ) : (
+                    <>
+                      <td>
+                        <div style={meterStyle}>
+                          <UsageMeter pct={account.usage?.fiveHour?.pct} />
+                        </div>
+                      </td>
+                      <td>
+                        <div style={meterStyle}>
+                          <UsageMeter pct={account.usage?.sevenDay?.pct} />
+                        </div>
+                      </td>
+                    </>
+                  )}
                   <td
                     className="r num"
                     title={resetsAtLabel}

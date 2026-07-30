@@ -1,5 +1,5 @@
 import type { Account, QuotaState } from "../../types";
-import { bindingUtilisation, displayName, quotaState } from "../../types";
+import { bindingUtilisation, displayName, formatSpend, isEnterprise, quotaState } from "../../types";
 import { formatCountdown } from "../../lib/time";
 import { useElementWidth } from "../../lib/useElementWidth";
 
@@ -143,7 +143,18 @@ export default function ResetStagger({ accounts, now, hours = 12 }: ResetStagger
   }
 
   const horizonMs = hours * 3_600_000;
-  const bands = accounts.map((a) => bandFor(a, now, horizonMs));
+  /*
+   * Enterprise accounts are plotted separately, below.
+   *
+   * This strip exists to show the gaps between hourly resets — the stretch
+   * where every account is still on spent quota is what strands you. A monthly
+   * spend cap is always off the right-hand edge of a 12-hour horizon, so a band
+   * for it would be a full-width bar that never moves, saying nothing while
+   * taking a row from the accounts the strip is about.
+   */
+  const hourly = accounts.filter((a) => !isEnterprise(a.usage));
+  const monthly = accounts.filter((a) => isEnterprise(a.usage));
+  const bands = hourly.map((a) => bandFor(a, now, horizonMs));
   const rowsH = bands.length * ROW_PITCH;
   const viewH = rowsH + AXIS_H;
   const title = describe(bands, hours);
@@ -232,6 +243,31 @@ export default function ResetStagger({ accounts, now, hours = 12 }: ResetStagger
           +{hours}h
         </text>
       </svg>
+
+      {/*
+        Accounts on a monthly cap, on their own line and their own scale.
+        Rendered only when there are any — a permanent empty row explaining an
+        absent account type is worse than the omission it explains.
+      */}
+      {monthly.length > 0 && (
+        <ul className="stagger-monthly">
+          {monthly.map((account) => {
+            const spend = account.usage?.spend;
+            const countdown = formatCountdown(spend?.resetsAt, now);
+            return (
+              <li key={account.number}>
+                <span className="nm" title={displayName(account)}>
+                  {displayName(account)}
+                </span>
+                <span className="num">
+                  {spend ? formatSpend(spend) : "spend cap"} · monthly cap
+                  {countdown ? `, resets in ${countdown}` : ""}
+                </span>
+              </li>
+            );
+          })}
+        </ul>
+      )}
     </div>
   );
 }

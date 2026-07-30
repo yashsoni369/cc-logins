@@ -446,6 +446,12 @@ fn account_reset_windows(account: &Account) -> Vec<(f64, Option<&str>)> {
         for w in usage.scoped.iter().flatten() {
             out.push((w.pct, w.resets_at.as_deref()));
         }
+        // Enterprise accounts are gated by the spend cap and nothing else, so
+        // omitting it made them look permanently unblocked — never exhausted,
+        // and never recovering, because they never appeared to hit anything.
+        if let Some(sp) = &usage.spend {
+            out.push((sp.pct, sp.resets_at.as_deref()));
+        }
     }
     out
 }
@@ -1570,6 +1576,7 @@ mod tests {
         resets_at: Option<&str>,
     ) -> Account {
         let usage = seven_day_pct.map(|p| Usage {
+            spend: None,
             five_hour: None,
             seven_day: Some(window(p, resets_at)),
             scoped: None,

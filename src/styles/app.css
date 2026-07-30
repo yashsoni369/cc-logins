@@ -2308,3 +2308,76 @@ tr.acct-details-row td {
 .axis-txt.is-thresh {
   fill: var(--caution);
 }
+
+/* ─────────── enterprise plan badge ───────────
+   Its own colour, not --caution. Yellow already means 75-89% utilisation in
+   this app; a badge in that hue would make an enterprise account at 2% read
+   as one nearing its limit. Square and lettered so it reads as a mark rather
+   than as another status pill. */
+.plan-badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: none;
+  width: 15px;
+  height: 15px;
+  border: 1px solid var(--plan-badge);
+  border-radius: 2px;
+  color: var(--plan-badge);
+  font-family: var(--mono);
+  font-size: 9.5px;
+  font-weight: 600;
+  line-height: 1;
+  cursor: default;
+}
+
+/* One spend figure where a row would otherwise carry two window meters. */
+.spend-cell {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+}
+.spend-cell .amt {
+  font-family: var(--mono);
+  font-variant-numeric: tabular-nums;
+  font-size: 12px;
+  color: var(--muted);
+  white-space: nowrap;
+}
+.spend-cell .amt b {
+  font-weight: 500;
+  color: var(--ink);
+}
+
+/* Accounts on a monthly spend cap, listed beneath the hourly stagger rather
+   than plotted on it — a reset weeks away is always off the right edge of a
+   12-hour horizon, so a band for it would never move. */
+.stagger-monthly {
+  list-style: none;
+  margin: 8px 0 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+.stagger-monthly li {
+  display: grid;
+  grid-template-columns: 118px minmax(0, 1fr);
+  gap: 10px;
+  align-items: baseline;
+  font-size: 11px;
+  color: var(--muted);
+}
+.stagger-monthly .nm {
+  font-family: var(--mono);
+  font-size: 10.5px;
+  color: var(--muted);
+  text-align: right;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.stagger-monthly .num {
+  color: var(--ink);
+}

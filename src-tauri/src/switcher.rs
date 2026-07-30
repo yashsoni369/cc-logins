@@ -99,7 +99,8 @@ use crate::credentials::{
     self, CredentialError, CredentialStore, Platform as CredPlatform, StoreHost,
 };
 use crate::model::{
-    Account, EnvKind, EnvStatus, Environment, Snapshot, Usage, UsageStatus, UsageWindow,
+    Account, EnvKind, EnvStatus, Environment, Snapshot, SpendWindow, Usage, UsageStatus,
+    UsageWindow,
 };
 use crate::oauth;
 use crate::oauth_quarantine::OAuthQuarantine;
@@ -1246,6 +1247,18 @@ fn to_model_usage(u: &oauth::UsageResult) -> Usage {
         } else {
             Some(u.scoped.iter().map(to_scoped_window).collect())
         },
+        // Parsed since the port was written and dropped on this line ever
+        // since, so an enterprise account reached the UI with no usage at all.
+        spend: u.spend.as_ref().map(|sp| SpendWindow {
+            used: sp.used,
+            limit: sp.limit,
+            pct: sp.pct,
+            currency: sp.currency.clone(),
+            severity: sp.severity.clone(),
+            resets_at: sp.resets_at.clone(),
+            countdown: sp.countdown.clone(),
+            clock: sp.clock.clone(),
+        }),
     }
 }
 
@@ -2907,6 +2920,7 @@ mod tests {
 
     fn switchable_account(number: u32, pct: Option<f64>) -> Account {
         let usage = pct.map(|p| Usage {
+            spend: None,
             five_hour: None,
             seven_day: Some(UsageWindow {
                 pct: p,

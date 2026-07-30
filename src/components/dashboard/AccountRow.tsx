@@ -2,9 +2,21 @@ import { useId, useState } from "react";
 
 import { useClockFormat } from "@/lib/clockFormat";
 import { formatClock, formatCountdown } from "@/lib/time";
-import { bindingUtilisation, displayName, quotaState, type Account, type DayStat, type Sample, type ScopedSample } from "@/types";
+import {
+  bindingUtilisation,
+  bindingWindow,
+  displayName,
+  formatSpend,
+  isEnterprise,
+  quotaState,
+  type Account,
+  type DayStat,
+  type Sample,
+  type ScopedSample,
+} from "@/types";
 import { Loading } from "@/components/Loading";
 import UsageMeter from "@/components/UsageMeter";
+import PlanBadge from "@/components/PlanBadge";
 import UsageHeatmap from "./UsageHeatmap";
 import { RangeChart, Sparkline, WindowChart } from "./charts";
 import type { FleetSeries } from "@/lib/dashboard";
@@ -108,8 +120,13 @@ export default function AccountRow({
   const cls = state === "ok" ? "" : state;
   const status = statusLabel(account);
   const sevenDay = account.usage?.sevenDay?.pct;
-  const fiveHour = account.usage?.fiveHour;
-  const resets = formatCountdown(fiveHour?.resetsAt, now) ?? fiveHour?.countdown ?? "—";
+  // Read from the binding window rather than fiveHour: on an enterprise
+  // account there is no five-hour window, and its monthly cap is the only
+  // reset there is.
+  const bindingWin = bindingWindow(account.usage);
+  const resets = formatCountdown(bindingWin?.resetsAt, now) ?? bindingWin?.countdown ?? "—";
+  const enterprise = isEnterprise(account.usage);
+  const spend = account.usage?.spend;
 
   const samples = detail?.samples ?? [];
   const daily = detail?.daily ?? [];
@@ -158,6 +175,7 @@ export default function AccountRow({
           <span className="row-name" title={name}>
             {name}
           </span>
+          <PlanBadge usage={account.usage} />
           {account.active && <span className="pill on">active</span>}
           {status && <span className={`pill${status === "re-login" || status === "mismatch" ? " danger" : ""}`}>{status}</span>}
         </span>
@@ -166,10 +184,17 @@ export default function AccountRow({
           <UsageMeter pct={binding} />
           <small>binding</small>
         </span>
-        <span className="row-cell">
-          {sevenDay == null ? "··" : `${Math.round(sevenDay)}%`}
-          <small>7-day</small>
-        </span>
+        {enterprise && spend ? (
+          <span className="row-cell" title={formatSpend(spend)}>
+            {formatSpend(spend).split(" of ")[0]}
+            <small>of {formatSpend(spend).split(" of ")[1]}</small>
+          </span>
+        ) : (
+          <span className="row-cell">
+            {sevenDay == null ? "··" : `${Math.round(sevenDay)}%`}
+            <small>7-day</small>
+          </span>
+        )}
         <span className={`row-cell${resets === "—" ? " pct-unknown" : ""}`}>
           {resets}
           <small>resets in</small>
@@ -219,7 +244,33 @@ export default function AccountRow({
               <>
                 {tab === "windows" && (
                   <>
-                    {samples.length > 0 ? (
+                    {/* An enterprise plan has no rate-limit windows at all, so the
+                        two window charts would draw from sample columns that are
+                        null for every reading. One panel for the limit that does
+                        exist says more than two empty ones. */}
+                    {enterprise && spend ? (
+                      <>
+                        <WindowChart
+                          label="Spend cap"
+                          samples={samples}
+                          pick={(sample) => sample.bindingPct}
+                          threshold={threshold}
+                          startLabel={formatClock(firstAt, clockFormat) ?? "earlier"}
+                          endLabel={formatClock(lastAt, clockFormat) ?? "now"}
+                        />
+                        <div className="stats">
+                          <Stat k="Spent" v={formatSpend(spend).split(" of ")[0] ?? "··"} />
+                          <Stat k="Monthly cap" v={formatSpend(spend).split(" of ")[1] ?? "··"} />
+                          <Stat k="Used" v={`${Math.round(spend.pct)}%`} tone={cls} />
+                          <Stat k="Resets" v={resets === "—" ? "unknown" : resets} />
+                        </div>
+                        <p className="dash-note">
+                          This plan bills usage against a monthly spend cap and has no
+                          5-hour or 7-day windows. The reset is the start of the next
+                          month — the usage API does not supply one.
+                        </p>
+                      </>
+                    ) : samples.length > 0 ? (
                       <div className="duo">
                         <WindowChart
                           label="5-hour window"

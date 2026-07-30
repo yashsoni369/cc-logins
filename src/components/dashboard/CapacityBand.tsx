@@ -3,7 +3,7 @@ import type { CSSProperties } from "react";
 import { formatRunway, type RunwayEstimate } from "@/lib/runway";
 import { formatCountdown } from "@/lib/time";
 import { pooledHeadroom } from "@/lib/dashboard";
-import { quotaState, type Account } from "@/types";
+import { bindingWindow, quotaState, type Account } from "@/types";
 
 /** Stale meters and projections dim to this — the accounts table's own value. */
 const DIM: CSSProperties = { opacity: 0.55 };
@@ -21,7 +21,9 @@ function soonestReset(accounts: Account[]): string | undefined {
   let best: number | null = null;
   let iso: string | undefined;
   for (const a of accounts) {
-    const resetsAt = a.usage?.fiveHour?.resetsAt;
+    // bindingWindow, not fiveHour: an enterprise account has no five-hour
+    // window, and its monthly cap simply never wins "earliest".
+    const resetsAt = bindingWindow(a.usage)?.resetsAt;
     const ms = resetsAt ? Date.parse(resetsAt) : Number.NaN;
     if (!Number.isFinite(ms)) continue;
     if (best === null || ms < best) {

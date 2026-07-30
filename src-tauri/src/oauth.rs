@@ -266,14 +266,97 @@ pub struct Window {
 /// [`account_headroom`].
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct SpendEntry {
-    /// Dollars/major-currency-units spent (API sends cents; divided by 100).
+    /// Major currency units spent, scaled from the API's minor units.
     pub used: f64,
     pub limit: f64,
     pub pct: f64,
     pub currency: String,
+    /// The API's own word for how close the cap is — "normal" and so on.
+    /// Carried rather than re-derived so the app and the web UI agree.
+    pub severity: Option<String>,
     pub resets_at: Option<String>,
     pub countdown: Option<String>,
     pub clock: Option<String>,
+}
+
+/// Start of the next calendar month, UTC, as an RFC-3339 instant.
+///
+/// The usage response carries no reset time for a spend cap — `daily` and
+/// `weekly` are null and neither `spend` nor `extra_usage` has a `resets_at`.
+/// The cap is a `monthly_limit`, and the web UI shows the same boundary this
+/// computes (an "Aug 1, 5:30 AM GMT+5:30" reading is midnight UTC on the 1st),
+/// so the instant is derived from the documented monthly cycle rather than
+/// invented. If a cap ever resets on a billing anniversary instead, this is
+/// the one place that would need to change.
+fn next_month_start_utc(now: DateTime<Utc>) -> Option<String> {
+    let (year, month) = if now.month() == 12 {
+        (now.year().checked_add(1)?, 1)
+    } else {
+        (now.year(), now.month() + 1)
+    };
+    chrono::NaiveDate::from_ymd_opt(year, month, 1)
+        .and_then(|d| d.and_hms_opt(0, 0, 0))
+        .map(|dt| {
+            DateTime::<Utc>::from_naive_utc_and_offset(dt, Utc)
+                .to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
+        })
+}
+
+/// A money amount as the newer `spend` object reports it: minor units plus the
+/// exponent that scales them. Reading the exponent rather than dividing by a
+/// hard-coded 100 is what makes this right for currencies that do not have two
+/// decimal places.
+fn money_amount(v: &Value) -> Option<(f64, Option<String>)> {
+    let minor = as_finite_f64(v.get("amount_minor")?)?;
+    let exponent = v.get("exponent").and_then(|e| e.as_i64()).unwrap_or(2);
+    let scale = 10_f64.powi(i32::try_from(exponent).ok()?);
+    if scale == 0.0 {
+        return None;
+    }
+    let currency = v
+        .get("currency")
+        .and_then(|c| c.as_str())
+        .map(str::to_string);
+    Some((minor / scale, currency))
+}
+
+/// The top-level `spend` object → [`SpendEntry`].
+///
+/// Preferred over `extra_usage`, which carries the same figures in a flatter,
+/// older shape: this one states its own minor-unit exponent and its severity,
+/// where the other requires assuming cents. Returns `None` when spend is not
+/// enabled or any figure is missing, and the caller then falls back.
+fn build_spend_from_spend_object(spend: &Value, now: DateTime<Utc>) -> Option<SpendEntry> {
+    if !spend.get("enabled").and_then(|v| v.as_bool()).unwrap_or(false) {
+        return None;
+    }
+
+    let (used, used_currency) = money_amount(spend.get("used")?)?;
+    let (limit, limit_currency) = money_amount(spend.get("limit")?)?;
+    let pct = as_finite_f64(spend.get("percent")?)?;
+
+    let resets_at = next_month_start_utc(now);
+    let (countdown, clock) = match resets_at.as_deref() {
+        Some(ra) => match format_reset(ra) {
+            Ok((c, cl)) => (Some(c), Some(cl)),
+            Err(_) => (None, None),
+        },
+        None => (None, None),
+    };
+
+    Some(SpendEntry {
+        used,
+        limit,
+        pct,
+        currency: limit_currency.or(used_currency).unwrap_or_else(|| "USD".into()),
+        severity: spend
+            .get("severity")
+            .and_then(|v| v.as_str())
+            .map(str::to_string),
+        resets_at,
+        countdown,
+        clock,
+    })
 }
 
 /// One per-model weekly window from the newer `limits[]` array (requirement 5).
@@ -418,11 +501,25 @@ fn build_spend_entry(eu: &Value) -> Option<SpendEntry> {
         None => (None, None, None),
     };
 
+    // No reset field exists on `extra_usage` either, so the monthly boundary is
+    // derived here too rather than leaving the entry without one.
+    let (resets_at, countdown, clock) = match resets_at {
+        Some(_) => (resets_at, countdown, clock),
+        None => {
+            let derived = next_month_start_utc(Utc::now());
+            match derived.as_deref().map(format_reset) {
+                Some(Ok((c, cl))) => (derived, Some(c), Some(cl)),
+                _ => (derived, None, None),
+            }
+        }
+    };
+
     Some(SpendEntry {
         used: used_credits / 100.0,
         limit: monthly_limit / 100.0,
         pct: utilization,
         currency,
+        severity: None,
         resets_at,
         countdown,
         clock,
@@ -455,14 +552,24 @@ pub fn normalize_usage_response(data: &Value) -> Result<Option<UsageResult>, Nor
         }
     }
 
-    if let Some(eu) = data.get("extra_usage") {
-        if truthy(eu) {
-            let is_enabled = eu
-                .get("is_enabled")
-                .and_then(|v| v.as_bool())
-                .unwrap_or(false);
-            if is_enabled {
-                spend = build_spend_entry(eu);
+    // The newer top-level object first — it states its own minor-unit exponent
+    // and severity, where `extra_usage` requires assuming cents. Both carry the
+    // same figures on a live enterprise account; only the older one is
+    // guaranteed present on older responses.
+    if let Some(s) = data.get("spend") {
+        spend = build_spend_from_spend_object(s, Utc::now());
+    }
+
+    if spend.is_none() {
+        if let Some(eu) = data.get("extra_usage") {
+            if truthy(eu) {
+                let is_enabled = eu
+                    .get("is_enabled")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false);
+                if is_enabled {
+                    spend = build_spend_entry(eu);
+                }
             }
         }
     }
@@ -1606,6 +1713,76 @@ mod tests {
     }
 
     // -- nullable extra_usage / spend (requirement 6) ------------------------
+
+    #[test]
+    /// The exact shape a live enterprise account returns, captured from a real
+    /// response. Every figure here was observed, not assumed: `amount_minor`
+    /// with an `exponent`, no reset field anywhere, and no rate-limit windows
+    /// at all. If the API changes, this is the test that should fail first.
+    #[test]
+    fn live_enterprise_shape_reads_from_the_spend_object() {
+        let data = json!({
+            "five_hour": null,
+            "seven_day": null,
+            "limits": [],
+            "extra_usage": {
+                "credits_ever_enabled": true, "currency": "USD", "decimal_places": 2,
+                "is_enabled": true, "monthly_limit": 20000, "spend_limit_reached": false,
+                "used_credits": 308.0, "user_disabled": false, "utilization": 1.54
+            },
+            "spend": {
+                "enabled": true,
+                "percent": 2,
+                "severity": "normal",
+                "limit": {"amount_minor": 20000, "currency": "USD", "exponent": 2},
+                "used": {"amount_minor": 308, "currency": "USD", "exponent": 2}
+            }
+        });
+
+        let result = normalize_usage_response(&data).unwrap().unwrap();
+        // No rate-limit windows: the cap is the account's only limit.
+        assert!(result.five_hour.is_none());
+        assert!(result.seven_day.is_none());
+        assert!(result.scoped.is_empty());
+
+        let spend = result.spend.expect("spend must survive with no windows present");
+        assert_eq!(spend.used, 3.08);
+        assert_eq!(spend.limit, 200.0);
+        assert_eq!(spend.currency, "USD");
+        assert_eq!(spend.severity.as_deref(), Some("normal"));
+        // Derived: the response carries no reset for a spend cap at all.
+        assert!(spend.resets_at.is_some(), "monthly boundary must be derived");
+    }
+
+    /// `exponent` is read rather than assumed. A currency with no minor unit
+    /// would otherwise be divided by 100 and reported at a hundredth of itself.
+    #[test]
+    fn spend_object_honours_a_non_two_exponent() {
+        let data = json!({
+            "spend": {
+                "enabled": true,
+                "percent": 50,
+                "limit": {"amount_minor": 5000, "currency": "JPY", "exponent": 0},
+                "used": {"amount_minor": 2500, "currency": "JPY", "exponent": 0}
+            }
+        });
+        let spend = normalize_usage_response(&data).unwrap().unwrap().spend.unwrap();
+        assert_eq!(spend.used, 2500.0);
+        assert_eq!(spend.limit, 5000.0);
+        assert_eq!(spend.currency, "JPY");
+    }
+
+    /// Disabled spend is not a cap, and must not become a binding window.
+    #[test]
+    fn disabled_spend_object_falls_through() {
+        let data = json!({
+            "five_hour": {"utilization": 12.0},
+            "spend": {"enabled": false, "percent": 0, "limit": null, "used": null}
+        });
+        let result = normalize_usage_response(&data).unwrap().unwrap();
+        assert!(result.spend.is_none());
+        assert!(result.five_hour.is_some());
+    }
 
     #[test]
     fn extra_usage_all_fields_present_yields_spend_in_dollars() {

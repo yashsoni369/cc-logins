@@ -8,6 +8,7 @@ import { useCallback, useEffect, useRef, useState, type CSSProperties } from "re
 import { Loading } from "@/components/Loading";
 import { RefreshButton } from "@/components/RefreshButton";
 import UsageMeter from "@/components/UsageMeter";
+import PlanBadge from "@/components/PlanBadge";
 import { hasBackend, IpcError, switchAccount } from "@/lib/api";
 import { formatClock, formatCountdown, useNow } from "@/lib/time";
 import { useDaemonStatus } from "@/lib/useDaemonStatus";
@@ -18,6 +19,7 @@ import {
   bindingUtilisation,
   bindingWindow,
   displayName,
+  isEnterprise,
   type Usage,
   type UsageWindow,
 } from "@/types";
@@ -225,6 +227,7 @@ export default function PopoverPanel() {
   const activeUtil = bindingUtilisation(activeAccount.usage);
   const others = accounts.filter((account) => account.number !== activeAccount.number);
   const fiveHour = activeAccount.usage?.fiveHour;
+  const activeSpend = isEnterprise(activeAccount.usage) ? activeAccount.usage?.spend : undefined;
   const sevenDay = activeAccount.usage?.sevenDay;
   const dimStyle: CSSProperties | undefined = error ? { opacity: 0.55 } : undefined;
   const urgent = phase?.kind === "warning" || phase?.kind === "switching" || phase?.kind === "exhausted";
@@ -276,11 +279,22 @@ export default function PopoverPanel() {
           <span className="alias" title={displayName(activeAccount)}>
             {displayName(activeAccount)}
           </span>
+          <PlanBadge usage={activeAccount.usage} />
           <span className={`pill ${urgent ? "danger" : "on"}`}>
             {urgent && activeUtil != null ? `${Math.round(activeUtil)}%` : "active"}
           </span>
         </div>
         <div className="pop-win">
+          {/* No rate-limit windows exist on an enterprise plan, so the cap it is
+              actually limited by takes their place rather than leaving the
+              block empty. */}
+          {activeSpend && (
+            <div className="row">
+              <span className="lab">spend</span>
+              <div style={dimStyle}><UsageMeter pct={activeSpend.pct} /></div>
+              <span className="rst">{resetLabel(activeSpend, minuteNow)}</span>
+            </div>
+          )}
           {fiveHour && (
             <div className="row">
               <span className="lab">5h</span>
@@ -326,6 +340,7 @@ export default function PopoverPanel() {
             >
               <span className="mark" />
               <span className="alias" title={displayName(account)}>{displayName(account)}</span>
+              <PlanBadge usage={account.usage} />
               {disabled && <span className="pill">held out</span>}
               {needsRelogin && <span className="pill danger" title="Re-login required">Re-login</span>}
               {hasForeignCredential && (
