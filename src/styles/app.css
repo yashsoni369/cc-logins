@@ -210,10 +210,27 @@ h3 {
 .pane {
   height: 100%;
   min-height: 0;
-  /* Reading measure: at very wide windows, an un-capped table flings its
-     right-hand columns far from the row they describe. Left-aligned by
-     default (block layout), not centred — this isn't a marketing page. */
-  max-width: 1180px;
+  /*
+   * Every pane uses the whole window. There is no cap and no floor here: a
+   * floor would trade the empty right-hand margin for a horizontal scrollbar.
+   * The window's own minimum, in tauri.conf.json, is the floor.
+   *
+   * That minimum is derived, not chosen. The widest hard requirement on this
+   * screen is a dashboard account row — 12 + 120 + 60 + 135 + 58 + 74 plus
+   * five 14px gaps = 529px — and the shell adds a 168px sidebar and 48px of
+   * padding, so the app is genuinely usable from about 745px. minWidth sits at
+   * 860 for comfort above that, and deliberately below 1024: a 13" MacBook set
+   * to Larger Text reports 1024x640 logical, and 1366x768 at 125% scaling
+   * reports 1093x614. A minimum wider than the display cannot be resized or
+   * reached at all, which is a far worse failure than a cramped layout.
+   *
+   * The reading measure this used to enforce has moved to the things that
+   * actually need one: forms and sign-in cards keep a fixed width, and any
+   * chart drawing text measures its container so a wider pane buys resolution
+   * rather than bigger type. Everything else — prose, tables, lists, grids,
+   * charts — fills.
+   */
+  max-width: none;
   padding: 22px 24px;
   display: flex;
   flex-direction: column;
@@ -582,6 +599,22 @@ hr.rule {
 
 /* ─────────── settings primitives (kept for future screens) ─────────── */
 
+/*
+ * Settings rows laid out in columns once there is room.
+ *
+ * Each row already spanned the pane, but its control is naturally small,
+ * so a wide window left the right half of every row empty. Stretching the
+ * controls would be worse -- a 900px toggle is not an improvement -- so the
+ * rows sit side by side instead. auto-fit gives one column on a narrow
+ * window with no breakpoint to maintain.
+ */
+.fields {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(440px, 1fr));
+  gap: 0 40px;
+  align-items: start;
+}
+
 .field {
   display: grid;
   grid-template-columns: 220px minmax(0, 1fr);
@@ -875,14 +908,13 @@ hr.rule {
   margin: 14px 0 0;
   font-size: 12px;
   color: var(--muted);
-  max-width: 68ch;
 }
 
 /* ── capacity ── */
 .cap {
   display: flex;
   align-items: flex-end;
-  gap: 14px 28px;
+  gap: 14px 32px;
   flex-wrap: wrap;
 }
 .cap-figure {
@@ -902,6 +934,10 @@ hr.rule {
   line-height: 1.05;
   letter-spacing: -0.02em;
 }
+.cap-sub {
+  font-size: 11px;
+  color: var(--muted);
+}
 .cap-meta {
   display: flex;
   flex-direction: column;
@@ -911,57 +947,110 @@ hr.rule {
   color: var(--muted);
 }
 
-/* Headroom the switcher can actually reach, split by whose it is. Width
-   tracks free capacity, so the bar shrinks as the fleet is spent rather
-   than merely changing colour. */
+/*
+ * Headroom the switcher can actually reach, on its own full-width row.
+ *
+ * The track is the fleet's whole capacity — 100 points per usable account —
+ * and the fill is what remains. Sized to its container instead, the bar always
+ * spanned the full width, so its most obvious property carried no information:
+ * a nearly-spent fleet drew exactly as long as an untouched one.
+ */
 .pool {
-  flex: 1 1 300px;
-  min-width: 260px;
+  margin-top: 18px;
+}
+.pool-head {
+  display: flex;
+  align-items: baseline;
+  gap: 12px;
+  flex-wrap: wrap;
+  margin-bottom: 6px;
+}
+.pool-head .lab {
+  font-family: var(--mono);
+  font-size: 10px;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+.pool-total {
+  font-size: 11px;
+  color: var(--muted);
 }
 .pool-bar {
   display: flex;
   gap: 2px;
-  height: 16px;
-  margin-bottom: 7px;
+  height: 18px;
+  border-radius: 2px;
+  overflow: hidden;
+  background: var(--surface);
 }
 .pool-seg {
-  position: relative;
-  flex-shrink: 1;
-  min-width: 3px;
-  background: var(--raised);
-  border-radius: 1px;
-  overflow: hidden;
-}
-.pool-seg i {
-  position: absolute;
-  inset: 0 auto 0 0;
-  display: block;
+  /* A twentieth of the bar is still a visible mark, and a spent account keeps
+     a hairline rather than vanishing from a fleet it is still part of. */
+  min-width: 2px;
   background: var(--ok-fill);
 }
-.pool-seg.caution i {
+.pool-seg.caution {
   background: var(--caution-fill);
 }
-.pool-seg.danger i {
+.pool-seg.danger {
   background: var(--danger-fill);
 }
-/* Unreadable usage is a distinct state, never a full or empty segment. */
-.pool-seg.unknown {
-  border: 1px dashed var(--line);
+/* Capacity already consumed. Not a quota state, so it takes no state colour. */
+.pool-spent {
+  background: var(--raised);
 }
-.pool-seg.unknown i {
-  display: none;
-}
-.pool-seg.out {
-  opacity: 0.4;
-}
-.pool-key {
+
+/*
+ * Names on a second row, each cell exactly as wide as the segment above it.
+ *
+ * Every segment carries the same colour on purpose — tokens.css reserves hue
+ * for quota state, so a per-account tint would make a healthy account read as
+ * a different one. Four identical blocks left no way to tell whose was whose;
+ * position answers that without touching the colour system, and it still works
+ * at twenty accounts, where a narrow cell truncates instead of disappearing.
+ */
+.pool-labels {
   display: flex;
-  gap: 6px 14px;
-  flex-wrap: wrap;
+  gap: 2px;
+  margin-top: 5px;
+}
+.pool-lbl {
+  display: flex;
+  align-items: baseline;
+  gap: 5px;
+  min-width: 0;
+  padding-right: 4px;
+  font-size: 10px;
+  line-height: 1.3;
+  color: var(--muted);
+  white-space: nowrap;
+  overflow: hidden;
+}
+.pool-lbl b {
+  font-weight: 500;
+  color: var(--ink);
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.pool-lbl .num {
+  flex: none;
+}
+/* Consumed capacity is not an account and does not get an account's emphasis. */
+.pool-lbl.is-spent b {
+  font-weight: 400;
+  color: var(--faint);
+}
+.pool-lbl.is-spent .num {
+  color: var(--faint);
+}
+
+.pool-out {
+  margin: 9px 0 0;
   font-size: 11px;
   color: var(--muted);
 }
-.pool-key b {
+.pool-out b {
   font-weight: 500;
   color: var(--ink);
 }
@@ -970,6 +1059,8 @@ hr.rule {
 .chartwrap {
   overflow-x: auto;
 }
+/* The viewBox now tracks the measured width, so the box is 1:1 with pixels and
+   the height is simply the height it was drawn at. */
 .fleetchart {
   display: block;
   width: 100%;
@@ -989,8 +1080,11 @@ hr.rule {
    state, and a per-series palette would make 20% as loud as 95%. */
 .ln {
   fill: none;
-  stroke: var(--faint);
-  stroke-width: 1.25;
+  /* --muted, not --faint. At 1.25px, broken into short runs by every gap in
+     recording, --faint's 3:1 left the comparison lines invisible — and
+     comparing accounts is the entire job of this chart. */
+  stroke: var(--muted);
+  stroke-width: 1.4;
   stroke-linejoin: round;
   stroke-linecap: round;
 }
@@ -1018,6 +1112,11 @@ hr.rule {
 .endlab.emph {
   fill: var(--ink);
 }
+/* Drawn only when a label had to move off its own line. */
+.endleader {
+  stroke: var(--line);
+  stroke-width: 1;
+}
 .thresh {
   stroke: var(--caution);
   stroke-width: 1;
@@ -1033,15 +1132,22 @@ hr.rule {
 .row-shell {
   border-bottom: 1px solid var(--line-soft);
 }
+/*
+ * Columns: disclosure, name, trend, meter, 7-day, reset.
+ *
+ * The name is capped rather than greedy and the sparkline takes the slack.
+ * A fr-sized name column pushed every number to the far right of a 1100px
+ * pane and left the row reading as two unrelated halves.
+ */
 .dash-row {
   all: unset;
   box-sizing: border-box;
   display: grid;
   width: 100%;
-  grid-template-columns: 14px minmax(90px, 1.5fr) auto 62px 78px;
+  grid-template-columns: 12px minmax(120px, max-content) minmax(60px, 1fr) auto 58px 74px;
   align-items: center;
-  gap: 12px;
-  padding: 11px 8px;
+  gap: 14px;
+  padding: 7px 8px;
   font-size: 13px;
   cursor: pointer;
 }
@@ -1076,6 +1182,10 @@ hr.rule {
 .dash-row .row-name {
   font-weight: 550;
   min-width: 56px;
+  /* Caps the max-content track above. A fixed-length maximum grew to that
+     maximum whenever the row had spare width, stranding ~180px of nothing
+     between a short name and its numbers. */
+  max-width: 240px;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -1090,11 +1200,37 @@ hr.rule {
   color: var(--muted);
   text-align: right;
 }
-.dash-row .row-cell small {
+.dash-row .row-cell small,
+.dash-row .row-meter small {
   display: block;
-  font-size: 9px;
+  margin-top: 1px;
+  font-size: 8.5px;
+  line-height: 1.2;
   letter-spacing: 0.06em;
   text-transform: uppercase;
+  color: var(--faint);
+}
+/* The meter carried no caption while both neighbours did, so its percentage
+   read as a second seven-day figure. */
+.dash-row .row-meter {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 0;
+  line-height: 1.2;
+}
+.dash-row .row-spark {
+  display: block;
+  min-width: 0;
+}
+.dash-row .row-spark svg {
+  display: block;
+  width: 100%;
+  height: 20px;
+}
+.dash-row .row-spark.is-empty {
+  font-family: var(--mono);
+  font-size: 11px;
   color: var(--faint);
 }
 
@@ -1253,7 +1389,9 @@ hr.rule {
   display: flex;
   flex-direction: column;
   gap: 2px;
-  min-width: 460px;
+  /* Never a floor: the cells are fractional, so the grid fits any width
+     rather than answering a narrow window with a horizontal scrollbar. */
+  min-width: 0;
 }
 .lb-row {
   display: grid;
@@ -1270,12 +1408,21 @@ hr.rule {
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+/*
+ * Constant cells; the day count is what responds to width.
+ *
+ * Stretching a fixed month across the pane turned the heatmap into a row of
+ * banners, and pinning the cells to the left stranded the grid at ~480px
+ * however wide the window got. Holding the cell size and letting the
+ * component fit more days means a wider window buys more history.
+ */
 .lb-cells {
   display: grid;
   gap: 2px;
 }
 .lb-c {
-  height: 13px;
+  height: 14px;
+  min-width: 0;
   border-radius: 1px;
 }
 .lb-foot {
@@ -1333,7 +1480,6 @@ hr.rule {
   margin: 0;
   font-size: 12px;
   color: var(--muted);
-  max-width: 62ch;
 }
 
 
@@ -1456,15 +1602,6 @@ text.stagger-axis {
   margin-right: 5px;
 }
 
-@media (max-width: 720px) {
-  .fleet {
-    --fleet-cols: minmax(96px, 1.2fr) minmax(70px, 1fr) 66px;
-  }
-  .fleet-spark,
-  .fleet-head .spark-h {
-    display: none;
-  }
-}
 
 /* ─────────── realm (Environments) ─────────── */
 
@@ -1507,7 +1644,6 @@ text.stagger-axis {
   margin: 0;
   font-size: 12.5px;
   color: var(--muted);
-  max-width: 52ch;
 }
 .realm-foot {
   border-top: 1px solid var(--line-soft);
@@ -1547,7 +1683,6 @@ text.stagger-axis {
   text-align: center;
   gap: 14px;
   padding: 54px 20px;
-  max-width: 44ch;
   margin: 0 auto;
 }
 .empty h3 {
@@ -1936,7 +2071,6 @@ table.accts tbody tr.acct-row.is-active:hover td {
   margin: 0;
   font-size: 11.5px;
   color: var(--faint);
-  max-width: 64ch;
   line-height: 1.5;
 }
 .add-hint b {
@@ -2150,7 +2284,6 @@ tr.acct-details-row td {
 .about-note {
   font-size: 12px;
   color: var(--muted);
-  max-width: 52ch;
   line-height: 1.5;
 }
 
@@ -2169,4 +2302,9 @@ tr.acct-details-row td {
   font-size: 11.5px;
   color: var(--muted);
   overflow-wrap: anywhere;
+}
+
+/* The auto-switch threshold, labelled on the axis beside 0/50/100. */
+.axis-txt.is-thresh {
+  fill: var(--caution);
 }

@@ -91,7 +91,7 @@ export default function FirstRunScreen({ onAction, pending, error }: FirstRunScr
         </button>
 
         {explaining && (
-          <div style={{ fontSize: 12.5, color: "var(--muted)", maxWidth: "56ch", textAlign: "left" }}>
+          <div style={{ fontSize: 12.5, color: "var(--muted)", textAlign: "left" }}>
             <p>
               This app keeps a copy of each account&apos;s saved login in its own folder. Switching
               installs the one you pick into Claude Code&apos;s normal location, which is the only
@@ -109,7 +109,7 @@ export default function FirstRunScreen({ onAction, pending, error }: FirstRunScr
           </div>
         )}
 
-        <p style={{ fontSize: "11.5px", color: "var(--faint)", maxWidth: "48ch", marginTop: 6 }}>
+        <p style={{ fontSize: "11.5px", color: "var(--faint)", marginTop: 6 }}>
           Reads usage and hands credentials to the official Claude Code binary. Never routes model
           traffic. No server.
         </p>

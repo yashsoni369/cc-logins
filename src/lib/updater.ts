@@ -137,10 +137,40 @@ function hasTauri(): boolean {
   return typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
 }
 
-/** Trims a backend error to something a user can act on. */
+/**
+ * A backend error, said in terms of the situation rather than the step that
+ * failed.
+ *
+ * The plugin reports "Could not fetch a valid release JSON from the remote"
+ * for anything that stops it parsing a manifest — including a plain 404, which
+ * is what a repository whose newest published release predates the updater
+ * looks like. That is an ordinary state, not a fault, and passing the wording
+ * straight through sends people looking for a broken client.
+ *
+ * Matching on message text is unavoidable: the plugin surfaces a string, not a
+ * typed error. Anything unrecognised falls through unchanged rather than being
+ * flattened into a guess.
+ */
 function describe(error: unknown): string {
-  const raw = error instanceof Error ? error.message : String(error);
-  return raw.trim() || "The update check failed for an unknown reason.";
+  const raw = (error instanceof Error ? error.message : String(error)).trim();
+  const lower = raw.toLowerCase();
+
+  if (lower.includes("release json") || lower.includes("404") || lower.includes("not found")) {
+    return "No release with update information was found. The newest published release may not carry an update manifest yet.";
+  }
+  if (
+    lower.includes("dns") ||
+    lower.includes("sending request") ||
+    lower.includes("connect") ||
+    lower.includes("timed out") ||
+    lower.includes("timeout")
+  ) {
+    return "Couldn't reach the update server. Check your connection and try again.";
+  }
+  if (lower.includes("signature") || lower.includes("minisign")) {
+    return "The update was downloaded but its signature did not verify, so nothing was installed.";
+  }
+  return raw || "The update check failed for an unknown reason.";
 }
 
 /**

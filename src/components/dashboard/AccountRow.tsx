@@ -6,7 +6,8 @@ import { bindingUtilisation, displayName, quotaState, type Account, type DayStat
 import { Loading } from "@/components/Loading";
 import UsageMeter from "@/components/UsageMeter";
 import UsageHeatmap from "./UsageHeatmap";
-import { RangeChart, WindowChart } from "./charts";
+import { RangeChart, Sparkline, WindowChart } from "./charts";
+import type { FleetSeries } from "@/lib/dashboard";
 
 /** One absence, one sentence — the wording HistoryScreen already uses. */
 const NO_HISTORY = "No history yet for this account — usage is recorded from now on.";
@@ -30,6 +31,9 @@ export interface AccountDetail {
 interface AccountRowProps {
   account: Account;
   detail: AccountDetail | undefined;
+  /** This account's line from the rotation chart, reused for the row sparkline
+   *  so opening the dashboard does not fetch the same history twice. */
+  series: FleetSeries | undefined;
   expanded: boolean;
   onToggle: () => void;
   /** Auto-switch threshold, drawn as a hairline on every chart in the drawer. */
@@ -84,6 +88,7 @@ function Stat({ k, v, tone }: { k: string; v: string; tone?: string }) {
 export default function AccountRow({
   account,
   detail,
+  series,
   expanded,
   onToggle,
   threshold,
@@ -156,8 +161,10 @@ export default function AccountRow({
           {account.active && <span className="pill on">active</span>}
           {status && <span className={`pill${status === "re-login" || status === "mismatch" ? " danger" : ""}`}>{status}</span>}
         </span>
-        <span style={degraded ? { opacity: 0.55 } : undefined}>
+        <Sparkline runs={series?.runs ?? []} last={series?.last ?? null} label={name} />
+        <span className="row-meter" style={degraded ? { opacity: 0.55 } : undefined}>
           <UsageMeter pct={binding} />
+          <small>binding</small>
         </span>
         <span className="row-cell">
           {sevenDay == null ? "··" : `${Math.round(sevenDay)}%`}

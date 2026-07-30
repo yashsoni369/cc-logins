@@ -1,6 +1,7 @@
 import type { Account, QuotaState } from "../../types";
 import { bindingUtilisation, displayName, quotaState } from "../../types";
 import { formatCountdown } from "../../lib/time";
+import { useElementWidth } from "../../lib/useElementWidth";
 
 interface ResetStaggerProps {
   accounts: Account[];
@@ -15,11 +16,16 @@ interface ResetStaggerProps {
  * it — at 320 units wide the labels rendered three times over and collided
  * with the bands. Band heights and type sizes below are therefore real pixels.
  */
-const VIEW_W = 1000;
+/**
+ * Fallback until the container is measured. The width is no longer fixed:
+ * the pane is allowed to grow past its old cap, and a fixed viewBox scaled to
+ * fit would have enlarged every label along with it — the very failure this
+ * file's header records.
+ */
+const VIEW_W_FALLBACK = 1000;
 // Sized to the widest name `clip` will emit, not to a fraction of the width:
 // at 200 the gutter held 12 characters of 11px type in 200px of room.
 const TRACK_X = 122;
-const TRACK_W = VIEW_W - TRACK_X - 4;
 // A 10px label cannot sit inside a 9px band; the text crossed the outline.
 const ROW_PITCH = 18;
 const BAND_H = 12;
@@ -129,6 +135,9 @@ function describe(bands: Band[], hours: number): string {
  * stretch that strands you, and it is invisible on any per-account view.
  */
 export default function ResetStagger({ accounts, now, hours = 12 }: ResetStaggerProps) {
+  const [wrapRef, VIEW_W] = useElementWidth<HTMLDivElement>(VIEW_W_FALLBACK);
+  const TRACK_W = Math.max(120, VIEW_W - TRACK_X - 4);
+
   if (accounts.length === 0) {
     return <div className="stagger dash-cap">No accounts to plot.</div>;
   }
@@ -141,7 +150,7 @@ export default function ResetStagger({ accounts, now, hours = 12 }: ResetStagger
   const axisY = viewH - 2;
 
   return (
-    <div className="stagger">
+    <div className="stagger" ref={wrapRef}>
       <svg viewBox={`0 0 ${VIEW_W} ${viewH}`} preserveAspectRatio="xMidYMid meet" role="img" aria-label={title}>
         <title>{title}</title>
 

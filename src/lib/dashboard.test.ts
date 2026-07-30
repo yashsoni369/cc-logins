@@ -6,12 +6,37 @@ import {
   deriveInsights,
   isRangeKey,
   loadBalanceGrid,
+  oscillations,
   pooledHeadroom,
   runsOf,
   thin,
   type Pt,
 } from "./dashboard";
 import type { Account, DayStat, Sample } from "@/types";
+
+describe("oscillations", () => {
+  const run = (values: number[]): Pt[] => values.map((v, i) => ({ x: i / 10, v }));
+
+  it("counts a steady climb as no reversal, however many points it has", () => {
+    expect(oscillations([run(Array.from({ length: 500 }, (_, i) => i / 5))])).toBe(0);
+  });
+
+  it("counts each turn in a sawtooth", () => {
+    // up, down, up, down -> three reversals
+    expect(oscillations([run([0, 50, 0, 50, 0])])).toBe(3);
+  });
+
+  it("ignores wobble under the noise floor", () => {
+    // A flat quota read repeatedly is not thirty direction changes.
+    const jitter = Array.from({ length: 30 }, (_, i) => 40 + (i % 2));
+    expect(oscillations([run(jitter)])).toBe(0);
+  });
+
+  it("is zero for an empty or single-point series", () => {
+    expect(oscillations([])).toBe(0);
+    expect(oscillations([run([42])])).toBe(0);
+  });
+});
 
 const HOUR = 3_600_000;
 const T0 = Date.parse("2026-07-20T00:00:00Z");
@@ -41,11 +66,13 @@ const keyFor = (a: Account) => `key-${a.number}`;
 // ── ranges ───────────────────────────────────────────────────────────────────
 
 describe("ranges", () => {
-  it("uses samples for short ranges and daily rollups for long ones", () => {
-    // Long ranges must not ask for samples: prune deletes them once they age
-    // past retention, so the far end of the window would silently empty out.
+  it("plots raw samples only where individual cycles are still readable", () => {
+    // A day is always drawable and a month never is: prune deletes samples
+    // once they age past retention, so a long range asked for in samples comes
+    // back progressively emptier. A week genuinely depends on how busy it was,
+    // so it decides from the data rather than in advance.
     expect(RANGES["24h"].source).toBe("samples");
-    expect(RANGES["7d"].source).toBe("samples");
+    expect(RANGES["7d"].source).toBe("auto");
     expect(RANGES["30d"].source).toBe("daily");
     expect(RANGES.all.source).toBe("daily");
   });
@@ -197,6 +224,94 @@ describe("buildFleetSeries", () => {
     expect(series[0]?.mean).toBe(50);
   });
 
+  /*
+   * "auto" is the 7-day range's answer to a question that has no fixed one:
+   * a quiet week of samples is legible and worth showing raw, a busy one is
+   * thirty overlaid sawtooth cycles.
+   */
+  describe("choosing a source automatically", () => {
+    const now = Date.parse("2026-07-20T12:00:00Z");
+    const daily = new Map([["key-1", [day("2026-07-18", 60, 0, 30), day("2026-07-19", 70, 0, 35)]]]);
+    const one = [account({ number: 1 })];
+
+    /** A sawtooth: `cycles` climbs, each dropping back to nothing. */
+    const sawtooth = (cycles: number) => {
+      const out: Sample[] = [];
+      let minute = -cycles * 300;
+      for (let c = 0; c < cycles; c++) {
+        for (const v of [5, 40, 75, 95]) out.push(sample(minute++, v));
+        out.push(sample(minute++, 3));
+      }
+      return out;
+    };
+
+    it("keeps raw samples when the week was quiet enough to read", () => {
+      const calm = [sample(-4000, 10), sample(-3000, 25), sample(-2000, 45), sample(-1000, 60)];
+      const series = buildFleetSeries(one, keyFor, new Map([["key-1", calm]]), daily, RANGES["7d"], 240, now);
+      // Values only a raw series carries; the daily rollups here are 30/35.
+      expect(series[0]?.runs.flat().map((p) => p.v)).toEqual([10, 25, 45, 60]);
+    });
+
+    it("drops the whole fleet to rollups once one account scribbles", () => {
+      const series = buildFleetSeries(
+        one,
+        keyFor,
+        new Map([["key-1", sawtooth(15)]]),
+        daily,
+        RANGES["7d"],
+        240,
+        now,
+      );
+      expect(series[0]?.runs.flat().map((p) => p.v)).toEqual([30, 35]);
+    });
+
+    it("never mixes sources across accounts sharing one axis", () => {
+      // A raw sawtooth beside a daily average invites a comparison between two
+      // different measurements, so the busy account decides for everyone.
+      const two = [account({ number: 1 }), account({ number: 2 })];
+      const samples = new Map([
+        ["key-1", [sample(-2000, 10), sample(-1000, 20)]],
+        ["key-2", sawtooth(15)],
+      ]);
+      const bothDaily = new Map([
+        ["key-1", [day("2026-07-19", 50, 0, 25)]],
+        ["key-2", [day("2026-07-19", 90, 0, 45)]],
+      ]);
+      const series = buildFleetSeries(two, keyFor, samples, bothDaily, RANGES["7d"], 240, now);
+      expect(series[0]?.runs.flat().map((p) => p.v)).toEqual([25]);
+      expect(series[1]?.runs.flat().map((p) => p.v)).toEqual([45]);
+    });
+
+    it("falls back to rollups when the range holds no samples at all", () => {
+      // Samples past retention are deleted, but their rollups survive.
+      const series = buildFleetSeries(one, keyFor, new Map(), daily, RANGES["7d"], 240, now);
+      expect(series[0]?.runs.flat().map((p) => p.v)).toEqual([30, 35]);
+    });
+  });
+
+  it("clips daily history to the selected range", () => {
+    // The daily map is fetched at the longest span any panel needs — the
+    // load-balance grid always wants a month — so it holds more than the chart
+    // asked for. Unclipped, "7 days" drew a month under a 7-day axis.
+    const now = Date.parse("2026-07-20T00:00:00Z");
+    const daily = new Map([
+      [
+        "key-1",
+        [
+          day("2026-06-25", 90, 0, 90), // 25 days back — outside a 7-day range
+          day("2026-07-18", 40, 0, 40),
+          day("2026-07-19", 50, 0, 50),
+        ],
+      ],
+    ]);
+    const week = buildFleetSeries(accounts, keyFor, new Map(), daily, RANGES["7d"], 240, now);
+    expect(week[0]?.runs.flat().map((p) => p.v)).toEqual([40, 50]);
+
+    // The same data under a 30-day range keeps the older day.
+    const month = buildFleetSeries(accounts, keyFor, new Map(), daily, RANGES["30d"], 240, now);
+    expect(month[0]?.runs.flat().map((p) => p.v)).toContain(90);
+  });
+
   it("still lists an account with no history, so the fleet never loses a row", () => {
     const series = buildFleetSeries(accounts, keyFor, new Map(), new Map(), spec);
     expect(series).toHaveLength(2);
@@ -262,8 +377,47 @@ describe("pooledHeadroom", () => {
     expect(result.segments[0]?.free).toBe(0);
   });
 
+  it("reports the capacity the pooled figure is a fraction of", () => {
+    // Without this the bar had nothing absolute to be drawn against, so it
+    // filled its container whatever the numbers said: 12 points of headroom
+    // across three accounts drew exactly as long as 290.
+    const result = pooledHeadroom([
+      account({ number: 1, usage: { sevenDay: { pct: 40 } } }),
+      account({ number: 2, usage: { sevenDay: { pct: 90 } } }),
+      account({ number: 3, usage: { sevenDay: { pct: 70 } } }),
+    ]);
+    expect(result.capacity).toBe(300);
+    expect(result.pooled).toBe(100);
+    expect(result.spent).toBe(200);
+  });
+
+  it("counts capacity only for accounts the switcher can reach", () => {
+    const result = pooledHeadroom([
+      account({ number: 1, usage: { sevenDay: { pct: 40 } } }),
+      account({ number: 2, usageStatus: "disabled", usage: { sevenDay: { pct: 0 } } }),
+      account({ number: 3 }),
+    ]);
+    // One usable account, so the bar's full length is one account's worth.
+    expect(result.capacity).toBe(100);
+    expect(result.pooled).toBe(60);
+    expect(result.spent).toBe(40);
+  });
+
+  it("never reports negative spend for an account past its limit", () => {
+    const result = pooledHeadroom([account({ number: 1, usage: { sevenDay: { pct: 130 } } })]);
+    expect(result.spent).toBe(100);
+    expect(result.pooled).toBe(0);
+  });
+
   it("handles an empty fleet", () => {
-    expect(pooledHeadroom([])).toMatchObject({ pooled: 0, usable: 0, total: 0, segments: [] });
+    expect(pooledHeadroom([])).toMatchObject({
+      pooled: 0,
+      capacity: 0,
+      spent: 0,
+      usable: 0,
+      total: 0,
+      segments: [],
+    });
   });
 });
 
@@ -343,13 +497,27 @@ describe("deriveInsights", () => {
     expect(found?.tone).toBe("danger");
   });
 
-  it("counts saturated days from daily peaks", () => {
+  it("counts distinct days, not account-days", () => {
+    // Two accounts topping out on the same afternoon is one bad day. Summing
+    // per-account cells reported it as two and overstated how often this
+    // happens — and the headline says "days".
     const rows = [
       { number: 1, name: "a", cells: [{ day: "d1", peak: 100, sampleCount: 5 }, { day: "d2", peak: 40, sampleCount: 5 }] },
       { number: 2, name: "b", cells: [{ day: "d1", peak: 99, sampleCount: 5 }] },
     ];
     const found = deriveInsights({ ...base, accounts: [], series: [], rows }).find((i) => i.id === "saturation");
+    expect(found?.figure).toBe("1");
+    expect(found?.headline).toContain("day ");
+  });
+
+  it("does count separate days separately", () => {
+    const rows = [
+      { number: 1, name: "a", cells: [{ day: "d1", peak: 100, sampleCount: 5 }] },
+      { number: 2, name: "b", cells: [{ day: "d2", peak: 100, sampleCount: 5 }] },
+    ];
+    const found = deriveInsights({ ...base, accounts: [], series: [], rows }).find((i) => i.id === "saturation");
     expect(found?.figure).toBe("2");
+    expect(found?.headline).toContain("days");
   });
 
   it("ignores unmeasured days when counting saturation", () => {

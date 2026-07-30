@@ -62,6 +62,53 @@ function areaPath(runs: Pt[][], height: number): string {
     .join(" ");
 }
 
+/**
+ * The trend behind a fleet row, drawn from the series the rotation chart
+ * already built — a row that shows only a percentage says where an account is
+ * but not which way it is going, and the direction is what decides whether to
+ * switch to it.
+ */
+export function Sparkline({ runs, last, label }: { runs: Pt[][]; last: number | null; label: string }) {
+  const W = 120;
+  const H = 20;
+  const P = 2;
+  const x = (v: number) => P + v * (W - P * 2);
+  const y = (v: number) => H - P - (Math.max(0, Math.min(100, v)) / 100) * (H - P * 2);
+
+  if (runs.length === 0 || last == null) {
+    return (
+      <span className="row-spark is-empty" title={`No usage recorded for ${label} in this range`}>
+        <span className="pct-unknown">··</span>
+      </span>
+    );
+  }
+
+  const state = quotaState(last);
+  const cls = state === "ok" ? "" : ` ${state}`;
+  const lastRun = runs[runs.length - 1];
+  const tip = lastRun?.[lastRun.length - 1];
+
+  return (
+    <span className="row-spark">
+      {/* `none` is right here and wrong on the big chart: there is no text in
+          a sparkline to distort, and uniform scaling letterboxed a 6:1 drawing
+          inside a much wider cell, stranding it in the middle of the row. */}
+      <svg viewBox={`0 0 ${W} ${H}`} preserveAspectRatio="none" role="img"
+        aria-label={`${label}: utilisation trend, now ${Math.round(last)}%`}>
+        {runs.map((run, i) => (
+          <path
+            key={i}
+            d={run.map((p, k) => `${k === 0 ? "M" : "L"}${x(p.x).toFixed(1)} ${y(p.v).toFixed(1)}`).join("")}
+            className={`chart-line${cls}`}
+            fill="none"
+          />
+        ))}
+        {tip && <circle cx={x(tip.x)} cy={y(tip.v)} r={1.8} className={`chart-dot${cls}`} />}
+      </svg>
+    </span>
+  );
+}
+
 interface WindowChartProps {
   label: string;
   samples: Sample[];

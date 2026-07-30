@@ -206,7 +206,10 @@ export default function SettingsScreen({
         </div>
       )}
 
-      <div>
+      {/* Two columns once the window is wide enough. Each control keeps its
+          natural size — a full-width toggle reads worse than a compact one —
+          so the space is used by laying rows side by side instead. */}
+      <div className="fields">
         <div className="field">
           <div className="k">
             Theme
@@ -324,7 +327,7 @@ export default function SettingsScreen({
             <i>Where your saved logins are kept.</i>
           </div>
           <div className="v">
-            <span style={{ fontSize: 12, color: "var(--muted)", maxWidth: "52ch" }}>
+            <span style={{ fontSize: 12, color: "var(--muted)" }}>
               This app keeps your accounts in its own folder, separate from any other
               tool&apos;s, so a fault on either side can only affect its own store.
               Switching still installs the chosen login into Claude Code&apos;s official
@@ -344,7 +347,7 @@ export default function SettingsScreen({
               onChange={(v) => commitField("autoCheckUpdates", v)}
               label={settings.autoCheckUpdates ? "Enabled" : "Disabled"}
             />
-            <span style={{ fontSize: 12, color: "var(--muted)", maxWidth: "52ch" }}>
+            <span style={{ fontSize: 12, color: "var(--muted)" }}>
               Only the current version is sent, and nothing is installed without you asking.
               Turning this off leaves the manual check below working.
             </span>

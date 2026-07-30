@@ -7,6 +7,7 @@ import LoadBalance from "./dashboard/LoadBalance";
 import RangePicker from "./dashboard/RangePicker";
 import ResetStagger from "./dashboard/ResetStagger";
 import RotationChart from "./dashboard/RotationChart";
+import { Loading } from "./Loading";
 import { historySamples, historySeries } from "../lib/api";
 import {
   RANGES,
@@ -27,6 +28,19 @@ const BURN_HOURS = 24;
 const DETAIL_HOURS = 72;
 /** Daily-rollup range an opened account charts. */
 const DETAIL_DAYS = 30;
+/**
+ * Days of daily history fetched for the load-balance grid.
+ *
+ * Deliberately more than fits on a normal window: the grid keeps its cells a
+ * constant size and shows as many days as the pane can hold, so a wider window
+ * buys more history instead of fatter blocks. This is the ceiling on that.
+ *
+ * It is not tied to the selected range. Tying it made 24h render seven cells
+ * and "All" render 365 — one too coarse to be a pattern, the other unreadable.
+ */
+const BALANCE_DAYS = 180;
+/** Span the derived findings reason over, whatever the grid happens to show. */
+const INSIGHT_DAYS = 30;
 
 interface DashboardScreenProps {
   snapshot: Snapshot;
@@ -70,6 +84,10 @@ export default function DashboardScreen({ snapshot, settingsThreshold, degraded 
   const [burnByKey, setBurnByKey] = useState<Map<string, Sample[]>>(new Map());
   const [rangeSamples, setRangeSamples] = useState<Map<string, Sample[]>>(new Map());
   const [rangeDaily, setRangeDaily] = useState<Map<string, DayStat[]>>(new Map());
+  // Distinguishes "still reading" from "nothing recorded". Without it the
+  // rotation band announced an empty history for the moment before its data
+  // arrived, which is a lie the reader has no way to spot.
+  const [rangeLoading, setRangeLoading] = useState(true);
   const [detailByKey, setDetailByKey] = useState<Map<string, AccountDetail>>(new Map());
 
   const now = useNow();
@@ -116,17 +134,23 @@ export default function DashboardScreen({ snapshot, settingsThreshold, degraded 
   useEffect(() => {
     if (keys.length === 0) return;
     let cancelled = false;
+    setRangeLoading(true);
 
     void (async () => {
-      const daily = await gather(keys, (key) => historySeries(key, spec.days));
+      // The grid's span is fixed, so ask for whichever is longer and let each
+      // consumer slice what it needs from one read.
+      const daily = await gather(keys, (key) => historySeries(key, Math.max(spec.days, BALANCE_DAYS)));
       if (!cancelled) setRangeDaily(daily);
 
-      if (spec.source === "samples") {
+      // "auto" needs the samples in hand to judge whether they are drawable,
+      // so it reads them too and may then ignore them.
+      if (spec.source !== "daily") {
         const samples = await gather(keys, (key) => historySamples(key, spec.hours));
         if (!cancelled) setRangeSamples(samples);
       } else if (!cancelled) {
         setRangeSamples(new Map());
       }
+      if (!cancelled) setRangeLoading(false);
     })();
 
     return () => {
@@ -181,18 +205,26 @@ export default function DashboardScreen({ snapshot, settingsThreshold, degraded 
   );
 
   const series = useMemo(
-    () => buildFleetSeries(accounts, keyFor, rangeSamples, rangeDaily, spec),
-    [accounts, keyFor, rangeSamples, rangeDaily, spec],
+    () => buildFleetSeries(accounts, keyFor, rangeSamples, rangeDaily, spec, 240, now),
+    [accounts, keyFor, rangeSamples, rangeDaily, spec, now],
   );
 
   const loadRows = useMemo(
-    () => loadBalanceGrid(accounts, keyFor, rangeDaily, Math.max(spec.days, 7), now),
-    [accounts, keyFor, rangeDaily, spec, now],
+    () => loadBalanceGrid(accounts, keyFor, rangeDaily, BALANCE_DAYS, now),
+    [accounts, keyFor, rangeDaily, now],
+  );
+
+  // Findings reason over a fixed month; the grid above may be showing far more
+  // or less depending on how wide the window is, and a finding that quietly
+  // changed span with the window size would be unreadable as a claim.
+  const insightRows = useMemo(
+    () => loadRows.map((row) => ({ ...row, cells: row.cells.slice(-INSIGHT_DAYS) })),
+    [loadRows],
   );
 
   const insights = useMemo(
-    () => deriveInsights({ accounts, series, rows: loadRows, spec, threshold: settingsThreshold, now }),
-    [accounts, series, loadRows, spec, settingsThreshold, now],
+    () => deriveInsights({ accounts, series, rows: insightRows, spec, threshold: settingsThreshold, now }),
+    [accounts, series, insightRows, spec, settingsThreshold, now],
   );
 
   const toggle = useCallback(
@@ -239,7 +271,24 @@ export default function DashboardScreen({ snapshot, settingsThreshold, degraded 
           <span className="spacer" />
           <span className="sub">hover a line to isolate it</span>
         </div>
-        <RotationChart series={series} spec={spec} threshold={settingsThreshold} />
+        {rangeLoading && series.every((s) => s.runs.length === 0) ? (
+          <Loading label="Reading recorded history" />
+        ) : (
+          <RotationChart series={series} spec={spec} threshold={settingsThreshold} />
+        )}
+      </section>
+
+      {/*
+        Its own band, not stacked under the rotation chart. That chart's axis
+        runs backwards through recorded history and this one runs forwards to
+        the next reset; flush against each other and sharing a width, they read
+        as one continuous timeline running the wrong way.
+      */}
+      <section className="band">
+        <div className="band-head">
+          <h2>Next resets</h2>
+          <span className="sub">when each account's 5-hour window clears</span>
+        </div>
         <ResetStagger accounts={accounts} now={now} />
       </section>
 
@@ -256,6 +305,7 @@ export default function DashboardScreen({ snapshot, settingsThreshold, degraded 
                 key={account.number}
                 account={account}
                 detail={key ? detailByKey.get(key) : undefined}
+                series={series.find((s) => s.number === account.number)}
                 expanded={expanded.has(account.number)}
                 onToggle={() => toggle(account.number)}
                 threshold={settingsThreshold}
@@ -269,7 +319,7 @@ export default function DashboardScreen({ snapshot, settingsThreshold, degraded 
         </div>
       </section>
 
-      <LoadBalance rows={loadRows} days={Math.max(spec.days, 7)} />
+      <LoadBalance rows={loadRows} />
 
       <Insights items={insights} />
     </div>

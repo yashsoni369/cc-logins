@@ -55,6 +55,56 @@ describe("checkForUpdate", () => {
     expect(result).toMatchObject({ message: "no internet" });
   });
 
+  /*
+   * The plugin says the same thing for a malformed manifest and for a 404,
+   * and a 404 is what a repository looks like when its newest published
+   * release predates the updater. Reported verbatim, an ordinary state reads
+   * as a broken client.
+   */
+  it("explains a missing manifest instead of quoting the parser", async () => {
+    withTauri({});
+    vi.doMock("@tauri-apps/plugin-updater", () => ({
+      check: () => Promise.reject(new Error("Could not fetch a valid release JSON from the remote")),
+    }));
+
+    const { checkForUpdate: fresh } = await import("./updater");
+    const result = await fresh();
+
+    expect(result).toMatchObject({ kind: "failed" });
+    expect((result as { message: string }).message).toMatch(/no release with update information/i);
+    expect((result as { message: string }).message).not.toMatch(/release JSON/i);
+  });
+
+  it("names a connection failure as one", async () => {
+    withTauri({});
+    vi.doMock("@tauri-apps/plugin-updater", () => ({
+      check: () => Promise.reject(new Error("error sending request for url")),
+    }));
+
+    const { checkForUpdate: fresh } = await import("./updater");
+    expect((await fresh() as { message: string }).message).toMatch(/couldn't reach the update server/i);
+  });
+
+  it("says plainly when a signature fails, since nothing was installed", async () => {
+    withTauri({});
+    vi.doMock("@tauri-apps/plugin-updater", () => ({
+      check: () => Promise.reject(new Error("minisign signature verification failed")),
+    }));
+
+    const { checkForUpdate: fresh } = await import("./updater");
+    expect((await fresh() as { message: string }).message).toMatch(/signature did not verify/i);
+  });
+
+  it("passes an unrecognised error through rather than guessing at it", async () => {
+    withTauri({});
+    vi.doMock("@tauri-apps/plugin-updater", () => ({
+      check: () => Promise.reject(new Error("disk quota exceeded")),
+    }));
+
+    const { checkForUpdate: fresh } = await import("./updater");
+    expect((await fresh() as { message: string }).message).toBe("disk quota exceeded");
+  });
+
   it("reports current when the backend says there is no update", async () => {
     withTauri({});
     vi.doMock("@tauri-apps/plugin-updater", () => ({

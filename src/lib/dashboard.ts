@@ -24,12 +24,15 @@ export interface RangeSpec {
   /**
    * Which read path backs the rotation chart.
    *
-   * `HistoryStore::prune` compacts samples older than the retention window
-   * into daily rollups and deletes them, so a long range asked for in samples
-   * would come back progressively emptier the further back it reached. Daily
-   * rollups are the only source that spans the whole history.
+   * `"samples"` is raw readings, `"daily"` is rollups, and `"auto"` reads the
+   * samples and falls back to rollups when they turn out to be too busy to
+   * draw — see `tooBusyToDraw`.
+   *
+   * A long range can never use samples: `HistoryStore::prune` compacts
+   * anything past the retention window into daily rollups and deletes it, so
+   * the far end of the window would come back progressively emptier.
    */
-  source: "samples" | "daily";
+  source: "samples" | "daily" | "auto";
   /** Trailing hours to request when `source` is "samples". */
   hours: number;
   /** Trailing days, used for the load-balance grid in every range. */
@@ -38,7 +41,17 @@ export interface RangeSpec {
 
 export const RANGES: Record<RangeKey, RangeSpec> = {
   "24h": { key: "24h", label: "24h", phrase: "last 24 hours", source: "samples", hours: 24, days: 1 },
-  "7d": { key: "7d", label: "7 days", phrase: "last 7 days", source: "samples", hours: 168, days: 7 },
+  /*
+   * The range that can go either way, so it decides from the data.
+   *
+   * The 5-hour window resets about five times a day, so a busy week of raw
+   * samples is thirty-odd sawtooth cycles overlaid across four accounts — a
+   * scribble at any width. A quiet week, or a machine that has only been
+   * recording for a few days, is a handful of legible lines and aggregating it
+   * to seven points throws away everything worth seeing. Neither answer is
+   * right in advance.
+   */
+  "7d": { key: "7d", label: "7 days", phrase: "last 7 days", source: "auto", hours: 168, days: 7 },
   "30d": { key: "30d", label: "30 days", phrase: "last 30 days", source: "daily", hours: 720, days: 30 },
   // Retention defaults to 90 days; asking for a year simply returns whatever
   // exists rather than pretending to a fixed span.
@@ -144,6 +157,44 @@ export function thin(run: Pt[], max: number): Pt[] {
   return out;
 }
 
+/**
+ * Reversals in a line, ignoring wobble smaller than `noise` points.
+ *
+ * This is what decides whether raw samples are drawable, because it is the
+ * property that actually makes a chart unreadable. Point count does not: a
+ * thousand readings climbing steadily are one clean line, while fifty that
+ * cross themselves thirty times are a scribble. The noise floor keeps
+ * measurement jitter around a flat quota from registering as a reversal.
+ */
+export function oscillations(runs: Pt[][], noise = 2): number {
+  let changes = 0;
+  for (const run of runs) {
+    let direction = 0;
+    let anchor = run[0]?.v ?? 0;
+    for (const point of run) {
+      const delta = point.v - anchor;
+      if (Math.abs(delta) < noise) continue;
+      const next = delta > 0 ? 1 : -1;
+      if (direction !== 0 && next !== direction) changes += 1;
+      direction = next;
+      anchor = point.v;
+    }
+  }
+  return changes;
+}
+
+/**
+ * Reversals one account may show before the fleet drops to daily rollups.
+ * Each sawtooth cycle is two, so this is about ten cycles — roughly where
+ * overlaid lines stop being separable by eye.
+ */
+export const MAX_OSCILLATIONS = 20;
+
+/** Whether these sample-built lines are too busy to draw on one axis. */
+export function tooBusyToDraw(runsByAccount: Pt[][][]): boolean {
+  return runsByAccount.some((runs) => oscillations(runs) > MAX_OSCILLATIONS);
+}
+
 /** One account's line on the rotation chart. */
 export interface FleetSeries {
   accountKey: string;
@@ -177,21 +228,49 @@ export function buildFleetSeries(
   dailyByKey: Map<string, DayStat[]>,
   spec: RangeSpec,
   maxPoints = 240,
+  now = Date.now(),
 ): FleetSeries[] {
   const out: FleetSeries[] = [];
+  /*
+   * Clip to the selected range.
+   *
+   * The daily map is fetched once at the longest span any panel needs — the
+   * load-balance grid always wants a month — so it routinely holds more
+   * history than the chart is asking for. Without this the "7 days" view drew
+   * a month of data beneath an axis labelled 7d ago → now.
+   */
+  const earliest = now - spec.days * 86_400_000;
 
-  for (const account of accounts) {
-    const accountKey = keyFor(account);
-    if (!accountKey) continue;
+  const listed = accounts.filter((a) => keyFor(a) !== undefined);
 
-    const runs =
-      spec.source === "samples"
-        ? runsOf(
-            samplesByKey.get(accountKey) ?? [],
-            (s) => Date.parse(s.timestamp),
-            (s) => s.bindingPct,
-          )
-        : runsOf(dailyByKey.get(accountKey) ?? [], (d) => dayMs(d.day), (d) => d.avgPct);
+  const fromSamples = (accountKey: string) =>
+    runsOf(samplesByKey.get(accountKey) ?? [], (s) => Date.parse(s.timestamp), (s) => s.bindingPct);
+  const fromDaily = (accountKey: string) =>
+    runsOf(
+      (dailyByKey.get(accountKey) ?? []).filter((d) => dayMs(d.day) >= earliest),
+      (d) => dayMs(d.day),
+      (d) => d.avgPct,
+    );
+
+  /*
+   * One decision for the whole fleet, taken before any line is kept.
+   *
+   * The accounts share an axis, so mixing sources would put a raw sawtooth
+   * beside a daily average and invite a comparison between two different
+   * measurements. On "auto" the samples are built first and judged together:
+   * if any single account is too busy to draw, everybody drops to rollups.
+   * Empty samples also fall back, since a range with nothing recorded in it
+   * may still have rollups from before the retention window.
+   */
+  let useSamples = spec.source === "samples";
+  if (spec.source === "auto") {
+    const candidates = listed.map((a) => fromSamples(keyFor(a) as string));
+    useSamples = candidates.some((runs) => runs.length > 0) && !tooBusyToDraw(candidates);
+  }
+
+  for (const account of listed) {
+    const accountKey = keyFor(account) as string;
+    const runs = useSamples ? fromSamples(accountKey) : fromDaily(accountKey);
 
     const thinned = runs.map((run) => thin(run, Math.max(2, Math.floor(maxPoints / Math.max(runs.length, 1)))));
     const values = thinned.flatMap((run) => run.map((p) => p.v));
@@ -230,6 +309,18 @@ export interface Headroom {
   segments: HeadroomSegment[];
   /** Sum of `free` across usable accounts, in percentage points. */
   pooled: number;
+  /**
+   * What the fleet would hold if every usable account were untouched —
+   * 100 points per account.
+   *
+   * The pooled figure means nothing without it. Drawn as a bar that always
+   * filled its container, 12 points of headroom across three accounts looked
+   * exactly like 290, because the only thing the eye reads — length — was
+   * carrying no information at all.
+   */
+  capacity: number;
+  /** Capacity already consumed: `capacity - pooled`. */
+  spent: number;
   /** How many accounts contributed, and how many exist. */
   usable: number;
   total: number;
@@ -257,9 +348,13 @@ export function pooledHeadroom(accounts: Account[]): Headroom {
   });
 
   const contributing = segments.filter((s) => !s.excluded);
+  const pooled = contributing.reduce((total, s) => total + s.free, 0);
+  const capacity = contributing.length * 100;
   return {
     segments,
-    pooled: contributing.reduce((total, s) => total + s.free, 0),
+    pooled,
+    capacity,
+    spent: Math.max(0, capacity - pooled),
     usable: contributing.length,
     total: accounts.length,
   };
@@ -396,11 +491,12 @@ export function deriveInsights({
   }
 
   // 2. Saturation. Counted from daily peaks, which survive pruning — sample
-  //    counts would quietly shrink as history ages into rollups.
-  const saturatedDays = rows.reduce(
-    (total, row) => total + row.cells.filter((c) => c.peak != null && c.peak >= SATURATED).length,
-    0,
-  );
+  //    counts would quietly shrink as history ages into rollups. Distinct
+  //    days, not account-days: two accounts topping out on one afternoon is
+  //    one bad day, and calling it two overstates how often this happens.
+  const saturatedDays = new Set(
+    rows.flatMap((row) => row.cells.filter((c) => c.peak != null && c.peak >= SATURATED).map((c) => c.day)),
+  ).size;
   if (saturatedDays > 0) {
     out.push({
       id: "saturation",
