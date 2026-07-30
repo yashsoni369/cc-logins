@@ -327,7 +327,11 @@ fn money_amount(v: &Value) -> Option<(f64, Option<String>)> {
 /// where the other requires assuming cents. Returns `None` when spend is not
 /// enabled or any figure is missing, and the caller then falls back.
 fn build_spend_from_spend_object(spend: &Value, now: DateTime<Utc>) -> Option<SpendEntry> {
-    if !spend.get("enabled").and_then(|v| v.as_bool()).unwrap_or(false) {
+    if !spend
+        .get("enabled")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false)
+    {
         return None;
     }
 
@@ -348,7 +352,9 @@ fn build_spend_from_spend_object(spend: &Value, now: DateTime<Utc>) -> Option<Sp
         used,
         limit,
         pct,
-        currency: limit_currency.or(used_currency).unwrap_or_else(|| "USD".into()),
+        currency: limit_currency
+            .or(used_currency)
+            .unwrap_or_else(|| "USD".into()),
         severity: spend
             .get("severity")
             .and_then(|v| v.as_str())
@@ -1714,7 +1720,6 @@ mod tests {
 
     // -- nullable extra_usage / spend (requirement 6) ------------------------
 
-    #[test]
     /// The exact shape a live enterprise account returns, captured from a real
     /// response. Every figure here was observed, not assumed: `amount_minor`
     /// with an `exponent`, no reset field anywhere, and no rate-limit windows
@@ -1745,13 +1750,18 @@ mod tests {
         assert!(result.seven_day.is_none());
         assert!(result.scoped.is_empty());
 
-        let spend = result.spend.expect("spend must survive with no windows present");
+        let spend = result
+            .spend
+            .expect("spend must survive with no windows present");
         assert_eq!(spend.used, 3.08);
         assert_eq!(spend.limit, 200.0);
         assert_eq!(spend.currency, "USD");
         assert_eq!(spend.severity.as_deref(), Some("normal"));
         // Derived: the response carries no reset for a spend cap at all.
-        assert!(spend.resets_at.is_some(), "monthly boundary must be derived");
+        assert!(
+            spend.resets_at.is_some(),
+            "monthly boundary must be derived"
+        );
     }
 
     /// `exponent` is read rather than assumed. A currency with no minor unit
@@ -1766,7 +1776,11 @@ mod tests {
                 "used": {"amount_minor": 2500, "currency": "JPY", "exponent": 0}
             }
         });
-        let spend = normalize_usage_response(&data).unwrap().unwrap().spend.unwrap();
+        let spend = normalize_usage_response(&data)
+            .unwrap()
+            .unwrap()
+            .spend
+            .unwrap();
         assert_eq!(spend.used, 2500.0);
         assert_eq!(spend.limit, 5000.0);
         assert_eq!(spend.currency, "JPY");

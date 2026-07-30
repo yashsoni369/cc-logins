@@ -157,7 +157,9 @@ impl UsageCache {
             schema_version: SCHEMA_VERSION,
             rows: self.rows.clone(),
         };
-        let Ok(bytes) = serde_json::to_vec_pretty(&body) else { return };
+        let Ok(bytes) = serde_json::to_vec_pretty(&body) else {
+            return;
+        };
         match crate::durable_fs::stage_sibling(path, &bytes, Some(0o600))
             .and_then(|staged| staged.commit())
         {
@@ -176,7 +178,10 @@ fn earliest_future_reset(usage: &Usage, now: DateTime<Utc>) -> Option<i64> {
         let Ok(parsed) = DateTime::parse_from_rfc3339(text) else {
             return;
         };
-        let delta = parsed.with_timezone(&Utc).signed_duration_since(now).num_seconds();
+        let delta = parsed
+            .with_timezone(&Utc)
+            .signed_duration_since(now)
+            .num_seconds();
         if delta > 0 {
             soonest = Some(soonest.map_or(delta, |s: i64| s.min(delta)));
         }
@@ -227,7 +232,11 @@ mod tests {
     #[test]
     fn a_fresh_reading_comes_back_with_its_age() {
         let mut cache = UsageCache::ephemeral();
-        cache.record_success("k", &usage_with_reset(None), now() - chrono::Duration::seconds(90));
+        cache.record_success(
+            "k",
+            &usage_with_reset(None),
+            now() - chrono::Duration::seconds(90),
+        );
         let (usage, age) = cache.serve("k", now()).expect("still fresh");
         assert_eq!(usage.five_hour.unwrap().pct, 42.0);
         assert!((age - 90.0).abs() < 1.0);
@@ -240,8 +249,12 @@ mod tests {
         cache.record_success("k", &usage_with_reset(None), now());
         cache.record_failure("k", "timeout");
 
-        assert!(cache.serve("k", now() + chrono::Duration::seconds(TRUST_MAX_AGE_S - 60)).is_some());
-        assert!(cache.serve("k", now() + chrono::Duration::seconds(TRUST_MAX_AGE_S + 60)).is_none());
+        assert!(cache
+            .serve("k", now() + chrono::Duration::seconds(TRUST_MAX_AGE_S - 60))
+            .is_some());
+        assert!(cache
+            .serve("k", now() + chrono::Duration::seconds(TRUST_MAX_AGE_S + 60))
+            .is_none());
     }
 
     #[test]
@@ -253,9 +266,13 @@ mod tests {
         cache.record_failure("k", RATE_LIMITED);
 
         // Three hours later, well past the ordinary hour, still trusted.
-        assert!(cache.serve("k", now() + chrono::Duration::hours(3)).is_some());
+        assert!(cache
+            .serve("k", now() + chrono::Duration::hours(3))
+            .is_some());
         // Past the reset, the numbers describe a window that no longer exists.
-        assert!(cache.serve("k", now() + chrono::Duration::hours(5)).is_none());
+        assert!(cache
+            .serve("k", now() + chrono::Duration::hours(5))
+            .is_none());
     }
 
     #[test]
@@ -265,10 +282,16 @@ mod tests {
         cache.record_failure("k", RATE_LIMITED);
 
         assert!(cache
-            .serve("k", now() + chrono::Duration::seconds(RATE_LIMIT_TRUST_MAX_AGE_S - 60))
+            .serve(
+                "k",
+                now() + chrono::Duration::seconds(RATE_LIMIT_TRUST_MAX_AGE_S - 60)
+            )
             .is_some());
         assert!(cache
-            .serve("k", now() + chrono::Duration::seconds(RATE_LIMIT_TRUST_MAX_AGE_S + 60))
+            .serve(
+                "k",
+                now() + chrono::Duration::seconds(RATE_LIMIT_TRUST_MAX_AGE_S + 60)
+            )
             .is_none());
     }
 
@@ -294,11 +317,17 @@ mod tests {
     #[test]
     fn a_later_success_clears_the_failure_mark() {
         let mut cache = UsageCache::ephemeral();
-        cache.record_success("k", &usage_with_reset(None), now() - chrono::Duration::hours(3));
+        cache.record_success(
+            "k",
+            &usage_with_reset(None),
+            now() - chrono::Duration::hours(3),
+        );
         cache.record_failure("k", RATE_LIMITED);
         // Recovered: the reading is fresh again and back on the short horizon.
         cache.record_success("k", &usage_with_reset(None), now());
-        assert!(cache.serve("k", now() + chrono::Duration::seconds(TRUST_MAX_AGE_S + 60)).is_none());
+        assert!(cache
+            .serve("k", now() + chrono::Duration::seconds(TRUST_MAX_AGE_S + 60))
+            .is_none());
     }
 
     #[test]
@@ -311,8 +340,14 @@ mod tests {
     #[test]
     fn a_clock_that_moved_backwards_reads_as_fresh_rather_than_expired() {
         let mut cache = UsageCache::ephemeral();
-        cache.record_success("k", &usage_with_reset(None), now() + chrono::Duration::hours(2));
-        let (_, age) = cache.serve("k", now()).expect("a future stamp is not an expiry");
+        cache.record_success(
+            "k",
+            &usage_with_reset(None),
+            now() + chrono::Duration::hours(2),
+        );
+        let (_, age) = cache
+            .serve("k", now())
+            .expect("a future stamp is not an expiry");
         assert_eq!(age, 0.0);
     }
 }

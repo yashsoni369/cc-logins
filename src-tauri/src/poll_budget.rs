@@ -182,7 +182,9 @@ impl PollBudget {
     /// The interval a restart should resume at, if one was persisted while
     /// backed off. `None` once the 429 has aged out.
     pub fn resume_interval(&self, now: DateTime<Utc>) -> Option<f64> {
-        self.recently_rate_limited(now).then_some(self.interval_s).flatten()
+        self.recently_rate_limited(now)
+            .then_some(self.interval_s)
+            .flatten()
     }
 
     /// Seconds to wait before the next request is within budget. Zero when
@@ -253,7 +255,9 @@ impl PollBudget {
                 .map(|dt| dt.to_rfc3339_opts(chrono::SecondsFormat::Secs, true)),
             interval_s: self.interval_s,
         };
-        let Ok(bytes) = serde_json::to_vec_pretty(&body) else { return };
+        let Ok(bytes) = serde_json::to_vec_pretty(&body) else {
+            return;
+        };
         // Staged and committed rather than written in place: a half-written
         // ledger that fails to parse silently resets the budget, which is the
         // exact failure this module exists to prevent.
@@ -352,8 +356,13 @@ mod tests {
         // blocks re-blocking within 900s of a deadline-exact retry.
         let mut budget = PollBudget::ephemeral();
         budget.record_rate_limited(at(0), Some(900.0));
-        let resumed = budget.resume_interval(at(1)).expect("a backoff was recorded");
-        assert!((resumed - 990.0).abs() < 0.001, "expected ~990s, got {resumed}");
+        let resumed = budget
+            .resume_interval(at(1))
+            .expect("a backoff was recorded");
+        assert!(
+            (resumed - 990.0).abs() < 0.001,
+            "expected ~990s, got {resumed}"
+        );
     }
 
     #[test]

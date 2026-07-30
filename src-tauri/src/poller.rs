@@ -1141,7 +1141,7 @@ pub async fn run(
     let now0 = Utc::now();
     let mut interval_s = budget
         .resume_interval(now0)
-        .unwrap_or_else(|| poll_policy::DEFAULT_INTERVAL_S)
+        .unwrap_or(poll_policy::DEFAULT_INTERVAL_S)
         .max(poll_policy::MIN_INTERVAL_S);
     let startup_wait_s = budget.wait_for_capacity(now0);
     if startup_wait_s > 0.0 {

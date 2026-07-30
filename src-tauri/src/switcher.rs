@@ -1234,7 +1234,11 @@ async fn read_snapshot_inner() -> Result<SnapshotFetch, SwitchError> {
                 let key = account.stable_key();
                 cache.record_failure(
                     &key,
-                    if throttled { crate::usage_cache::RATE_LIMITED } else { "fetch-failed" },
+                    if throttled {
+                        crate::usage_cache::RATE_LIMITED
+                    } else {
+                        "fetch-failed"
+                    },
                 );
 
                 // Serve what was true a moment ago rather than nothing. Stale
