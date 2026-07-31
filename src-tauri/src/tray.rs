@@ -85,7 +85,15 @@ impl AmbientTheme {
 /// theme, not per pixel.
 #[cfg(windows)]
 fn detect_windows() -> Option<AmbientTheme> {
+    use std::os::windows::process::CommandExt;
     use std::process::Command;
+
+    /// Without this, `reg.exe` — a console program spawned from a GUI process —
+    /// gets its own console window. The tray repaint re-probes the theme every
+    /// minute, so the result was a terminal flashing open and shut on the
+    /// user's desktop roughly once a minute. `wsl.rs` guards its spawns the
+    /// same way, for the same reason.
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
     let output = Command::new("reg")
         .args([
@@ -94,6 +102,7 @@ fn detect_windows() -> Option<AmbientTheme> {
             "/v",
             "SystemUsesLightTheme",
         ])
+        .creation_flags(CREATE_NO_WINDOW)
         .output()
         .ok()?;
 

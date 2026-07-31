@@ -454,10 +454,18 @@ fn try_read_valid_credential(path: &Path) -> Option<String> {
 /// alone, per this module's design). `false` on any spawn failure or non-zero
 /// exit.
 fn verify_login_status(claude_path: &Path, config_dir: &Path) -> bool {
-    std::process::Command::new(claude_path)
-        .args(["auth", "status"])
-        .env("CLAUDE_CONFIG_DIR", config_dir)
-        .output()
+    let mut cmd = std::process::Command::new(claude_path);
+    cmd.args(["auth", "status"])
+        .env("CLAUDE_CONFIG_DIR", config_dir);
+    // A silent check, unlike the sign-in terminal above, which is meant to be
+    // seen — so it must not flash a console of its own.
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        cmd.creation_flags(CREATE_NO_WINDOW);
+    }
+    cmd.output()
         .map(|out| out.status.success())
         .unwrap_or(false)
 }
