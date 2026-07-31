@@ -115,7 +115,7 @@ describe("checkForUpdate", () => {
     await expect(fresh()).resolves.toEqual({ kind: "current" });
   });
 
-  it("surfaces the version and trims empty release notes to null", async () => {
+  it("surfaces the version and yields no highlights for an empty body", async () => {
     withTauri({});
     const update = { version: "0.2.0", body: "   " };
     vi.doMock("@tauri-apps/plugin-updater", () => ({
@@ -125,7 +125,46 @@ describe("checkForUpdate", () => {
     const { checkForUpdate: fresh } = await import("./updater");
     const result = await fresh();
 
-    expect(result).toMatchObject({ kind: "available", version: "0.2.0", notes: null });
+    expect(result).toMatchObject({ kind: "available", version: "0.2.0", highlights: [] });
+  });
+});
+
+describe("releaseHighlights", () => {
+  it("rejoins a bullet that wraps, rather than truncating it", async () => {
+    const { releaseHighlights } = await import("./updater");
+
+    expect(
+      releaseHighlights("### Fixed\n\n- A console window flashed open and shut,\n  once a minute."),
+    ).toEqual(["A console window flashed open and shut, once a minute."]);
+  });
+
+  it("drops the install boilerplate the release page appends", async () => {
+    const { releaseHighlights } = await import("./updater");
+
+    // Shape of a manifest published before the notes were narrowed: the
+    // changelog, a horizontal rule, then prose for someone downloading by hand.
+    const body = [
+      "### Fixed",
+      "",
+      "- The real change.",
+      "",
+      "---",
+      "",
+      "### Install",
+      "",
+      "- Pick the file for your platform from the assets below.",
+      "| Platform | File |",
+    ].join("\n");
+
+    expect(releaseHighlights(body)).toEqual(["The real change."]);
+  });
+
+  it("returns nothing rather than throwing on absent or heading-only input", async () => {
+    const { releaseHighlights } = await import("./updater");
+
+    expect(releaseHighlights(null)).toEqual([]);
+    expect(releaseHighlights(undefined)).toEqual([]);
+    expect(releaseHighlights("### Fixed\n\nNothing yet.")).toEqual([]);
   });
 });
 

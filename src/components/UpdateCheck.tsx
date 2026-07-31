@@ -7,6 +7,13 @@ function percent({ downloaded, total }: DownloadProgress): string {
 }
 
 /**
+ * Entries shown before the list is summarised. A release like 0.2.0 carries
+ * twenty-odd bullets, and the install button belongs on screen rather than
+ * below a wall of them.
+ */
+const NOTE_LIMIT = 5;
+
+/**
  * The update row in About. Holds no state of its own — `useUpdate` is mounted
  * once in `App`, so what is shown here is the same check the background
  * scheduler ran, not a second opinion.
@@ -46,7 +53,18 @@ export default function UpdateCheck({ update }: { update: UseUpdateResult }) {
               Version <span className="num">{status.version}</span> is available. The app will
               restart once it installs.
             </span>
-            {status.notes && <span className="about-note">{status.notes}</span>}
+            {status.highlights.length > 0 && (
+              <ul className="about-note update-notes">
+                {status.highlights.slice(0, NOTE_LIMIT).map((line) => (
+                  <li key={line}>{line}</li>
+                ))}
+                {status.highlights.length > NOTE_LIMIT && (
+                  <li className="update-notes-more">
+                    …and {status.highlights.length - NOTE_LIMIT} more, in the release notes.
+                  </li>
+                )}
+              </ul>
+            )}
 
             {/* Restarting mid-switch would interrupt a credential rotation. */}
             {blocked ? (

@@ -123,7 +123,7 @@ export async function notifyUpdate(version: string): Promise<void> {
 /** Outcome of a check. `unsupported` means there is no Tauri runtime at all. */
 export type UpdateCheck =
   | { kind: "current" }
-  | { kind: "available"; version: string; notes: string | null; update: Update }
+  | { kind: "available"; version: string; highlights: string[]; update: Update }
   | { kind: "unsupported" }
   | { kind: "failed"; message: string };
 
@@ -174,6 +174,38 @@ function describe(error: unknown): string {
 }
 
 /**
+ * The changelog bullets from a release body, as plain sentences.
+ *
+ * The manifest now carries only the changelog section, but this still trims:
+ * every manifest published before that change holds the whole release body,
+ * including the install table and checksum instructions written for someone
+ * downloading by hand. An app that already downloaded and signature-verified
+ * the file must not tell its user to go and do that. Anything after the `---`
+ * rule is that boilerplate.
+ *
+ * Bullets wrap across lines in CHANGELOG.md, so a continuation line is joined
+ * back onto its bullet rather than dropped — otherwise every entry would be
+ * truncated mid-sentence.
+ */
+export function releaseHighlights(body: string | null | undefined): string[] {
+  if (!body) return [];
+
+  const changelog = body.split(/^\s*---\s*$/m)[0] ?? body;
+  const bullets: string[] = [];
+
+  for (const raw of changelog.split("\n")) {
+    const line = raw.trim();
+    if (!line || line.startsWith("#")) continue;
+    if (line.startsWith("- ")) bullets.push(line.slice(2).trim());
+    // A wrapped continuation belongs to the bullet above it. Text before any
+    // bullet is a section preamble and is dropped.
+    else if (bullets.length) bullets[bullets.length - 1] += ` ${line}`;
+  }
+
+  return bullets.filter(Boolean);
+}
+
+/**
  * Asks GitHub whether a newer release exists. Never throws — a failed check is
  * a state the UI renders, not an exception it has to catch.
  */
@@ -187,7 +219,7 @@ export async function checkForUpdate(): Promise<UpdateCheck> {
     return {
       kind: "available",
       version: update.version,
-      notes: update.body?.trim() || null,
+      highlights: releaseHighlights(update.body),
       update,
     };
   } catch (error) {
