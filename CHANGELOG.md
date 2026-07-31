@@ -13,6 +13,22 @@ A breaking change to any of those bumps the minor version, since major is pinned
 
 Nothing yet.
 
+## [0.2.1] - 2026-07-31
+
+### Fixed
+
+- A console window flashed open and shut on Windows roughly once a minute, for as long as
+  the app was running. The tray icon asks the OS for the taskbar theme as it repaints, and
+  refreshing that answer shells out to `reg query` — which, spawned from a windowed
+  process, gets a console of its own unless told not to. Nothing was wrong with the
+  reading; it just announced itself every time. The sign-in terminal is unaffected, since
+  that one is meant to be seen.
+- A user with a Claude subscription, already signed into Claude Code, opened the app and
+  was told "No accounts yet". The heading is about this app's own vault, but it reads as a
+  claim about the user — and the one-click button that would have fixed it sat underneath
+  the full sign-in flow. First run now detects an existing login and promotes "Add my
+  current login" to the first action.
+
 ## [0.2.0] - 2026-07-29
 
 ### Added
