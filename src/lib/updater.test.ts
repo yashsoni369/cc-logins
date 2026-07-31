@@ -1,6 +1,8 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
+  AUTO_CHECK_POLL_MS,
   CHECK_INTERVAL_MS,
+  STARTUP_DELAY_MS,
   checkForUpdate,
   dueForAutoCheck,
   installBlockedBy,
@@ -205,6 +207,38 @@ describe("automatic check bookkeeping", () => {
     recordAutoCheck(t0);
     expect(dueForAutoCheck(t0 + CHECK_INTERVAL_MS - 1)).toBe(false);
     expect(dueForAutoCheck(t0 + CHECK_INTERVAL_MS)).toBe(true);
+  });
+
+  /*
+   * Regression guard. The poll used to run at CHECK_INTERVAL_MS, so the tick
+   * following the startup check arrived 30s before the gate opened, was
+   * refused, and pushed the next check out to 48 hours. Polling must be
+   * strictly finer than the gate, or a tick that lands early costs a whole
+   * cycle — this asserts the relationship, not either number.
+   */
+  it("polls strictly more often than the gate it is checked against", () => {
+    expect(AUTO_CHECK_POLL_MS).toBeLessThan(CHECK_INTERVAL_MS);
+    // The startup check offsets the recorded time by STARTUP_DELAY_MS, so the
+    // poll has to be finer than that offset is large for the first tick after
+    // the gate opens to still land inside the same day.
+    expect(AUTO_CHECK_POLL_MS).toBeGreaterThan(STARTUP_DELAY_MS);
+
+    const t0 = 1_000_000_000_000;
+    const firstCheck = t0 + STARTUP_DELAY_MS;
+    recordAutoCheck(firstCheck);
+
+    // Walk the polls across the first day and find when one is first accepted.
+    let due: number | null = null;
+    for (let t = t0 + AUTO_CHECK_POLL_MS; t <= t0 + 3 * CHECK_INTERVAL_MS; t += AUTO_CHECK_POLL_MS) {
+      if (dueForAutoCheck(t)) {
+        due = t;
+        break;
+      }
+    }
+
+    expect(due).not.toBeNull();
+    // Within an hour of the gate opening, not a day and a half later.
+    expect((due as number) - firstCheck).toBeLessThan(CHECK_INTERVAL_MS + AUTO_CHECK_POLL_MS);
   });
 
   it("recovers from a clock that moved backwards rather than wedging forever", () => {

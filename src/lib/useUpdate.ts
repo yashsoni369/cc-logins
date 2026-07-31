@@ -17,7 +17,7 @@ import {
   recordAutoCheck,
   recordNotified,
   shouldNotify,
-  CHECK_INTERVAL_MS,
+  AUTO_CHECK_POLL_MS,
   STARTUP_DELAY_MS,
   type DownloadProgress,
   type UpdateCheck,
@@ -73,7 +73,13 @@ export function useUpdate(
       if (!mounted.current) return;
       setStatus(result);
 
-      if (automatic) recordAutoCheck();
+      // Only a check that actually reached the server spends the daily budget.
+      // Recording a failure would make being offline at the wrong moment cost a
+      // full day of not looking, which is the opposite of what the interval is
+      // for. `unsupported` never touched the network at all.
+      if (automatic && (result.kind === "available" || result.kind === "current")) {
+        recordAutoCheck();
+      }
 
       // Only automatic checks notify. After a manual check the user is already
       // looking at the answer, so a toast would be noise.
@@ -102,9 +108,11 @@ export function useUpdate(
       }, STARTUP_DELAY_MS),
     );
 
+    // Polls hourly; `dueForAutoCheck` is what holds it to once a day. See
+    // AUTO_CHECK_POLL_MS for why these must not be the same number.
     const interval = setInterval(() => {
       if (dueForAutoCheck()) void run(true);
-    }, CHECK_INTERVAL_MS);
+    }, AUTO_CHECK_POLL_MS);
 
     return () => {
       timers.forEach(clearTimeout);

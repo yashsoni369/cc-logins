@@ -25,6 +25,22 @@ import type { DaemonPhase } from "@/types";
 export const CHECK_INTERVAL_MS = 24 * 60 * 60 * 1000;
 
 /**
+ * How often due-ness is *evaluated*. Deliberately far shorter than
+ * `CHECK_INTERVAL_MS`, which is the rule about when a check may actually run.
+ *
+ * They used to be the same value, and a timer that asks "has a day passed?"
+ * exactly once a day loses the race with itself. The startup check records its
+ * timestamp 30s after launch, so the first daily tick arrives 30s *early* and
+ * is refused — pushing the second check out to 48 hours. Later ticks landed
+ * precisely on the boundary, where any drift, a suspended laptop or a throttled
+ * background timer cost another full day.
+ *
+ * Polling hourly against a daily gate means no single missed or early tick can
+ * delay a check by more than an hour.
+ */
+export const AUTO_CHECK_POLL_MS = 60 * 60 * 1000;
+
+/**
  * Startup delay before the first automatic check. Long enough that launch, the
  * first poll and any first-run screen are done with; short enough that a user
  * who opens the app and leaves it still learns about an update today.
