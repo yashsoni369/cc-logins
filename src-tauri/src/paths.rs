@@ -284,6 +284,33 @@ pub fn backup_root() -> PathBuf {
     resolved
 }
 
+/// Whether Claude Code appears to hold a login on this machine.
+///
+/// `Some(true)` when a credential file is present, `Some(false)` when the
+/// place it would live was checked and is empty, and `None` when the question
+/// cannot be settled without a read that might prompt the user.
+///
+/// That third case is macOS. The active credential normally lives in the
+/// Keychain there, with the file only as a fallback, so an absent file proves
+/// nothing — and querying another application's Keychain item is exactly the
+/// operation that raises a system prompt. Asking for one before the user has
+/// clicked anything, on first launch, would be a poor way to introduce
+/// ourselves. Callers must treat `None` as "possibly", never as "no".
+pub fn claude_login_present() -> Option<bool> {
+    let file_exists = credentials_path().is_file();
+    if file_exists {
+        return Some(true);
+    }
+    #[cfg(target_os = "macos")]
+    {
+        None
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        Some(false)
+    }
+}
+
 /// Where the last-good usage readings are cached.
 ///
 /// Inside this app's own vault directory, so it inherits [`backup_root`]'s

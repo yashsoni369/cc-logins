@@ -1272,11 +1272,11 @@ async fn read_snapshot_inner() -> Result<SnapshotFetch, SwitchError> {
         status: EnvStatus::Live,
         accounts: measured,
         last_seen_seconds: None,
-        // Not probed independently of `accounts` here — this path already
-        // reads real credentials to populate `accounts`, so there is no
-        // separate "not determined" state to report the way there is for a
-        // WSL distro (see `wsl.rs::build_environments`).
-        has_credentials: None,
+        // Probed, so first run can tell "you have not added an account yet"
+        // apart from "you have no Claude login at all". Those read identically
+        // on an empty vault, and conflating them told a user who was signed
+        // into Claude Code that no account existed.
+        has_credentials: paths::claude_login_present(),
     };
 
     cache.save();

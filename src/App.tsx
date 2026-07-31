@@ -447,6 +447,14 @@ export default function App() {
   const displaySnapshot: Snapshot = snapshotOverride ?? snapshot;
 
   const hasAccounts = displaySnapshot.environments.some((e) => e.accounts.length > 0);
+  // Any realm reporting a Claude Code login means the user has one, even
+  // though this app is not tracking it yet. `undefined` is undetermined (see
+  // paths::claude_login_present) and must not read as "no".
+  const loginPresent = displaySnapshot.environments.some((e) => e.hasCredentials === true)
+    ? true
+    : displaySnapshot.environments.every((e) => e.hasCredentials === false)
+      ? false
+      : undefined;
 
   if (!hasAccounts) {
     return (
@@ -459,6 +467,7 @@ export default function App() {
             pendingInteractiveLogin ? "signIn" : pendingAddAccount ? "addCurrent" : null
           }
           error={interactiveLoginError ?? addAccountError}
+          loginPresent={loginPresent}
         />
       </div>
     );

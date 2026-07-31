@@ -9,6 +9,12 @@ interface FirstRunScreenProps {
   pending: FirstRunAction | null;
   /** Message from the most recent failed action. */
   error: string | null;
+  /**
+   * Whether Claude Code appears to hold a login on this machine.
+   * `undefined` means it could not be determined without a read that might
+   * prompt — treat that as "possibly", never as "no".
+   */
+  loginPresent?: boolean;
 }
 
 /**
@@ -21,15 +27,27 @@ interface FirstRunScreenProps {
  * hardcoded address as though it had detected one, which is exactly the kind
  * of confident fiction this product is supposed to refuse.
  */
-export default function FirstRunScreen({ onAction, pending, error }: FirstRunScreenProps) {
+export default function FirstRunScreen({
+  onAction,
+  pending,
+  error,
+  loginPresent,
+}: FirstRunScreenProps) {
   const [explaining, setExplaining] = useState(false);
   const busy = pending !== null;
+  // Only `false` is a confident "there is no login here"; undefined is the
+  // undetermined case and gets the same encouraging path as a found one.
+  const maybeSignedIn = loginPresent !== false;
 
   return (
     <div className="pane" style={{ justifyContent: "center" }}>
       <div className="empty">
-        <h3>No accounts yet</h3>
-        <p>Add a Claude account to start tracking its quota. Everything stays on this machine.</p>
+        <h3>{loginPresent === true ? "Found your Claude Code login" : "Not tracking any accounts yet"}</h3>
+        <p>
+          {loginPresent === true
+            ? "Add it below to start tracking its quota, or sign in to a different account. Everything stays on this machine."
+            : "Add a Claude account to start tracking its quota. Everything stays on this machine."}
+        </p>
 
         {error && (
           <div className="banner" role="alert">
@@ -37,18 +55,48 @@ export default function FirstRunScreen({ onAction, pending, error }: FirstRunScr
           </div>
         )}
 
+        {/*
+          Ordered by what the machine can see. Someone already signed into
+          Claude Code wants the one-click path, and leading with "sign in"
+          reads as though the app had not noticed — which is the complaint
+          this screen earned: it told a subscriber they had no account.
+        */}
         <div className="steps">
+          {maybeSignedIn && (
+            <div className="step">
+              <span className="i">→</span>
+              <span className="t">
+                {loginPresent === true
+                  ? "Add the account you are signed into"
+                  : "Add the account you are already signed into"}
+                <i>
+                  Registers whichever login Claude Code is currently using. It does not open a new
+                  sign-in.
+                </i>
+                <button
+                  className="btn primary"
+                  type="button"
+                  disabled={busy}
+                  onClick={() => onAction("addCurrent")}
+                  style={{ marginTop: 8 }}
+                >
+                  {pending === "addCurrent" ? "Adding…" : "Add my current login"}
+                </button>
+              </span>
+            </div>
+          )}
+
           <div className="step">
             <span className="i">→</span>
             <span className="t">
-              Sign in to an account
+              {maybeSignedIn ? "Or sign in to another account" : "Sign in to an account"}
               <i>
                 Opens a terminal running the official Claude Code sign-in, and your browser prompts
                 you there. This app never asks for a password, and whichever account you are
                 currently signed into is left untouched.
               </i>
               <button
-                className="btn primary"
+                className={maybeSignedIn ? "btn" : "btn primary"}
                 type="button"
                 disabled={busy}
                 onClick={() => onAction("signIn")}
@@ -59,6 +107,7 @@ export default function FirstRunScreen({ onAction, pending, error }: FirstRunScr
             </span>
           </div>
 
+          {!maybeSignedIn && (
           <div className="step">
             <span className="i">→</span>
             <span className="t">
@@ -78,6 +127,7 @@ export default function FirstRunScreen({ onAction, pending, error }: FirstRunScr
               </button>
             </span>
           </div>
+          )}
         </div>
 
         <button
