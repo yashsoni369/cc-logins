@@ -17,6 +17,10 @@ by [Yash Soni](https://github.com/yashsoni369), founder of
 
 </div>
 
+![The Dashboard: pooled runway across every account, a utilisation line per account over the last
+seven days, and a timeline of when each account's 5-hour window
+resets.](docs/screenshots/dashboard.png)
+
 A tray application for developers who hold more than one Claude subscription and run Claude Code
 all day. It shows which account is active and how much 5-hour and 7-day quota each account has
 left, and switches between them — one click, or automatically before a limit lands. Windows,
@@ -153,6 +157,55 @@ running before trusting it with your tokens.** Building from source remains the 
 - **WSL-aware.** On Windows, Claude Code running natively and Claude Code running inside a WSL
   distro keep completely separate logins. This app detects both and presents them as separate
   environments to switch between, rather than silently only seeing one.
+
+## Screenshots
+
+Account names and organisations are masked in these — the app itself masks addresses on screen for
+the same reason, since people screenshot it.
+
+![The tray popover: the active account's 5-hour and 7-day bars, every other account with its
+utilisation and reset countdown, and a switch one click
+away.](docs/screenshots/tray.png)
+
+The popover is the surface most of the time — one glance from the corner of the eye, one click to
+move. The window is for when you want detail.
+
+<details>
+<summary><b>More screenshots</b> — accounts, per-account history, settings</summary>
+
+### Accounts
+
+Every login in one table: 5-hour and 7-day utilisation, when each window resets, and a switch
+button on the ones that are not current. The `E` badge marks an enterprise account, which is
+limited by a monthly spend cap instead of rate-limit windows.
+
+![The Accounts screen listing four logins with utilisation bars, reset countdowns and switch
+buttons.](docs/screenshots/accounts.png)
+
+Any row expands in place for the exact reset instants, the organisation it belongs to, and
+per-model weekly windows.
+
+![An expanded account row showing organisation, 5-hour and 7-day reset times, when it was last
+measured, and per-model weekly windows.](docs/screenshots/accounts-expanded.png)
+
+### Per-account history
+
+Opening an account on the Dashboard plots its 5-hour and 7-day windows apart, rather than
+collapsing both into one daily average — quota is spent in 5-hour windows, so an average hides
+every spike.
+
+![An account opened on the Dashboard, showing the 5-hour and 7-day windows charted separately and
+a daily min/max range.](docs/screenshots/account-detail.png)
+
+### Settings
+
+Everything auto-switch does, adjustable — threshold, strategy, and how long a warning runs before
+it fires. Auto-switch is off until you turn it on.
+
+![The Settings screen with theme, time format, usage-check cadence, auto-switch threshold,
+strategy and grace period.](docs/screenshots/settings.png)
+
+</details>
 
 ## Safe defaults
 
