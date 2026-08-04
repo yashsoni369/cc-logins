@@ -1,0 +1,62 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<style>
+  /* Fills whatever viewport it gets rather than pinning 1280x640: the capture
+     runs at 125% display scaling, so a fixed pixel box would be rescaled and
+     leave dead margin. The window is sized to 2:1 instead and this fills it. */
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  html, body { width: 100%; height: 100%; overflow: hidden; }
+  body {
+    /* Graphite ground, straight from app-icon.svg. A dark ground is the
+       brand's deliberate choice — a graphite mark greys out on light chrome. */
+    background: #1F252C;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 5.4vw;
+    font-family: "Segoe UI", system-ui, -apple-system, Roboto, sans-serif;
+    color: #F6F7F8;
+  }
+  .mark { flex: none; width: 33vw; height: 33vw; }
+  h1 {
+    font-size: 8.4vw;
+    font-weight: 600;
+    letter-spacing: -0.02em;
+    line-height: 1;
+  }
+  p {
+    margin-top: 2.3vw;
+    font-size: 2.9vw;
+    line-height: 1.35;
+    color: #A8B2BC;
+    max-width: 18ch;
+  }
+  .rule {
+    margin-top: 2.6vw;
+    width: 7.5vw;
+    height: 0.32vw;
+    background: #4E7896;
+    border-radius: 2px;
+  }
+</style>
+</head>
+<body>
+  <!-- Exact geometry from app-icon.svg: two concentric open C arcs, the inner
+       one reading as continuing past the outer. No rounded tile here — the
+       squircle exists for OS icon grids, not for a social card. -->
+  <svg class="mark" viewBox="0 0 1024 1024" fill="none">
+    <g stroke-linecap="butt">
+      <path d="M 739.5 259.3 A 340 340 0 1 0 739.5 764.7" stroke="#F6F7F8" stroke-width="88"/>
+      <path d="M 688.5 374.1 A 224 224 0 1 0 688.5 649.9" stroke="#4E7896" stroke-width="76"/>
+    </g>
+  </svg>
+
+  <div class="copy">
+    <h1>CC Logins</h1>
+    <p>Quota visibility and account switching for Claude Code</p>
+    <div class="rule"></div>
+  </div>
+</body>
+</html>
