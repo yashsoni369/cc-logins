@@ -1,6 +1,6 @@
 [package]
 name = "cc-logins"
-version = "0.2.1"
+version = "0.2.2"
 # Kept byte-identical to package.json's `description` and tauri.conf.json's
 # `bundle.shortDescription`. Tauri falls back to these Cargo fields when the
 # bundle config omits them, and they surface in the deb/RPM metadata, so drift
