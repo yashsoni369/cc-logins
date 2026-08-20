@@ -1,6 +1,8 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
+  AUTO_CHECK_POLL_MS,
   CHECK_INTERVAL_MS,
+  STARTUP_DELAY_MS,
   checkForUpdate,
   dueForAutoCheck,
   installBlockedBy,
@@ -115,7 +117,7 @@ describe("checkForUpdate", () => {
     await expect(fresh()).resolves.toEqual({ kind: "current" });
   });
 
-  it("surfaces the version and trims empty release notes to null", async () => {
+  it("surfaces the version and yields no highlights for an empty body", async () => {
     withTauri({});
     const update = { version: "0.2.0", body: "   " };
     vi.doMock("@tauri-apps/plugin-updater", () => ({
@@ -125,7 +127,46 @@ describe("checkForUpdate", () => {
     const { checkForUpdate: fresh } = await import("./updater");
     const result = await fresh();
 
-    expect(result).toMatchObject({ kind: "available", version: "0.2.0", notes: null });
+    expect(result).toMatchObject({ kind: "available", version: "0.2.0", highlights: [] });
+  });
+});
+
+describe("releaseHighlights", () => {
+  it("rejoins a bullet that wraps, rather than truncating it", async () => {
+    const { releaseHighlights } = await import("./updater");
+
+    expect(
+      releaseHighlights("### Fixed\n\n- A console window flashed open and shut,\n  once a minute."),
+    ).toEqual(["A console window flashed open and shut, once a minute."]);
+  });
+
+  it("drops the install boilerplate the release page appends", async () => {
+    const { releaseHighlights } = await import("./updater");
+
+    // Shape of a manifest published before the notes were narrowed: the
+    // changelog, a horizontal rule, then prose for someone downloading by hand.
+    const body = [
+      "### Fixed",
+      "",
+      "- The real change.",
+      "",
+      "---",
+      "",
+      "### Install",
+      "",
+      "- Pick the file for your platform from the assets below.",
+      "| Platform | File |",
+    ].join("\n");
+
+    expect(releaseHighlights(body)).toEqual(["The real change."]);
+  });
+
+  it("returns nothing rather than throwing on absent or heading-only input", async () => {
+    const { releaseHighlights } = await import("./updater");
+
+    expect(releaseHighlights(null)).toEqual([]);
+    expect(releaseHighlights(undefined)).toEqual([]);
+    expect(releaseHighlights("### Fixed\n\nNothing yet.")).toEqual([]);
   });
 });
 
@@ -166,6 +207,38 @@ describe("automatic check bookkeeping", () => {
     recordAutoCheck(t0);
     expect(dueForAutoCheck(t0 + CHECK_INTERVAL_MS - 1)).toBe(false);
     expect(dueForAutoCheck(t0 + CHECK_INTERVAL_MS)).toBe(true);
+  });
+
+  /*
+   * Regression guard. The poll used to run at CHECK_INTERVAL_MS, so the tick
+   * following the startup check arrived 30s before the gate opened, was
+   * refused, and pushed the next check out to 48 hours. Polling must be
+   * strictly finer than the gate, or a tick that lands early costs a whole
+   * cycle — this asserts the relationship, not either number.
+   */
+  it("polls strictly more often than the gate it is checked against", () => {
+    expect(AUTO_CHECK_POLL_MS).toBeLessThan(CHECK_INTERVAL_MS);
+    // The startup check offsets the recorded time by STARTUP_DELAY_MS, so the
+    // poll has to be finer than that offset is large for the first tick after
+    // the gate opens to still land inside the same day.
+    expect(AUTO_CHECK_POLL_MS).toBeGreaterThan(STARTUP_DELAY_MS);
+
+    const t0 = 1_000_000_000_000;
+    const firstCheck = t0 + STARTUP_DELAY_MS;
+    recordAutoCheck(firstCheck);
+
+    // Walk the polls across the first day and find when one is first accepted.
+    let due: number | null = null;
+    for (let t = t0 + AUTO_CHECK_POLL_MS; t <= t0 + 3 * CHECK_INTERVAL_MS; t += AUTO_CHECK_POLL_MS) {
+      if (dueForAutoCheck(t)) {
+        due = t;
+        break;
+      }
+    }
+
+    expect(due).not.toBeNull();
+    // Within an hour of the gate opening, not a day and a half later.
+    expect((due as number) - firstCheck).toBeLessThan(CHECK_INTERVAL_MS + AUTO_CHECK_POLL_MS);
   });
 
   it("recovers from a clock that moved backwards rather than wedging forever", () => {

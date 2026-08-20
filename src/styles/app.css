@@ -2287,6 +2287,22 @@ tr.acct-details-row td {
   line-height: 1.5;
 }
 
+/* Release highlights. A list, because the manifest's markdown is shown as
+   text — bullets rendered as literal "- " read as broken. */
+.update-notes {
+  margin: 0;
+  padding-left: 18px;
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  max-width: 68ch;
+}
+.update-notes-more {
+  list-style: none;
+  margin-left: -18px;
+  color: var(--faint);
+}
+
 .about-path {
   display: grid;
   grid-template-columns: 128px minmax(0, 1fr);

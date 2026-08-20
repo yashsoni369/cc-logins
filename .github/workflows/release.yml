@@ -251,15 +251,79 @@ jobs:
           # before touching either.
           releaseAssetNamePattern: CC-Logins-[platform]-[arch][setup][ext]
 
+  # `releaseBody` above is one string serving two audiences, and tauri-action
+  # writes it to both the release page and `latest.json`. On the page the
+  # install table and checksum instructions are exactly right. In the updater
+  # they are nonsense — the app has already downloaded the file and verified
+  # its signature, so telling the reader to pick an asset and run sha256sum
+  # describes work it just did for them. It also arrives as raw markdown in a
+  # panel that renders plain text, so `###` and table pipes show literally.
+  #
+  # So the manifest gets the changelog section on its own. The release page
+  # keeps the full body.
+  updater-notes:
+    name: Updater notes
+    needs: [verify-version, release]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Rewrite latest.json notes to the changelog section
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          TAG: ${{ github.ref_name }}
+          # Through the environment, not `${{ }}` inside the script: the notes
+          # are arbitrary multi-line markdown and would otherwise be spliced
+          # into the shell as source.
+          NOTES: ${{ needs.verify-version.outputs.notes }}
+        run: |
+          set -euo pipefail
+
+          # Draft-safe lookup, for the same reason the checksums job uses it —
+          # see the comment there.
+          release_id=$(gh api "repos/$REPO/releases" --paginate \
+            --jq ".[] | select(.tag_name == \"$TAG\") | .id" | head -n 1)
+
+          if [ -z "$release_id" ]; then
+            echo "::error::no release found for tag $TAG"
+            exit 1
+          fi
+
+          asset_id=$(gh api "repos/$REPO/releases/$release_id/assets" --paginate \
+            --jq '.[] | select(.name == "latest.json") | .id' | head -n 1)
+
+          if [ -z "$asset_id" ]; then
+            # Not cosmetic: without this manifest the updater has nothing to
+            # read, so every installed copy silently stops seeing releases.
+            echo "::error::release $TAG has no latest.json — the updater manifest is missing"
+            exit 1
+          fi
+
+          gh api -H "Accept: application/octet-stream" \
+            "repos/$REPO/releases/assets/$asset_id" > latest.json
+
+          jq --arg notes "$NOTES" '.notes = $notes' latest.json > latest.rewritten.json
+          mv latest.rewritten.json latest.json
+          jq -r '.version, (.notes | split("\n")[0])' latest.json
+
+          # Replace rather than add: GitHub rejects a duplicate asset name.
+          gh api --method DELETE "repos/$REPO/releases/assets/$asset_id"
+          gh api --method POST \
+            -H "Content-Type: application/json" \
+            "https://uploads.github.com/repos/$REPO/releases/$release_id/assets?name=latest.json" \
+            --input latest.json
+
   # Unsigned installers give a user no way to tell a real download from a
   # tampered one. A checksum file is the minimum substitute, and it has to be
   # generated after every platform leg has uploaded, from the assets as they
   # were actually named on the release rather than from local build output.
-  # `needs: release` also means a failed platform never gets a checksum file
-  # that silently describes an incomplete release.
+  #
+  # It needs `updater-notes`, not `release`, because that job replaces
+  # `latest.json` — hashing before it ran would describe a file the release no
+  # longer carries. `updater-notes` needs `release` in turn, so a failed
+  # platform still never gets a checksum file describing an incomplete release.
   checksums:
     name: Checksums
-    needs: release
+    needs: updater-notes
     runs-on: ubuntu-latest
     steps:
       - name: Generate and attach SHA256SUMS.txt
