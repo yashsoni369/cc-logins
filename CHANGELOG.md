@@ -13,6 +13,13 @@ A breaking change to any of those bumps the minor version, since major is pinned
 
 Nothing yet.
 
+## [0.2.2] - 2026-08-20
+
+### Fixed
+
+- Automatic update checks no longer slip by an extra day when a scheduled check runs slightly early or while offline.
+- The updater now shows concise changelog highlights instead of the full GitHub release-page instructions.
+
 ## [0.2.1] - 2026-07-31
 
 ### Fixed
@@ -171,7 +178,8 @@ Nothing yet.
   otherwise.
 - Builds are unsigned. See [SECURITY.md](SECURITY.md).
 
-[Unreleased]: https://github.com/yashsoni369/cc-logins/compare/v0.2.1...HEAD
+[Unreleased]: https://github.com/yashsoni369/cc-logins/compare/v0.2.2...HEAD
+[0.2.2]: https://github.com/yashsoni369/cc-logins/compare/v0.2.1...v0.2.2
 [0.2.1]: https://github.com/yashsoni369/cc-logins/compare/v0.2.0...v0.2.1
 [0.2.0]: https://github.com/yashsoni369/cc-logins/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/yashsoni369/cc-logins/releases/tag/v0.1.0
