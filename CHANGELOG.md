@@ -13,6 +13,13 @@ A breaking change to any of those bumps the minor version, since major is pinned
 
 Nothing yet.
 
+## [0.2.2]
+
+### Fixed
+
+- Automatic update checks no longer slip by an extra day when a scheduled check runs slightly early or while offline.
+- The updater now shows concise changelog highlights instead of the full GitHub release-page instructions.
+
 ## [0.2.1] - 2026-07-31
 
 ### Fixed
