@@ -218,7 +218,8 @@ describe("buildFleetSeries", () => {
 
   it("reads daily rollups for a daily-backed range", () => {
     const daily = new Map([["key-1", [day("2026-07-18", 80, 0, 40), day("2026-07-19", 90, 0, 60)]]]);
-    const series = buildFleetSeries(accounts, keyFor, new Map(), daily, RANGES["30d"]);
+    const now = Date.parse("2026-07-20T12:00:00Z");
+    const series = buildFleetSeries(accounts, keyFor, new Map(), daily, RANGES["30d"], 240, now);
     // avgPct is what the line traces; maxPct belongs to the load-balance grid.
     expect(series[0]?.last).toBe(60);
     expect(series[0]?.mean).toBe(50);
