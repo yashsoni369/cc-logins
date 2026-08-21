@@ -3,7 +3,7 @@ import { appVersion, dataLocations, openExternal } from "../lib/api";
 import { Loading } from "./Loading";
 import UpdateCheck from "./UpdateCheck";
 import type { UseUpdateResult } from "../lib/useUpdate";
-import type { DataLocations } from "../types";
+import type { ClaudeBinaryStatus, DataLocations } from "../types";
 
 const REPO_URL = "https://github.com/yashsoni369/cc-logins";
 /** Attribution targets. Only the Apex36 site is tagged — GitHub drops the parameter. */
@@ -55,7 +55,18 @@ function PathRow({ label, path }: { label: string; path: string }) {
  * What this build is and where it keeps your files. Version and paths both
  * come from the backend — neither is guessed or compiled in here.
  */
-export default function AboutSection({ update }: { update: UseUpdateResult }) {
+export default function AboutSection({
+  update,
+  binaryStatus,
+}: {
+  update: UseUpdateResult;
+  /**
+   * Owned by `SettingsScreen`, which fetches it once and passes it down here
+   * too — so the field there and this read-only row always show the same
+   * answer instead of each polling the backend on its own.
+   */
+  binaryStatus: Loadable<ClaudeBinaryStatus>;
+}) {
   const [version, setVersion] = useState<Loadable<string>>(undefined);
   const [locations, setLocations] = useState<Loadable<DataLocations>>(undefined);
   const [linkError, setLinkError] = useState<string | null>(null);
@@ -170,6 +181,31 @@ export default function AboutSection({ update }: { update: UseUpdateResult }) {
                 <PathRow label="Settings + history" path={locations.dataDir} />
                 <PathRow label="Log file" path={locations.logFile} />
               </>
+            )}
+          </div>
+        </div>
+
+        <div className="field">
+          <div className="k">
+            Claude binary
+            <i>The Claude Code command this app launches for sign-in.</i>
+          </div>
+          <div className="v">
+            {binaryStatus === undefined && (
+              <span className="about-note">
+                <Loading />
+              </span>
+            )}
+            {binaryStatus === null && (
+              <span className="about-note">
+                Unavailable — only the desktop app can resolve this path.
+              </span>
+            )}
+            {binaryStatus && binaryStatus.found && (
+              <PathRow label={`Found (${binaryStatus.source})`} path={binaryStatus.path ?? ""} />
+            )}
+            {binaryStatus && !binaryStatus.found && (
+              <span className="about-note">{binaryStatus.message}</span>
             )}
           </div>
         </div>

@@ -3,11 +3,14 @@ import AboutSection from "./AboutSection";
 import { Loading } from "./Loading";
 import Toggle from "./Toggle";
 import type { UseUpdateResult } from "../lib/useUpdate";
-import { IpcError } from "../lib/api";
+import { claudeBinaryStatus, IpcError } from "../lib/api";
 import type { ClockFormat } from "../lib/time";
 import type { UseSettingsResult } from "../lib/useSettings";
 import type { Theme } from "../lib/useTheme";
-import type { Settings } from "../types";
+import type { ClaudeBinaryStatus, Settings } from "../types";
+
+/** `undefined` while still fetching; `null` once known unavailable (no backend). */
+type Loadable<T> = T | null | undefined;
 
 interface SegOption<T extends string> {
   id: T;
@@ -131,29 +134,54 @@ export default function SettingsScreen({
   // the backend write is debounced. Cleared once the backend echoes back.
   const [draftThreshold, setDraftThreshold] = useState<number | null>(null);
 
+  // Draft for the claude binary path field. `null` means "not editing" —
+  // render the confirmed value. A separate `string | null` from the slider
+  // draft above because this field commits on blur/Enter, not a timer.
+  const [binaryDraft, setBinaryDraft] = useState<string | null>(null);
+  const [binaryStatus, setBinaryStatus] = useState<Loadable<ClaudeBinaryStatus>>(undefined);
+
   const commitTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const mounted = useRef(true);
 
+  const refreshBinaryStatus = useCallback(() => {
+    claudeBinaryStatus()
+      .then((result) => {
+        if (mounted.current) setBinaryStatus(result.data);
+      })
+      .catch(() => {
+        if (mounted.current) setBinaryStatus(null);
+      });
+  }, []);
+
   useEffect(() => {
     mounted.current = true;
+    refreshBinaryStatus();
     return () => {
       mounted.current = false;
       if (commitTimer.current != null) clearTimeout(commitTimer.current);
     };
-  }, []);
+  }, [refreshBinaryStatus]);
 
-  /** Sends only named fields; the shared owner adopts the canonical response. */
+  /**
+   * Sends only named fields; the shared owner adopts the canonical response.
+   * Resolves to whether the write actually succeeded, so a caller that needs
+   * to react only on success (e.g. re-checking the claude binary status)
+   * doesn't have to duplicate the try/catch — the error still lands in the
+   * shared `saveError` banner either way.
+   */
   const commit = useCallback(
-    async (patch: Partial<Settings>) => {
+    async (patch: Partial<Settings>): Promise<boolean> => {
       try {
         await update(patch);
-        if (!mounted.current) return;
+        if (!mounted.current) return true;
         setDraftThreshold(null);
         setSaveError(null);
+        return true;
       } catch (err) {
-        if (!mounted.current) return;
+        if (!mounted.current) return false;
         setDraftThreshold(null);
         setSaveError(err instanceof IpcError ? err.message : "Couldn't save settings.");
+        return false;
       }
     },
     [update],
@@ -177,6 +205,28 @@ export default function SettingsScreen({
     },
     [commit],
   );
+
+  /**
+   * Commits the claude binary path on blur/Enter only — deliberately NOT the
+   * slider's threshold debounce and NOT a Save button. This is free text: a
+   * per-keystroke commit (the debounce approach) would write garbage path
+   * prefixes to disk, each one bumping the settings revision, while the user
+   * is still mid-edit. Blur/Enter means a value is only ever sent once it
+   * looks finished.
+   */
+  const commitBinaryPath = useCallback(() => {
+    setBinaryDraft((draft) => {
+      if (draft === null) return null;
+      const trimmed = draft.trim();
+      const current = settings?.claudeBinaryPath ?? "";
+      if (trimmed !== current) {
+        void commit({ claudeBinaryPath: trimmed === "" ? null : trimmed }).then((ok) => {
+          if (ok) refreshBinaryStatus();
+        });
+      }
+      return null;
+    });
+  }, [commit, settings, refreshBinaryStatus]);
 
   if (loading || !settings) {
     return (
@@ -353,9 +403,53 @@ export default function SettingsScreen({
             </span>
           </div>
         </div>
+
+        <div className="field">
+          <div className="k">
+            Claude binary
+            <i>
+              Full path to the claude command, for installs the app can&apos;t find on its own. Apps
+              opened from the Dock don&apos;t see PATH changes made in your shell. Leave empty to
+              detect automatically.
+            </i>
+          </div>
+          <div className="v">
+            <input
+              type="text"
+              className="input"
+              autoComplete="off"
+              spellCheck={false}
+              aria-label="Claude binary path"
+              aria-describedby="claude-binary-status"
+              placeholder="Detected automatically"
+              value={binaryDraft ?? (settings.claudeBinaryPath ?? "")}
+              onChange={(e) => setBinaryDraft(e.target.value)}
+              onBlur={commitBinaryPath}
+              onKeyDown={(e) => {
+                if (e.key === "Enter") {
+                  e.preventDefault();
+                  commitBinaryPath();
+                } else if (e.key === "Escape") {
+                  e.preventDefault();
+                  setBinaryDraft(null);
+                }
+              }}
+            />
+            <span id="claude-binary-status" role="status">
+              {binaryStatus?.found && (
+                <span style={{ fontSize: 12, color: "var(--muted)" }}>
+                  Found: {binaryStatus.path} ({binaryStatus.source})
+                </span>
+              )}
+              {binaryStatus && !binaryStatus.found && (
+                <span style={{ fontSize: 12, color: "var(--danger)" }}>{binaryStatus.message}</span>
+              )}
+            </span>
+          </div>
+        </div>
       </div>
 
-      <AboutSection update={updater} />
+      <AboutSection update={updater} binaryStatus={binaryStatus} />
     </div>
   );
 }

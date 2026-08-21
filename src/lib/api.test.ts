@@ -3,6 +3,7 @@ import { mockIPC } from "@tauri-apps/api/mocks";
 import { describe, expect, it, vi } from "vitest";
 
 import {
+  claudeBinaryStatus,
   getDaemonStatus,
   getSettingsSnapshot,
   IpcError,
@@ -13,7 +14,7 @@ import {
   snoozeAutoSwitch,
   updateSettings,
 } from "@/lib/api";
-import type { DaemonStatus, SettingsSnapshot } from "@/types";
+import type { ClaudeBinaryStatus, DaemonStatus, SettingsSnapshot } from "@/types";
 
 const settingsSnapshot: SettingsSnapshot = {
   revision: 4,
@@ -34,6 +35,7 @@ const settingsSnapshot: SettingsSnapshot = {
     historyRetentionDays: 14,
     theme: "system",
     clockFormat: "system",
+    claudeBinaryPath: null,
   },
 };
 
@@ -42,6 +44,13 @@ const daemonStatus: DaemonStatus = {
   policyRevision: 4,
   phase: { kind: "monitoring" },
   updatedAt: "2026-07-28T12:00:00Z",
+};
+
+const binaryStatus: ClaudeBinaryStatus = {
+  found: true,
+  path: "/opt/homebrew/bin/claude",
+  source: "path",
+  message: null,
 };
 
 describe("runtime IPC contracts", () => {
@@ -59,6 +68,18 @@ describe("runtime IPC contracts", () => {
     expect(calls.map(([command]) => command)).toEqual(["get_settings", "get_daemon_status"]);
   });
 
+  it("resolves the claude binary status", async () => {
+    const calls: Array<[string, unknown]> = [];
+    mockIPC((command, args) => {
+      calls.push([command, args]);
+      if (command === "claude_binary_status") return binaryStatus;
+      return undefined;
+    });
+
+    await expect(claudeBinaryStatus()).resolves.toEqual({ data: binaryStatus, live: true });
+    expect(calls).toEqual([["claude_binary_status", {}]]);
+  });
+
   it("sends revisioned patches and specialized pause commands with exact arguments", async () => {
     const calls: Array<[string, unknown]> = [];
     mockIPC((command, args) => {
@@ -67,6 +88,7 @@ describe("runtime IPC contracts", () => {
     });
 
     await updateSettings(4, { threshold: 81 });
+    await updateSettings(4, { claudeBinaryPath: null });
     await snoozeAutoSwitch(3600);
     await resumeAutoSwitch();
 
@@ -74,6 +96,10 @@ describe("runtime IPC contracts", () => {
       [
         "update_settings",
         { input: { expectedRevision: 4, patch: { threshold: 81 } } },
+      ],
+      [
+        "update_settings",
+        { input: { expectedRevision: 4, patch: { claudeBinaryPath: null } } },
       ],
       ["snooze_auto_switch", { input: { durationSeconds: 3600 } }],
       ["resume_auto_switch", {}],

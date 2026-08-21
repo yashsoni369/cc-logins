@@ -373,6 +373,11 @@ export interface Settings {
    * locale in charge.
    */
   clockFormat: "system" | "12h" | "24h";
+  /**
+   * Explicit path to the claude executable, or null for auto-detect.
+   * Trimmed by the backend; empty commits as null.
+   */
+  claudeBinaryPath: string | null;
 }
 
 export interface SettingsSnapshot {
@@ -415,6 +420,22 @@ export interface DataLocations {
   /** Settings file and history database. */
   dataDir: string;
   logFile: string;
+}
+
+/**
+ * Where the `claude` binary this app launches was resolved from, mirroring
+ * `src-tauri/src/commands.rs::claude_binary_status`. Read-only — set the
+ * override via `Settings.claudeBinaryPath` instead.
+ */
+export interface ClaudeBinaryStatus {
+  /** Whether a usable binary was found. */
+  found: boolean;
+  /** The resolved path, or null when nothing was found. */
+  path: string | null;
+  /** Where `path` came from, or null when nothing was found. */
+  source: "env-override" | "setting" | "path" | "well-known" | null;
+  /** User-facing sentence explaining why nothing was found, else null. */
+  message: string | null;
 }
 
 // ── history ───────────────────────────────────────────────────────────────

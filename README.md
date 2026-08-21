@@ -234,6 +234,32 @@ approaches its limit and backing off after a rate limit. A **Refresh** button on
 screen and in the tray popover fetches on demand, itself rate-limited so it can't outpace the
 background poller.
 
+## Troubleshooting
+
+### "Claude Code isn't installed" even though it is
+
+When you launch the app from the Dock or Finder on macOS, it inherits a minimal `PATH`
+(`/usr/bin:/bin:/usr/sbin:/sbin`) that does not include directories added by your shell's startup
+files. The official Claude Code installer places the `claude` binary at `~/.local/bin/claude`, which
+is only on `PATH` because your shell rc adds it — the app cannot see it when started graphically.
+
+The app now falls back to the documented install locations when `PATH` comes up empty —
+`~/.local/bin` (the native installer), `~/.claude/local` (the legacy local install), the common
+npm/pnpm/bun/volta global bins, and `/opt/homebrew/bin` or `/usr/local/bin` for a Homebrew cask.
+
+If your `claude` lives somewhere else entirely, set its full path under **Settings → Claude
+binary** — the field validates the path as soon as you commit it and shows which binary the app
+resolved. (`~` is expanded, so `~/.local/bin/claude` works as typed.)
+
+The **`CC_LOGINS_CLAUDE_BIN`** environment variable does the same thing per launch and takes
+precedence over the setting — useful for scripts and debugging. For an app launched from a
+terminal, an ordinary `export CC_LOGINS_CLAUDE_BIN=...` is enough; for Dock/Finder launches the
+variable is only visible via `launchctl setenv`, which lasts until logout — which is exactly why
+the Settings field exists.
+
+The same gap affects Linux, where a `.desktop` launch does not source your shell startup files
+either; the fallback, the Settings field, and the environment variable work identically there.
+
 ## Where your data lives
 
 | What | Location |

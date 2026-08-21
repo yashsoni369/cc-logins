@@ -62,6 +62,7 @@ const settingsFixture: Settings = {
   historyRetentionDays: 90,
   theme: "system",
   clockFormat: "24h",
+  claudeBinaryPath: null,
 };
 
 const fixture: Snapshot = {

@@ -24,6 +24,7 @@ const confirmed: SettingsSnapshot = {
     historyRetentionDays: 14,
     theme: "system",
     clockFormat: "system",
+    claudeBinaryPath: null,
   },
 };
 
