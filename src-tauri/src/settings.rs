@@ -170,6 +170,15 @@ pub struct Settings {
 
     /// Days of raw history kept before downsampling to daily rollups.
     pub history_retention_days: i64,
+
+    /// Full path to the `claude` binary, when auto-discovery ([`crate::claude_cli`])
+    /// cannot find it and setting an environment variable is not viable — a
+    /// Dock/Finder-launched app never sees a shell's exported variables.
+    ///
+    /// Deliberately **not** part of [`RuntimePolicy`]: the background poller
+    /// never launches `claude`, only interactive login does, so this field has
+    /// nothing to contribute to the policy the poller reads.
+    pub claude_binary_path: Option<String>,
 }
 
 impl Default for Settings {
@@ -191,6 +200,7 @@ impl Default for Settings {
             theme: Theme::default(),
             clock_format: ClockFormat::default(),
             history_retention_days: 14,
+            claude_binary_path: None,
         }
     }
 }
@@ -207,6 +217,14 @@ impl Settings {
         self.unhealthy_ticks = self.unhealthy_ticks.clamp(1, 20);
         self.grace_seconds = self.grace_seconds.min(3600);
         self.history_retention_days = self.history_retention_days.clamp(1, 3650);
+        // Trim and empty-to-None only — nothing path-shaped. Whether a path is
+        // executable is time-varying (wrong at save time can be right by the
+        // time login runs), so this clamps stray whitespace, never discards a
+        // value on the strength of a stat() done here.
+        self.claude_binary_path = self
+            .claude_binary_path
+            .map(|p| p.trim().to_string())
+            .filter(|p| !p.is_empty());
         self
     }
 }
@@ -243,6 +261,8 @@ pub struct SettingsPatch {
     pub theme: Option<Theme>,
     pub clock_format: Option<ClockFormat>,
     pub history_retention_days: Option<i64>,
+    #[serde(default, deserialize_with = "deserialize_present_nullable")]
+    pub claude_binary_path: Option<Option<String>>,
 }
 
 fn deserialize_present_nullable<'de, D, T>(deserializer: D) -> Result<Option<Option<T>>, D::Error>
@@ -439,6 +459,9 @@ fn apply_patch(settings: &mut Settings, patch: SettingsPatch) {
     }
     if let Some(value) = patch.history_retention_days {
         settings.history_retention_days = value;
+    }
+    if let Some(value) = patch.claude_binary_path {
+        settings.claude_binary_path = value;
     }
 }
 
@@ -798,16 +821,25 @@ mod tests {
     fn settings_patch_json_distinguishes_omission_null_and_value() {
         let omitted: SettingsPatch = serde_json::from_str("{}").unwrap();
         let cleared: SettingsPatch =
-            serde_json::from_str(r#"{"autoSwitchPausedUntil":null}"#).unwrap();
+            serde_json::from_str(r#"{"autoSwitchPausedUntil":null,"claudeBinaryPath":null}"#)
+                .unwrap();
         let until = fixed_now() + ChronoDuration::hours(1);
         let valued: SettingsPatch = serde_json::from_value(serde_json::json!({
             "autoSwitchPausedUntil": until,
+            "claudeBinaryPath": "/x/claude",
         }))
         .unwrap();
 
         assert_eq!(omitted.auto_switch_paused_until, None);
         assert_eq!(cleared.auto_switch_paused_until, Some(None));
         assert_eq!(valued.auto_switch_paused_until, Some(Some(until)));
+
+        assert_eq!(omitted.claude_binary_path, None);
+        assert_eq!(cleared.claude_binary_path, Some(None));
+        assert_eq!(
+            valued.claude_binary_path,
+            Some(Some("/x/claude".to_string()))
+        );
         assert!(serde_json::from_str::<SettingsPatch>(r#"{"futureSetting":true}"#).is_err());
     }
 
@@ -952,6 +984,93 @@ mod tests {
             )
             .unwrap();
         assert_eq!(cleared.settings.auto_switch_paused_until, None);
+    }
+
+    #[test]
+    fn claude_binary_path_is_absent_by_default() {
+        // No opinion on where `claude` lives until the user states one —
+        // auto-discovery in `claude_cli` is the default, not this field.
+        assert_eq!(Settings::default().claude_binary_path, None);
+    }
+
+    #[test]
+    fn claude_binary_path_is_trimmed_and_blanked_to_none() {
+        // A pasted path routinely carries leading/trailing whitespace from
+        // copy-paste; whitespace-only input means "nothing configured".
+        let trimmed = Settings {
+            claude_binary_path: Some("  /x/claude ".to_string()),
+            ..Settings::default()
+        }
+        .sanitised();
+        assert_eq!(trimmed.claude_binary_path, Some("/x/claude".to_string()));
+
+        let blanked = Settings {
+            claude_binary_path: Some("   ".to_string()),
+            ..Settings::default()
+        }
+        .sanitised();
+        assert_eq!(blanked.claude_binary_path, None);
+    }
+
+    #[test]
+    fn claude_binary_path_round_trips_through_disk() {
+        let dir = tempfile::tempdir().unwrap();
+        let settings = Settings {
+            claude_binary_path: Some("/opt/claude/claude".to_string()),
+            ..Settings::default()
+        };
+
+        save(dir.path(), &settings).unwrap();
+
+        assert_eq!(
+            load(dir.path()).claude_binary_path,
+            Some("/opt/claude/claude".to_string())
+        );
+    }
+
+    #[test]
+    fn claude_binary_path_omitted_preserves_it_and_explicit_null_clears_it() {
+        // Mirrors `settings_store_omitted_pause_preserves_it_and_explicit_null_clears_it`:
+        // the same nested-Option contract has to hold for this field too.
+        let dir = tempfile::tempdir().unwrap();
+        let store = SettingsStore::new(dir.path().to_path_buf(), fixed_now());
+        store
+            .update(
+                0,
+                SettingsPatch {
+                    claude_binary_path: Some(Some("/x/claude".to_string())),
+                    ..SettingsPatch::default()
+                },
+                fixed_now(),
+            )
+            .unwrap();
+
+        let preserved = store
+            .update(
+                1,
+                SettingsPatch {
+                    threshold: Some(80),
+                    ..SettingsPatch::default()
+                },
+                fixed_now(),
+            )
+            .unwrap();
+        assert_eq!(
+            preserved.settings.claude_binary_path,
+            Some("/x/claude".to_string())
+        );
+
+        let cleared = store
+            .update(
+                2,
+                SettingsPatch {
+                    claude_binary_path: Some(None),
+                    ..SettingsPatch::default()
+                },
+                fixed_now(),
+            )
+            .unwrap();
+        assert_eq!(cleared.settings.claude_binary_path, None);
     }
 
     #[test]
