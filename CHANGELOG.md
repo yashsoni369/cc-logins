@@ -11,6 +11,10 @@ A breaking change to any of those bumps the minor version, since major is pinned
 
 ## [Unreleased]
 
+Nothing yet.
+
+## [0.2.3]
+
 ### Added
 
 - A **Claude binary** field in Settings for pointing the app at a `claude` installed somewhere
