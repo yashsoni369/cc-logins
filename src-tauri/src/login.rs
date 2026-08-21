@@ -45,6 +45,7 @@ use std::time::{Duration, Instant};
 
 use thiserror::Error;
 
+use crate::claude_cli::{self, NotFound};
 use crate::paths::Platform;
 
 /// How often the poll loop checks for the credential file / terminal exit.
@@ -153,10 +154,16 @@ pub struct LoginOutcome {
 /// these — see each variant's doc for the intended user-facing meaning.
 #[derive(Debug, Error)]
 pub enum LoginError {
-    /// No `claude` binary was found on `PATH`. Show "Claude Code isn't
-    /// installed" rather than a generic failure.
-    #[error("the Claude Code CLI (`claude`) was not found on PATH")]
-    ClaudeNotInstalled,
+    /// No `claude` binary could be found — not on `PATH`, not in any
+    /// documented install location, and not at a configured override. The
+    /// payload names what was searched so the UI can tell the user where to
+    /// look and how to point the app at their install; its `Display` renders
+    /// that sentence.
+    ///
+    /// Filesystem paths are not credentials, so carrying them here does not
+    /// touch this module's never-log-secrets rule.
+    #[error("{0}")]
+    ClaudeNotInstalled(NotFound),
 
     /// No terminal emulator could be launched (Linux only — Windows and
     /// macOS always have one). The UI should fall back to the paste-a-token
@@ -184,73 +191,6 @@ pub enum LoginError {
     /// content-free description — never the file's own bytes.
     #[error("received credential could not be validated: {0}")]
     BadCredential(&'static str),
-}
-
-// ---------------------------------------------------------------------------
-// claude_binary — PATH lookup
-// ---------------------------------------------------------------------------
-
-/// Locate the `claude` binary on `PATH`. `None` if it isn't installed, so the
-/// caller can show "Claude Code isn't installed" instead of a generic
-/// terminal/process failure.
-pub fn claude_binary() -> Option<PathBuf> {
-    find_on_path("claude")
-}
-
-/// Locate an executable named `name` on `PATH`, honoring `PATHEXT` on Windows
-/// (so `claude` resolves to an npm-shimmed `claude.cmd` or `claude.exe`, not
-/// just a literal extension-less `claude` file, which rarely exists on
-/// Windows).
-fn find_on_path(name: &str) -> Option<PathBuf> {
-    let path_var = std::env::var_os("PATH")?;
-    let candidates = exe_candidates(name);
-    for dir in std::env::split_paths(&path_var) {
-        for candidate in &candidates {
-            let full = dir.join(candidate);
-            if is_executable_file(&full) {
-                return Some(full);
-            }
-        }
-    }
-    None
-}
-
-/// A regular file the current user could actually exec. On unix a
-/// non-executable `claude` earlier on `PATH` must not shadow the real one.
-#[cfg(unix)]
-fn is_executable_file(path: &Path) -> bool {
-    use std::os::unix::fs::PermissionsExt;
-    std::fs::metadata(path)
-        .map(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
-        .unwrap_or(false)
-}
-
-/// Windows has no executable bit — extension matching (`PATHEXT`) already
-/// does this job in [`exe_candidates`].
-#[cfg(not(unix))]
-fn is_executable_file(path: &Path) -> bool {
-    path.is_file()
-}
-
-#[cfg(windows)]
-fn exe_candidates(name: &str) -> Vec<String> {
-    if Path::new(name).extension().is_some() {
-        return vec![name.to_string()];
-    }
-    let pathext = std::env::var("PATHEXT").unwrap_or_else(|_| ".COM;.EXE;.BAT;.CMD".to_string());
-    let mut out = vec![name.to_string()];
-    for ext in pathext.split(';') {
-        if ext.is_empty() {
-            continue;
-        }
-        out.push(format!("{name}{}", ext.to_ascii_lowercase()));
-    }
-    out
-}
-
-#[cfg(not(windows))]
-fn exe_candidates(name: &str) -> Vec<String> {
-    vec![name.to_string()]
 }
 
 // ---------------------------------------------------------------------------
@@ -310,25 +250,66 @@ fn applescript_escape(s: &str) -> String {
 /// `set "VAR=value"` (quoting the whole assignment, not just the value) —
 /// the standard idiom for a `set` value containing spaces without the
 /// quote characters themselves becoming part of the stored value.
-fn windows_command_line(config_dir: &Path) -> String {
+fn windows_command_line(claude: &Path, config_dir: &Path) -> String {
+    // Why prepend the directory instead of substituting the absolute path:
+    // inlining it would add a *third* level of quoting inside
+    // `cmd /c "set "..." && ..."`, whose parsing rules are conditional on
+    // `/s`, on leading-quote stripping, and on the total count of quote
+    // characters. The `set "VAR=value"` idiom is already proven here, so
+    // reuse it — the child still resolves *our* binary first, and cmd's own
+    // `PATHEXT` picks the right `.cmd`/`.exe` extension, which a hardcoded
+    // absolute filename would get wrong.
+    let bin_dir = windows_parent_dir(claude);
     format!(
-        "/c start \"Add Claude account\" cmd /c \"set \"CLAUDE_CONFIG_DIR={}\" && claude auth login\"",
-        config_dir.display()
+        "/c start \"Add Claude account\" cmd /c \"set \"CLAUDE_CONFIG_DIR={}\" && set \"PATH={};%PATH%\" && claude auth login\"",
+        config_dir.display(),
+        bin_dir
     )
 }
 
-fn windows_launch_plan(config_dir: &Path) -> LaunchPlan {
+/// The parent directory of a Windows-style path, as a string.
+///
+/// Deliberately *not* `Path::parent()`: `std::path::Path`'s separator
+/// handling is selected by the compile *target*, not by the path string's
+/// own style, so on every non-Windows leg of this crate's CI (which runs
+/// `cargo test` on ubuntu/macOS too — see `.github/workflows/ci.yml`) a
+/// backslash-separated Windows path is one opaque `Normal` component and
+/// `.parent()` silently returns an empty path. Splitting on the last `\` or
+/// `/` byte ourselves gives the same, correct answer on every host,
+/// matching what a real Windows target would do with `Path::parent()`.
+fn windows_parent_dir(path: &Path) -> String {
+    // Hand-rolled rather than `Path::parent()` because `std`'s separator set
+    // is chosen by the *compile target*, not by the path's own style: on a
+    // unix build a backslash-separated Windows path is one opaque component,
+    // so `parent()` yields "" and this would emit `PATH=;%PATH%`. That only
+    // matters because the CI matrix runs these tests on Linux and macOS too
+    // (`.github/workflows/ci.yml`), and a Windows assertion that quietly means
+    // something else off-Windows is worse than no assertion. Same reason
+    // `claude_cli`'s platform is an injected field rather than `detect()`.
+    let s = path.to_string_lossy();
+    match s.rfind(['\\', '/']) {
+        // Keep the separator on a drive root: `C:\\claude.exe` must yield
+        // `C:\\`, since bare `C:` means "current directory on C:" to cmd, not
+        // the root of the drive.
+        Some(idx) if s[..idx].ends_with(':') => s[..=idx].to_string(),
+        Some(idx) => s[..idx].to_string(),
+        None => ".".to_string(),
+    }
+}
+
+fn windows_launch_plan(claude: &Path, config_dir: &Path) -> LaunchPlan {
     LaunchPlan::WindowsRaw {
         program: "cmd.exe".to_string(),
-        raw_args: windows_command_line(config_dir),
+        raw_args: windows_command_line(claude, config_dir),
     }
 }
 
 /// The `osascript -e '<script>'` invocation for macOS, as an argv pair.
-fn macos_launch_plan(config_dir: &Path) -> LaunchPlan {
+fn macos_launch_plan(claude: &Path, config_dir: &Path) -> LaunchPlan {
     let shell_cmd = format!(
-        "export CLAUDE_CONFIG_DIR={}; claude auth login",
-        shell_quote_single(&config_dir.display().to_string())
+        "export CLAUDE_CONFIG_DIR={}; {} auth login",
+        shell_quote_single(&config_dir.display().to_string()),
+        shell_quote_single(&claude.display().to_string())
     );
     let script = format!(
         "tell application \"Terminal\" to do script \"{}\"",
@@ -345,15 +326,16 @@ fn macos_launch_plan(config_dir: &Path) -> LaunchPlan {
 /// exist on `PATH` by the caller). Each terminal's flags come from its own
 /// [`LINUX_TERMINALS`] entry; the tail is always `bash -c <shell command>`,
 /// an argv rather than one shell string.
-fn linux_launch_plan(terminal: &str, config_dir: &Path) -> LaunchPlan {
+fn linux_launch_plan(terminal: &str, claude: &Path, config_dir: &Path) -> LaunchPlan {
     let spec = LINUX_TERMINALS
         .iter()
         .copied()
         .find(|t| t.bin == terminal)
         .unwrap_or(UNKNOWN_LINUX_TERMINAL);
     let shell_cmd = format!(
-        "export CLAUDE_CONFIG_DIR={}; claude auth login",
-        shell_quote_single(&config_dir.display().to_string())
+        "export CLAUDE_CONFIG_DIR={}; {} auth login",
+        shell_quote_single(&config_dir.display().to_string()),
+        shell_quote_single(&claude.display().to_string())
     );
     let mut args: Vec<String> = spec.prefix.iter().map(|s| (*s).to_string()).collect();
     args.push("bash".to_string());
@@ -381,14 +363,14 @@ fn find_linux_terminal(exists: impl Fn(&str) -> bool) -> Option<&'static str> {
 /// on Linux/WSL when none of [`LINUX_TERMINALS`] is on `PATH`, and (out of
 /// caution, though unreached on this crate's supported targets) on any
 /// platform this crate doesn't otherwise recognize.
-fn build_launch_plan(config_dir: &Path) -> Result<LaunchPlan, LoginError> {
+fn build_launch_plan(claude: &Path, config_dir: &Path) -> Result<LaunchPlan, LoginError> {
     match Platform::detect() {
-        Platform::Windows => Ok(windows_launch_plan(config_dir)),
-        Platform::Macos => Ok(macos_launch_plan(config_dir)),
+        Platform::Windows => Ok(windows_launch_plan(claude, config_dir)),
+        Platform::Macos => Ok(macos_launch_plan(claude, config_dir)),
         Platform::Linux | Platform::Wsl => {
-            let terminal = find_linux_terminal(|name| find_on_path(name).is_some())
+            let terminal = find_linux_terminal(|name| claude_cli::find_on_path(name).is_some())
                 .ok_or(LoginError::NoTerminalAvailable)?;
-            Ok(linux_launch_plan(terminal, config_dir))
+            Ok(linux_launch_plan(terminal, claude, config_dir))
         }
         Platform::Unknown => Err(LoginError::NoTerminalAvailable),
     }
@@ -662,8 +644,17 @@ pub fn sweep_stale_login_dirs(min_age: std::time::Duration) -> usize {
     removed
 }
 
-pub async fn interactive_login() -> Result<LoginOutcome, LoginError> {
-    let claude_path = claude_binary().ok_or(LoginError::ClaudeNotInstalled)?;
+pub async fn interactive_login(
+    claude_binary_setting: Option<PathBuf>,
+) -> Result<LoginOutcome, LoginError> {
+    let resolved =
+        claude_cli::resolve(claude_binary_setting).map_err(LoginError::ClaudeNotInstalled)?;
+    log::info!(
+        "using claude binary from {}: {}",
+        resolved.source.label(),
+        resolved.path.display()
+    );
+    let claude_path = resolved.path;
 
     // Distinctive prefix on purpose: `TempDir::new()` produces a generic
     // `.tmpXXXXXX` name, indistinguishable from every other program's scratch
@@ -676,7 +667,7 @@ pub async fn interactive_login() -> Result<LoginOutcome, LoginError> {
         temp_path.display()
     );
 
-    let plan = build_launch_plan(&temp_path)?;
+    let plan = build_launch_plan(&claude_path, &temp_path)?;
 
     let blocking_claude_path = claude_path.clone();
     let blocking_temp_path = temp_path.clone();
@@ -729,7 +720,7 @@ pub async fn interactive_login() -> Result<LoginOutcome, LoginError> {
 /// `interactive_login` emits on failure. Never includes file contents.
 fn login_outcome_kind(e: &LoginError) -> &'static str {
     match e {
-        LoginError::ClaudeNotInstalled => "claude-not-installed",
+        LoginError::ClaudeNotInstalled(_) => "claude-not-installed",
         LoginError::NoTerminalAvailable => "no-terminal-available",
         LoginError::Cancelled => "cancelled",
         LoginError::TimedOut => "timed-out",
@@ -756,13 +747,18 @@ mod tests {
 
     // -- windows command-line construction -----------------------------------
 
+    /// A representative resolved Windows `claude` path, used across the
+    /// Windows tests below.
+    const WIN_CLAUDE: &str = r"C:\Users\me\.local\bin\claude.exe";
+
     #[test]
     fn windows_command_line_has_no_spaces_form() {
+        let claude = Path::new(WIN_CLAUDE);
         let dir = Path::new(r"C:\Users\me\AppData\Local\Temp\claude-login-abc123");
-        let line = windows_command_line(dir);
+        let line = windows_command_line(claude, dir);
         assert_eq!(
             line,
-            "/c start \"Add Claude account\" cmd /c \"set \"CLAUDE_CONFIG_DIR=C:\\Users\\me\\AppData\\Local\\Temp\\claude-login-abc123\" && claude auth login\""
+            "/c start \"Add Claude account\" cmd /c \"set \"CLAUDE_CONFIG_DIR=C:\\Users\\me\\AppData\\Local\\Temp\\claude-login-abc123\" && set \"PATH=C:\\Users\\me\\.local\\bin;%PATH%\" && claude auth login\""
         );
         // Uses /c (not /k) on both the outer `start` and the inner `cmd` so
         // the window closes itself once login finishes.
@@ -773,8 +769,9 @@ mod tests {
 
     #[test]
     fn windows_command_line_quotes_path_containing_spaces() {
+        let claude = Path::new(WIN_CLAUDE);
         let dir = Path::new(r"C:\Users\Jane Doe\AppData\Local\Temp\claude-login-xyz");
-        let line = windows_command_line(dir);
+        let line = windows_command_line(claude, dir);
         // The whole `VAR=value` assignment is quoted (not just the value),
         // so the quote characters never become part of the stored value.
         assert!(line.contains(
@@ -783,12 +780,45 @@ mod tests {
     }
 
     #[test]
-    fn windows_launch_plan_targets_cmd_exe_with_raw_args() {
+    fn windows_parent_dir_keeps_the_separator_on_a_drive_root() {
+        // `C:` alone means "current directory on drive C" to cmd, not the root,
+        // so trimming the separator here would point PATH somewhere else.
+        assert_eq!(windows_parent_dir(Path::new(r"C:\claude.exe")), r"C:\");
+        assert_eq!(
+            windows_parent_dir(Path::new(r"C:\Users\me\bin\claude.exe")),
+            r"C:\Users\me\bin"
+        );
+        // Forward slashes appear in Windows paths often enough to matter.
+        assert_eq!(
+            windows_parent_dir(Path::new("C:/tools/claude.exe")),
+            "C:/tools"
+        );
+        // A bare filename has no directory to prepend; "." is the harmless
+        // stand-in rather than an empty PATH entry.
+        assert_eq!(windows_parent_dir(Path::new("claude.exe")), ".");
+    }
+
+    #[test]
+    fn windows_command_line_prepends_the_resolved_directory_to_path() {
+        // Windows still invokes a bare `claude` (see the doc comment on
+        // `windows_command_line` for why an absolute path isn't inlined
+        // instead), but it must prepend the resolved binary's *directory* to
+        // `PATH` so that bare invocation actually finds our verified binary
+        // first, not just whatever `claude` a user's shell PATH turns up.
+        let claude = Path::new(WIN_CLAUDE);
         let dir = Path::new(r"C:\temp\abc");
-        match windows_launch_plan(dir) {
+        let line = windows_command_line(claude, dir);
+        assert!(line.contains("set \"PATH=C:\\Users\\me\\.local\\bin;%PATH%\""));
+    }
+
+    #[test]
+    fn windows_launch_plan_targets_cmd_exe_with_raw_args() {
+        let claude = Path::new(WIN_CLAUDE);
+        let dir = Path::new(r"C:\temp\abc");
+        match windows_launch_plan(claude, dir) {
             LaunchPlan::WindowsRaw { program, raw_args } => {
                 assert_eq!(program, "cmd.exe");
-                assert_eq!(raw_args, windows_command_line(dir));
+                assert_eq!(raw_args, windows_command_line(claude, dir));
             }
             other => panic!("expected WindowsRaw, got {other:?}"),
         }
@@ -798,8 +828,9 @@ mod tests {
 
     #[test]
     fn macos_launch_plan_uses_osascript_and_does_not_track_window_lifetime() {
+        let claude = Path::new("/usr/local/bin/claude");
         let dir = Path::new("/tmp/claude-login-abc");
-        match macos_launch_plan(dir) {
+        match macos_launch_plan(claude, dir) {
             LaunchPlan::Argv {
                 program,
                 args,
@@ -809,7 +840,7 @@ mod tests {
                 assert_eq!(args[0], "-e");
                 assert!(args[1].contains("tell application \"Terminal\" to do script"));
                 assert!(args[1].contains("CLAUDE_CONFIG_DIR="));
-                assert!(args[1].contains("claude auth login"));
+                assert!(args[1].contains("auth login"));
                 // osascript hands off to Terminal.app and returns
                 // immediately — its exit says nothing about the window.
                 assert!(!tracks_window_lifetime);
@@ -822,8 +853,9 @@ mod tests {
     fn macos_script_escapes_embedded_quotes_and_backslashes() {
         // A path with a backslash or quote is exotic on macOS but the
         // escaper must not corrupt the AppleScript string if one appears.
+        let claude = Path::new("/usr/local/bin/claude");
         let dir = Path::new("/tmp/weird\"dir");
-        match macos_launch_plan(dir) {
+        match macos_launch_plan(claude, dir) {
             LaunchPlan::Argv { args, .. } => {
                 // The raw `"` from the path must appear escaped as `\"` in
                 // the AppleScript string literal, not as a bare quote that
@@ -834,12 +866,32 @@ mod tests {
         }
     }
 
+    #[test]
+    fn macos_launch_plan_invokes_the_resolved_absolute_path_not_bare_claude() {
+        // The launch plan must run the exact binary the app already resolved
+        // and verified, not rely on the child shell's own PATH turning up
+        // some other `claude` first.
+        let claude = Path::new("/usr/local/bin/claude");
+        let dir = Path::new("/tmp/claude-login-abc");
+        match macos_launch_plan(claude, dir) {
+            LaunchPlan::Argv { args, .. } => {
+                assert!(args[1].contains("'/usr/local/bin/claude' auth login"));
+                assert!(!args[1].contains(" claude auth login"));
+            }
+            other => panic!("expected Argv, got {other:?}"),
+        }
+    }
+
     // -- Linux terminal selection ---------------------------------------------
+
+    /// A representative resolved Linux `claude` path, used across the Linux
+    /// tests below.
+    const LINUX_CLAUDE: &str = "/usr/local/bin/claude";
 
     /// Destructure a Linux plan into (args, tracks_window_lifetime), checking
     /// the program name and the always-identical `bash -c <cmd>` tail.
-    fn linux_plan_parts(terminal: &str, dir: &Path) -> (Vec<String>, bool) {
-        match linux_launch_plan(terminal, dir) {
+    fn linux_plan_parts(terminal: &str, claude: &Path, dir: &Path) -> (Vec<String>, bool) {
+        match linux_launch_plan(terminal, claude, dir) {
             LaunchPlan::Argv {
                 program,
                 args,
@@ -850,7 +902,7 @@ mod tests {
                 assert_eq!(args[n - 3], "bash");
                 assert_eq!(args[n - 2], "-c");
                 assert!(args[n - 1].contains("CLAUDE_CONFIG_DIR="));
-                assert!(args[n - 1].contains("claude auth login"));
+                assert!(args[n - 1].contains("auth login"));
                 (args, tracks_window_lifetime)
             }
             other => panic!("expected Argv, got {other:?}"),
@@ -885,8 +937,9 @@ mod tests {
 
     #[test]
     fn linux_launch_plan_gnome_terminal_waits_and_uses_double_dash() {
+        let claude = Path::new(LINUX_CLAUDE);
         let dir = Path::new("/tmp/claude-login-abc");
-        let (args, tracks) = linux_plan_parts("gnome-terminal", dir);
+        let (args, tracks) = linux_plan_parts("gnome-terminal", claude, dir);
         // `--wait` makes the process outlive the hand-off to
         // gnome-terminal-server, so its exit honestly means "window closed".
         assert_eq!(args[0], "--wait");
@@ -896,8 +949,9 @@ mod tests {
 
     #[test]
     fn linux_launch_plan_konsole_uses_nofork_before_dash_e() {
+        let claude = Path::new(LINUX_CLAUDE);
         let dir = Path::new("/tmp/claude-login-abc");
-        let (args, tracks) = linux_plan_parts("konsole", dir);
+        let (args, tracks) = linux_plan_parts("konsole", claude, dir);
         // -e swallows everything after it, so --nofork must precede it.
         assert_eq!(args[0], "--nofork");
         assert_eq!(args[1], "-e");
@@ -906,8 +960,9 @@ mod tests {
 
     #[test]
     fn linux_launch_plan_xfce4_uses_dash_x_not_dash_e() {
+        let claude = Path::new(LINUX_CLAUDE);
         let dir = Path::new("/tmp/claude-login-abc");
-        let (args, tracks) = linux_plan_parts("xfce4-terminal", dir);
+        let (args, tracks) = linux_plan_parts("xfce4-terminal", claude, dir);
         // -e takes a single command string; -x takes the remainder as argv.
         assert_eq!(args[0], "--disable-server");
         assert_eq!(args[1], "-x");
@@ -917,8 +972,9 @@ mod tests {
 
     #[test]
     fn linux_launch_plan_xterm_uses_dash_e_argv_form() {
+        let claude = Path::new(LINUX_CLAUDE);
         let dir = Path::new("/tmp/claude-login-abc");
-        let (args, tracks) = linux_plan_parts("xterm", dir);
+        let (args, tracks) = linux_plan_parts("xterm", claude, dir);
         // -e takes a program + its own argv, NOT one shell-string argument.
         assert_eq!(args[0], "-e");
         assert_eq!(args.len(), 4);
@@ -927,8 +983,9 @@ mod tests {
 
     #[test]
     fn linux_launch_plan_x_terminal_emulator_is_conservative() {
+        let claude = Path::new(LINUX_CLAUDE);
         let dir = Path::new("/tmp/claude-login-abc");
-        let (args, tracks) = linux_plan_parts("x-terminal-emulator", dir);
+        let (args, tracks) = linux_plan_parts("x-terminal-emulator", claude, dir);
         // Only the Debian Policy `-e command [args]` form, and its target may
         // fork — so its exit must never be read as a cancellation.
         assert_eq!(args[0], "-e");
@@ -938,8 +995,9 @@ mod tests {
 
     #[test]
     fn linux_launch_plan_unknown_terminal_falls_back_to_conservative_shape() {
+        let claude = Path::new(LINUX_CLAUDE);
         let dir = Path::new("/tmp/claude-login-abc");
-        let (args, tracks) = linux_plan_parts("some-future-terminal", dir);
+        let (args, tracks) = linux_plan_parts("some-future-terminal", claude, dir);
         assert_eq!(args[0], "-e");
         assert!(!tracks);
     }
@@ -960,10 +1018,35 @@ mod tests {
 
     #[test]
     fn linux_shell_command_quotes_path_containing_spaces_and_quotes() {
+        let claude = Path::new(LINUX_CLAUDE);
         let dir = Path::new("/tmp/Jane's dir");
-        let (args, _) = linux_plan_parts("xterm", dir);
+        let (args, _) = linux_plan_parts("xterm", claude, dir);
         // Single-quoted with the embedded `'` escaped via '\''.
         assert!(args[3].contains("'/tmp/Jane'\\''s dir'"));
+    }
+
+    #[test]
+    fn linux_shell_command_quotes_claude_path_containing_spaces_and_quotes() {
+        // The resolved `claude` binary path is embedded the same way the
+        // config dir is (see the test above) — a space or apostrophe in an
+        // install path (e.g. under "Jane's Applications") must not break out
+        // of the single-quoted invocation.
+        let claude = Path::new("/opt/Jane's Apps/claude");
+        let dir = Path::new("/tmp/claude-login-abc");
+        let (args, _) = linux_plan_parts("xterm", claude, dir);
+        assert!(args[3].contains("'/opt/Jane'\\''s Apps/claude'"));
+    }
+
+    #[test]
+    fn linux_launch_plan_invokes_the_resolved_absolute_path_not_bare_claude() {
+        // Same intent as the macOS equivalent: the shell string run inside
+        // `bash -c` must invoke the exact resolved binary, not a bare
+        // `claude` left to the child shell's own PATH.
+        let claude = Path::new(LINUX_CLAUDE);
+        let dir = Path::new("/tmp/claude-login-abc");
+        let (args, _) = linux_plan_parts("xterm", claude, dir);
+        assert!(args[3].contains("'/usr/local/bin/claude' auth login"));
+        assert!(!args[3].contains(" claude auth login"));
     }
 
     // -- shell / AppleScript quoting helpers ----------------------------------
@@ -978,84 +1061,6 @@ mod tests {
     fn applescript_escape_handles_quotes_and_backslashes() {
         assert_eq!(applescript_escape(r#"say "hi""#), r#"say \"hi\""#);
         assert_eq!(applescript_escape(r"a\b"), r"a\\b");
-    }
-
-    // -- claude_binary / find_on_path ------------------------------------------
-
-    /// Write `name` into `dir`; on unix also give it `mode`.
-    fn plant_binary(dir: &Path, name: &str, _mode: u32) -> PathBuf {
-        let path = dir.join(name);
-        std::fs::write(&path, b"#!/bin/sh\n").unwrap();
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(_mode)).unwrap();
-        }
-        path
-    }
-
-    #[test]
-    fn find_on_path_locates_a_planted_executable() {
-        let _lock = crate::test_support::env_lock();
-        let dir = TempDir::new().unwrap();
-        #[cfg(windows)]
-        let file_name = "claude.cmd";
-        #[cfg(not(windows))]
-        let file_name = "claude";
-        let planted = plant_binary(dir.path(), file_name, 0o755);
-
-        let _path_guard = crate::test_support::EnvGuard::set(
-            "PATH",
-            dir.path().to_str().expect("utf8 temp path"),
-        );
-
-        assert_eq!(claude_binary(), Some(planted));
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn find_on_path_skips_a_non_executable_file() {
-        let _lock = crate::test_support::env_lock();
-        let dir = TempDir::new().unwrap();
-        // A readable but non-executable `claude` must not shadow the real
-        // one — spawning it would fail opaquely with EACCES.
-        plant_binary(dir.path(), "claude", 0o644);
-
-        let _path_guard = crate::test_support::EnvGuard::set(
-            "PATH",
-            dir.path().to_str().expect("utf8 temp path"),
-        );
-
-        assert_eq!(claude_binary(), None);
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn find_on_path_skips_non_executable_and_finds_the_later_real_one() {
-        let _lock = crate::test_support::env_lock();
-        let shadow = TempDir::new().unwrap();
-        let real = TempDir::new().unwrap();
-        plant_binary(shadow.path(), "claude", 0o644);
-        let planted = plant_binary(real.path(), "claude", 0o755);
-
-        let joined = std::env::join_paths([shadow.path(), real.path()]).unwrap();
-        let _path_guard =
-            crate::test_support::EnvGuard::set("PATH", joined.to_str().expect("utf8 temp path"));
-
-        assert_eq!(claude_binary(), Some(planted));
-    }
-
-    #[test]
-    fn find_on_path_none_when_absent() {
-        let _lock = crate::test_support::env_lock();
-        let dir = TempDir::new().unwrap();
-        // Empty directory: nothing named `claude*` in it.
-        let _path_guard = crate::test_support::EnvGuard::set(
-            "PATH",
-            dir.path().to_str().expect("utf8 temp path"),
-        );
-
-        assert_eq!(claude_binary(), None);
     }
 
     // -- credential validation -------------------------------------------------
@@ -1189,7 +1194,7 @@ mod tests {
         // Sanity check that the log-line labels never echo file contents —
         // each must be a fixed string, not derived from any credential body.
         assert_eq!(
-            login_outcome_kind(&LoginError::ClaudeNotInstalled),
+            login_outcome_kind(&LoginError::ClaudeNotInstalled(Default::default())),
             "claude-not-installed"
         );
         assert_eq!(

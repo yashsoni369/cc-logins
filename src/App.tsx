@@ -182,7 +182,7 @@ function describeAddAccountError(err: unknown): string {
  * user just closed the terminal, which is not an error, so the caller must
  * render nothing rather than an alarming banner.
  */
-function describeInteractiveLoginError(err: unknown): string | null {
+export function describeInteractiveLoginError(err: unknown): string | null {
   if (err instanceof IpcError) {
     if (err.isBusy) return BUSY_MESSAGE;
     if (err.isCancelled) {
@@ -192,7 +192,13 @@ function describeInteractiveLoginError(err: unknown): string | null {
       return "Timed out waiting for sign-in. Nothing was added — try again when you're ready.";
     }
     if (err.isPrerequisiteMissing) {
-      return "Claude Code isn't installed, or the `claude` command isn't on PATH. Install it, then try again.";
+      // The backend names the directories it actually searched, and how to
+      // point the app at a custom install — far more actionable than anything
+      // this side could guess. Fall back only if `detail` is somehow absent.
+      return (
+        err.detail ??
+        "Claude Code isn't installed, or the `claude` command isn't on PATH. Install it, then try again."
+      );
     }
     if (err.isNoTerminalAvailable) {
       return 'Couldn\'t open a terminal on this system. Use "Add token" below instead.';

@@ -201,7 +201,7 @@ impl From<LoginError> for IpcError {
         match &e {
             LoginError::Cancelled => IpcError::Cancelled,
             LoginError::TimedOut => IpcError::TimedOut(e.to_string()),
-            LoginError::ClaudeNotInstalled => IpcError::PrerequisiteMissing(e.to_string()),
+            LoginError::ClaudeNotInstalled(_) => IpcError::PrerequisiteMissing(e.to_string()),
             LoginError::NoTerminalAvailable => IpcError::NoTerminalAvailable(e.to_string()),
             LoginError::BadCredential(_) => IpcError::Credential(e.to_string()),
             LoginError::Io(_) => IpcError::Internal(e.to_string()),
@@ -476,7 +476,14 @@ pub async fn interactive_login(
     alias: Option<String>,
 ) -> IpcResult<Snapshot> {
     refuse_if_recovery_required()?;
-    let outcome = login::interactive_login().await?;
+    let setting = state
+        .settings
+        .snapshot()
+        .settings
+        .claude_binary_path
+        .clone()
+        .map(std::path::PathBuf::from);
+    let outcome = login::interactive_login(setting).await?;
     refuse_if_recovery_required()?;
     switcher::add_oauth_credential(
         &outcome.credentials,
@@ -499,7 +506,14 @@ pub async fn relogin_account(
     account_number: u32,
 ) -> IpcResult<Snapshot> {
     refuse_if_recovery_required()?;
-    let outcome = login::interactive_login().await?;
+    let setting = state
+        .settings
+        .snapshot()
+        .settings
+        .claude_binary_path
+        .clone()
+        .map(std::path::PathBuf::from);
+    let outcome = login::interactive_login(setting).await?;
     refuse_if_recovery_required()?;
     switcher::replace_oauth_credential(
         account_number,
@@ -767,6 +781,62 @@ fn data_locations_in(data_dir: &std::path::Path) -> DataLocations {
         account_vault: crate::paths::backup_root().display().to_string(),
         data_dir: data_dir.display().to_string(),
         log_file: crate::log_path().display().to_string(),
+    }
+}
+
+/// What resolving the `claude` binary turned up, for the About section and
+/// the settings field itself — the same answer login itself would act on,
+/// never a hypothetical.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ClaudeBinaryStatus {
+    pub found: bool,
+    /// Resolved path, present only when `found`.
+    pub path: Option<String>,
+    /// [`crate::claude_cli::Source::label`], present only when `found`.
+    pub source: Option<String>,
+    /// The [`crate::claude_cli::NotFound`] sentence, present only when not
+    /// `found` — this is the same text `login`'s own error carries.
+    pub message: Option<String>,
+}
+
+/// Report where this app would launch `claude` from right now, and how.
+///
+/// Reads the persisted setting internally on purpose, rather than taking it
+/// as a parameter: About must show the same truth login acts on, never a
+/// hypothetical value the caller happens to be holding. Direct return, no
+/// [`IpcResult`] — "not found" is the answer this command gives, not an
+/// error it fails with.
+#[tauri::command]
+pub fn claude_binary_status(state: tauri::State<'_, AppState>) -> ClaudeBinaryStatus {
+    let setting = state
+        .settings
+        .snapshot()
+        .settings
+        .claude_binary_path
+        .clone()
+        .map(std::path::PathBuf::from);
+    claude_binary_status_from(crate::claude_cli::resolve(setting))
+}
+
+/// Body of [`claude_binary_status`], taking the resolution result directly
+/// so it is testable without a live `tauri::State`.
+fn claude_binary_status_from(
+    result: Result<crate::claude_cli::Resolved, crate::claude_cli::NotFound>,
+) -> ClaudeBinaryStatus {
+    match result {
+        Ok(resolved) => ClaudeBinaryStatus {
+            found: true,
+            path: Some(resolved.path.display().to_string()),
+            source: Some(resolved.source.label().to_string()),
+            message: None,
+        },
+        Err(not_found) => ClaudeBinaryStatus {
+            found: false,
+            path: None,
+            source: None,
+            message: Some(not_found.to_string()),
+        },
     }
 }
 
@@ -1218,7 +1288,7 @@ mod tests {
 
     #[test]
     fn login_claude_not_installed_maps_to_prerequisite_missing() {
-        let mapped: IpcError = LoginError::ClaudeNotInstalled.into();
+        let mapped: IpcError = LoginError::ClaudeNotInstalled(Default::default()).into();
         assert!(
             matches!(mapped, IpcError::PrerequisiteMissing(_)),
             "got {mapped:?}"
@@ -1226,6 +1296,19 @@ mod tests {
 
         let json = serde_json::to_string(&mapped).unwrap();
         assert!(json.contains("prerequisiteMissing"), "got {json}");
+    }
+
+    /// The whole point of giving `ClaudeNotInstalled` a payload: the actionable
+    /// part of the message has to survive all the way to the frontend, which
+    /// renders `detail` verbatim.
+    #[test]
+    fn login_claude_not_installed_detail_names_the_override_env_var() {
+        let mapped: IpcError = LoginError::ClaudeNotInstalled(Default::default()).into();
+        let json = serde_json::to_string(&mapped).unwrap();
+        assert!(
+            json.contains(crate::claude_cli::OVERRIDE_ENV),
+            "detail should tell the user how to point the app at their install; got {json}"
+        );
     }
 
     #[test]
@@ -1372,6 +1455,42 @@ mod tests {
         let json = serde_json::to_string(&locations).unwrap();
         assert!(json.contains("accountVault"), "got {json}");
         assert!(json.contains("logFile"), "got {json}");
+    }
+
+    // -- claude binary status (About / Settings) -----------------------------
+
+    #[test]
+    fn claude_binary_status_reports_the_path_and_source_label() {
+        let resolved = crate::claude_cli::Resolved {
+            path: std::path::PathBuf::from("/x/claude"),
+            source: crate::claude_cli::Source::Setting,
+        };
+
+        let status = claude_binary_status_from(Ok(resolved));
+
+        assert!(status.found);
+        assert_eq!(status.path, Some("/x/claude".to_string()));
+        assert_eq!(status.source, Some("setting".to_string()));
+        assert_eq!(status.message, None);
+
+        // The UI reads these by camelCase name.
+        let json = serde_json::to_string(&status).unwrap();
+        assert!(json.contains("\"found\":true"), "got {json}");
+        assert!(json.contains("\"source\":\"setting\""), "got {json}");
+    }
+
+    #[test]
+    fn claude_binary_status_carries_the_not_found_sentence() {
+        let status = claude_binary_status_from(Err(crate::claude_cli::NotFound::default()));
+
+        assert!(!status.found);
+        assert_eq!(status.path, None);
+        assert_eq!(status.source, None);
+        let message = status.message.expect("carries the not-found sentence");
+        assert!(
+            message.contains(crate::claude_cli::OVERRIDE_ENV),
+            "got {message}"
+        );
     }
 
     #[test]

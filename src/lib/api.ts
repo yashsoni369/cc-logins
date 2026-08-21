@@ -20,6 +20,7 @@
 
 import type {
   Account,
+  ClaudeBinaryStatus,
   DaemonStatus,
   DataLocations,
   DayStat,
@@ -554,6 +555,7 @@ export const DEFAULT_SETTINGS: Settings = {
   historyRetentionDays: 14,
   theme: "system",
   clockFormat: "system",
+  claudeBinaryPath: null,
 };
 
 /** Current settings. Falls back to the same defaults the backend ships with. */
@@ -649,6 +651,16 @@ export function appVersion(): Promise<string | null> {
 export async function dataLocations(): Promise<Sourced<DataLocations | null>> {
   if (!hasBackend()) return { data: null, live: false };
   return { data: await call<DataLocations>("data_locations"), live: true };
+}
+
+/**
+ * Where the `claude` binary this app would launch was resolved from — a
+ * reader, so it degrades to `null` with no backend rather than throwing.
+ * Set the override via `updateSettings({ claudeBinaryPath })` instead.
+ */
+export async function claudeBinaryStatus(): Promise<Sourced<ClaudeBinaryStatus | null>> {
+  if (!hasBackend()) return { data: null, live: false };
+  return { data: await call<ClaudeBinaryStatus>("claude_binary_status"), live: true };
 }
 
 /**

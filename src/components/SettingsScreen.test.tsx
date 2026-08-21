@@ -25,13 +25,15 @@ const confirmed: SettingsSnapshot = {
     historyRetentionDays: 14,
     theme: "system",
     clockFormat: "system",
+    claudeBinaryPath: null,
   },
 };
 
-function owner(update: UseSettingsResult["update"]): UseSettingsResult {
+function owner(update: UseSettingsResult["update"], claudeBinaryPath: string | null = null): UseSettingsResult {
+  const settings = { ...confirmed.settings, claudeBinaryPath };
   return {
-    snapshot: confirmed,
-    settings: confirmed.settings,
+    snapshot: { ...confirmed, settings },
+    settings,
     live: true,
     loading: false,
     error: null,
@@ -111,5 +113,105 @@ describe("SettingsScreen", () => {
 
     expect(screen.queryByText("Notify me")).not.toBeInTheDocument();
     expect(screen.queryByText("Start at login")).not.toBeInTheDocument();
+  });
+
+  it("commits the trimmed claude binary path on blur", () => {
+    const update = vi.fn().mockResolvedValue(confirmed);
+    render(
+      <SettingsScreen
+        runtime={owner(update)}
+        theme="system"
+        onThemeChange={vi.fn()}
+        themeError={null}
+        update={noUpdate}
+      />,
+    );
+
+    const input = screen.getByLabelText("Claude binary path");
+    fireEvent.change(input, { target: { value: "  /usr/local/bin/claude  " } });
+    fireEvent.blur(input);
+
+    expect(update).toHaveBeenCalledWith({ claudeBinaryPath: "/usr/local/bin/claude" });
+  });
+
+  it("enter commits and the following blur does not write again", () => {
+    const update = vi.fn().mockResolvedValue(confirmed);
+    render(
+      <SettingsScreen
+        runtime={owner(update)}
+        theme="system"
+        onThemeChange={vi.fn()}
+        themeError={null}
+        update={noUpdate}
+      />,
+    );
+
+    const input = screen.getByLabelText("Claude binary path");
+    fireEvent.change(input, { target: { value: "/usr/local/bin/claude" } });
+    fireEvent.keyDown(input, { key: "Enter" });
+    expect(update).toHaveBeenCalledTimes(1);
+    expect(update).toHaveBeenCalledWith({ claudeBinaryPath: "/usr/local/bin/claude" });
+
+    fireEvent.blur(input);
+    expect(update).toHaveBeenCalledTimes(1);
+  });
+
+  it("an emptied field commits null to clear the override", () => {
+    const update = vi.fn().mockResolvedValue(confirmed);
+    render(
+      <SettingsScreen
+        runtime={owner(update, "/usr/local/bin/claude")}
+        theme="system"
+        onThemeChange={vi.fn()}
+        themeError={null}
+        update={noUpdate}
+      />,
+    );
+
+    const input = screen.getByLabelText("Claude binary path");
+    fireEvent.change(input, { target: { value: "" } });
+    fireEvent.blur(input);
+
+    expect(update).toHaveBeenCalledWith({ claudeBinaryPath: null });
+  });
+
+  it("an unchanged value does not write on blur", () => {
+    const update = vi.fn().mockResolvedValue(confirmed);
+    render(
+      <SettingsScreen
+        runtime={owner(update, "/usr/local/bin/claude")}
+        theme="system"
+        onThemeChange={vi.fn()}
+        themeError={null}
+        update={noUpdate}
+      />,
+    );
+
+    const input = screen.getByLabelText("Claude binary path");
+    fireEvent.change(input, { target: { value: "  /usr/local/bin/claude  " } });
+    fireEvent.blur(input);
+
+    expect(update).not.toHaveBeenCalled();
+  });
+
+  it("escape abandons the draft without a write", () => {
+    const update = vi.fn().mockResolvedValue(confirmed);
+    render(
+      <SettingsScreen
+        runtime={owner(update, "/usr/local/bin/claude")}
+        theme="system"
+        onThemeChange={vi.fn()}
+        themeError={null}
+        update={noUpdate}
+      />,
+    );
+
+    const input = screen.getByLabelText("Claude binary path") as HTMLInputElement;
+    fireEvent.change(input, { target: { value: "/something/else" } });
+    fireEvent.keyDown(input, { key: "Escape" });
+    fireEvent.blur(input);
+
+    expect(update).not.toHaveBeenCalled();
+    expect(input.value).toBe("/usr/local/bin/claude");
   });
 });

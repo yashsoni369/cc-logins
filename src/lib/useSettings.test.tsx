@@ -39,6 +39,7 @@ function snapshot(revision: number, threshold = 90): SettingsSnapshot {
       historyRetentionDays: 14,
       theme: "system",
       clockFormat: "system",
+      claudeBinaryPath: null,
     },
   };
 }

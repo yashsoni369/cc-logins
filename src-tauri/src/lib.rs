@@ -8,6 +8,7 @@
 //! Portions of the credential, path and usage logic are ported from
 //! claude-swap (MIT) — https://github.com/realiti4/claude-swap
 
+pub mod claude_cli;
 pub mod claude_locks;
 pub mod commands;
 pub mod credentials;
@@ -315,6 +316,7 @@ pub fn run() {
             commands::snooze_auto_switch,
             commands::resume_auto_switch,
             commands::data_locations,
+            commands::claude_binary_status,
         ])
         .setup(move |app| {
             let handle = app.handle().clone();

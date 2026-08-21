@@ -35,7 +35,7 @@ use std::path::{Path, PathBuf};
 /// Read an environment variable, treating an unset *or empty* value as
 /// absent. Mirrors Python's `if os.environ.get("X"):` truthiness check,
 /// which is falsy for both a missing var and `""`.
-fn env_non_empty(name: &str) -> Option<String> {
+pub(crate) fn env_non_empty(name: &str) -> Option<String> {
     match env::var(name) {
         Ok(v) if !v.is_empty() => Some(v),
         _ => None,
@@ -65,7 +65,7 @@ fn env_non_empty(name: &str) -> Option<String> {
 /// `dirs` here would silently diverge from the CLI's behavior for anyone who
 /// overrides their profile dir (portable installs, CI, corporate imaging) —
 /// exactly the kind of case this module exists to get right.
-fn home_dir() -> PathBuf {
+pub(crate) fn home_dir() -> PathBuf {
     #[cfg(windows)]
     {
         if let Some(profile) = env_non_empty("USERPROFILE") {

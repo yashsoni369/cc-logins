@@ -11,7 +11,19 @@ A breaking change to any of those bumps the minor version, since major is pinned
 
 ## [Unreleased]
 
-Nothing yet.
+### Added
+
+- A **Claude binary** field in Settings for pointing the app at a `claude` installed somewhere
+  discovery can't reach, with inline validation showing the resolved path and how it was found.
+  The About panel shows the same resolution. `~` in the path is expanded.
+
+### Fixed
+
+- On macOS, the app launched from the Dock or Finder would report "Claude Code isn't installed"
+  even when installed, because graphical launch inherits a minimal `PATH` that excludes shell
+  startup additions like `~/.local/bin`. The app now searches standard installation locations
+  automatically, and the `CC_LOGINS_CLAUDE_BIN` environment variable provides an escape hatch
+  for non-standard installs. Error messages now name exactly what was searched.
 
 ## [0.2.2] - 2026-08-20
 
