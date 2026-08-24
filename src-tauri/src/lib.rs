@@ -284,9 +284,9 @@ pub fn run() {
             tauri_plugin_autostart::MacosLauncher::LaunchAgent,
             None,
         ))
-        // Nothing here reaches the network on its own. The check runs only when
-        // the user asks for it from Settings -> About, which keeps the "no
-        // telemetry, no phoning home" claim in the README true.
+        // Registers the plugin; the frontend (src/lib/updater.ts) owns when it
+        // runs — once ~30s after launch and then daily, asking GitHub only
+        // whether a newer release exists, matching the README's promise.
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_process::init())
         .manage(poller::TrayCache::default())

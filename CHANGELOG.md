@@ -11,7 +11,33 @@ A breaking change to any of those bumps the minor version, since major is pinned
 
 ## [Unreleased]
 
-Nothing yet.
+### Fixed
+
+- On macOS, the app could re-prompt for Keychain access on nearly every launch after a rebuild
+  or update, because it talked to Security.framework in-process — making each new build a
+  distinct, unsigned Keychain "creator" macOS had never granted access to before. Keychain
+  access now shells out to `/usr/bin/security`, the same stable, Apple-signed binary every
+  build uses, matching how Claude Code and the original `claude-swap` do it. Known caveat: macOS
+  26 has been independently reported to truncate very long `security` CLI output — not yet
+  verifiable on hardware here.
+- A Keychain read that returned a non-empty but structurally invalid value (truncated, or
+  corrupted — Anthropic tracks a live report of concurrent-write Keychain corruption in
+  `anthropics/claude-code#86616`) was accepted outright as the active credential instead of
+  falling back to the plaintext credentials file the way a Keychain read failure already does.
+- The update-available OS notification could silently stop firing forever after its first
+  attempt, on every platform: the app marked a version "announced" before confirming the
+  notification actually sent, so a single denied or failed attempt (plausible on first run)
+  permanently suppressed all future retries with no record of what happened. It's now marked
+  only once the OS confirms delivery, and a failure is logged instead of swallowed. Note: macOS
+  grants notification authorization only to code-signed apps, so this build (unsigned, like the
+  Keychain caveat above) will not show OS notifications there regardless of this fix; Windows
+  notifications require the app be launched from an installed Start Menu shortcut, a Tauri/OS
+  limitation this app can't work around on its own.
+- The "update available" indicator by Settings was a bare, unlabeled 6px dot with no visible
+  text or tooltip, and reused the color reserved for interactive controls — genuinely hard to
+  notice and impossible to interpret. It's now a small labeled pill ("Update", with a tooltip
+  naming the version), following the same labeled-badge convention used everywhere else in the
+  app, with its own color token instead of borrowing one that already meant something else.
 
 ## [0.2.3] - 2026-08-21
 

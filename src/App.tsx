@@ -500,7 +500,16 @@ export default function App() {
               >
                 {item.label}
                 {item.id === "settings" && update.available && (
-                  <span className="navlink-dot" aria-label="Update available" />
+                  <span
+                    className="navlink-update-pill"
+                    title={
+                      update.status?.kind === "available"
+                        ? `Version ${update.status.version} is available — Settings → About to install`
+                        : "Update available"
+                    }
+                  >
+                    Update
+                  </span>
                 )}
               </button>
             ))}

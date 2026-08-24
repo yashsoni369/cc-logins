@@ -83,9 +83,14 @@ export function useUpdate(
 
       // Only automatic checks notify. After a manual check the user is already
       // looking at the answer, so a toast would be noise.
+      //
+      // Recorded only once the OS confirms it sent — otherwise a denied
+      // permission or a thrown error would mark this version "announced"
+      // forever, with no retry on the next daily check.
       if (automatic && result.kind === "available" && shouldNotify(result.version)) {
-        recordNotified(result.version);
-        void notifyUpdate(result.version);
+        void notifyUpdate(result.version).then((sent) => {
+          if (sent) recordNotified(result.version);
+        });
       }
     } finally {
       inFlight.current = false;

@@ -6,6 +6,7 @@ import {
   checkForUpdate,
   dueForAutoCheck,
   installBlockedBy,
+  notifyUpdate,
   recordAutoCheck,
   recordNotified,
   shouldNotify,
@@ -128,6 +129,72 @@ describe("checkForUpdate", () => {
     const result = await fresh();
 
     expect(result).toMatchObject({ kind: "available", version: "0.2.0", highlights: [] });
+  });
+});
+
+describe("notifyUpdate", () => {
+  it("does nothing outside a Tauri runtime", async () => {
+    expect(TAURI_KEY in window).toBe(false);
+    await expect(notifyUpdate("0.3.0")).resolves.toBe(false);
+  });
+
+  it("sends and reports success once permission is granted", async () => {
+    withTauri({});
+    const sendNotification = vi.fn();
+    vi.doMock("@tauri-apps/plugin-notification", () => ({
+      isPermissionGranted: () => Promise.resolve(true),
+      requestPermission: () => Promise.resolve("granted"),
+      sendNotification,
+    }));
+
+    const { notifyUpdate: fresh } = await import("./updater");
+    await expect(fresh("0.3.0")).resolves.toBe(true);
+    expect(sendNotification).toHaveBeenCalledWith(
+      expect.objectContaining({ title: expect.stringContaining("0.3.0") }),
+    );
+  });
+
+  it("requests permission when not already granted, and sends once allowed", async () => {
+    withTauri({});
+    const sendNotification = vi.fn();
+    vi.doMock("@tauri-apps/plugin-notification", () => ({
+      isPermissionGranted: () => Promise.resolve(false),
+      requestPermission: () => Promise.resolve("granted"),
+      sendNotification,
+    }));
+
+    const { notifyUpdate: fresh } = await import("./updater");
+    await expect(fresh("0.3.0")).resolves.toBe(true);
+    expect(sendNotification).toHaveBeenCalledTimes(1);
+  });
+
+  // Regression guard: a denied/failed send must be reported as such, not
+  // silently swallowed, so the caller can retry on the next check instead
+  // of permanently marking the version "announced".
+  it("reports failure, not success, when permission is denied", async () => {
+    withTauri({});
+    const sendNotification = vi.fn();
+    vi.doMock("@tauri-apps/plugin-notification", () => ({
+      isPermissionGranted: () => Promise.resolve(false),
+      requestPermission: () => Promise.resolve("denied"),
+      sendNotification,
+    }));
+
+    const { notifyUpdate: fresh } = await import("./updater");
+    await expect(fresh("0.3.0")).resolves.toBe(false);
+    expect(sendNotification).not.toHaveBeenCalled();
+  });
+
+  it("reports failure rather than throwing when the plugin call fails", async () => {
+    withTauri({});
+    vi.doMock("@tauri-apps/plugin-notification", () => ({
+      isPermissionGranted: () => Promise.reject(new Error("no notification daemon")),
+      requestPermission: () => Promise.resolve("granted"),
+      sendNotification: vi.fn(),
+    }));
+
+    const { notifyUpdate: fresh } = await import("./updater");
+    await expect(fresh("0.3.0")).resolves.toBe(false);
   });
 });
 

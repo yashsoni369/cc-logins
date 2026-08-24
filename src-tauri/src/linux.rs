@@ -3,11 +3,11 @@
 //! Everything in this module is a no-op on Windows and macOS: every function
 //! that touches process/window state is gated by `#[cfg(target_os = "linux")]`
 //! internally, so callers on other platforms can call these functions
-//! unconditionally and nothing about their behaviour changes. This was
-//! written and reviewed with **no Linux machine available** — see the
-//! per-workaround confidence notes below, and re-verify against upstream
-//! issue trackers before trusting this blindly on a new Tauri/WebKitGTK
-//! version pairing.
+//! unconditionally and nothing about their behaviour changes. Written and
+//! reviewed with **no Linux machine available**; cross-checked instead
+//! against Tauri's official "Linux Graphics Issues" doc and current upstream
+//! issue trackers, which confirm these three bugs and this env-var mitigation
+//! are both still current — re-check again on a new Tauri/WebKitGTK pairing.
 //!
 //! ## Why this exists
 //!

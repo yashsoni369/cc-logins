@@ -1,9 +1,10 @@
 /**
  * Update checks, kept behind the same kind of seam as `api.ts`.
  *
- * The check is **user-initiated only**. Nothing in this module runs on a timer
- * or at startup, because the README promises no telemetry and no phoning home,
- * and a silent check on every launch would quietly make that false.
+ * The automatic check runs once ~30s after launch and then daily (see
+ * `useUpdate`), matching what README.md promises: it asks GitHub only
+ * whether a newer release exists, carries no usage data, and can be turned
+ * off in Settings — the manual check in About keeps working either way.
  *
  * The payload is verified against the public key baked into `tauri.conf.json`
  * before anything executes. That signature is independent of Authenticode: the
@@ -115,24 +116,38 @@ export function recordNotified(version: string): void {
   writeLocal(NOTIFIED_KEY, version);
 }
 
-/** Best-effort OS notification. Silence is the correct failure here. */
-export async function notifyUpdate(version: string): Promise<void> {
-  if (!hasTauri()) return;
+/**
+ * Best-effort OS notification. Returns whether it actually sent, so the
+ * caller can decide whether this version still needs announcing — a failed
+ * toast is not worth surfacing as an error, but it must not be mistaken for
+ * a delivered one either (see `useUpdate`'s use of `shouldNotify`).
+ *
+ * macOS grants `UNUserNotificationCenter` authorization only to code-signed
+ * apps; this build ships unsigned (see README's "These builds are
+ * unsigned"), so `requestPermission` returning `"denied"` here is expected
+ * on macOS today, not a bug to chase.
+ */
+export async function notifyUpdate(version: string): Promise<boolean> {
+  if (!hasTauri()) return false;
   try {
     const { isPermissionGranted, requestPermission, sendNotification } = await import(
       "@tauri-apps/plugin-notification"
     );
     let granted = await isPermissionGranted();
     if (!granted) granted = (await requestPermission()) === "granted";
-    if (!granted) return;
+    if (!granted) {
+      console.warn("[updater] notification permission not granted");
+      return false;
+    }
 
     sendNotification({
       title: `CC Logins ${version} is available`,
       body: "Open Settings → About to install it.",
     });
-  } catch {
-    // The in-app indicator still shows the update; a failed toast is not worth
-    // surfacing as an error.
+    return true;
+  } catch (error) {
+    console.warn("[updater] failed to send update notification", error);
+    return false;
   }
 }
 

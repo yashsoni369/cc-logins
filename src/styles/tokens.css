@@ -14,6 +14,7 @@
   - --danger: At or past limit; 90%+ utilization.
   - --interact: Interactive affordances only (buttons, links, focus rings).
   - --switch-on: Toggle track fill when on / in rotation. Never text.
+  - --update-badge: An update is available. Information, not a quota or fault state.
 
   FILL VARIANTS:
   - --ok-fill, --caution-fill, --danger-fill: For bar/meter fills in charts and progress.
@@ -48,6 +49,9 @@
      how full it is. Held at a distinctly warmer hue than --caution (75) so an
      enterprise account at 2% is never mistaken for one nearing its limit. */
   --plan-badge: oklch(0.800 0.150 95);
+  /* Same hue/value as --interact: this app's existing "quiet, informational
+     blue," just its own token so it can't be mistaken for a button/link. */
+  --update-badge: oklch(0.720 0.085 235);
 
   --ok-fill:      oklch(0.560 0.018 150);
   --caution-fill: oklch(0.700 0.140 75);
@@ -83,8 +87,9 @@
     --interact:  oklch(0.500 0.120 250);
     /* Same 3:1 non-text bar as the dark value: 3.83:1 against --raised and
        4.81:1 against the --bg knob. Light is the tighter of the two themes. */
-    
+
   --plan-badge: oklch(0.560 0.130 88);
+  --update-badge: oklch(0.500 0.120 250);
 
     --ok-fill:      oklch(0.640 0.028 150);
     --caution-fill: oklch(0.680 0.150 70);
@@ -108,6 +113,7 @@
   --interact:  oklch(0.500 0.120 250);
   
   --plan-badge: oklch(0.560 0.130 88);
+  --update-badge: oklch(0.500 0.120 250);
   --ok-fill:      oklch(0.640 0.028 150);
   --caution-fill: oklch(0.680 0.150 70);
   --danger-fill:  oklch(0.560 0.190 27);
@@ -128,6 +134,7 @@
   --interact:  oklch(0.720 0.085 235);
   --switch-on: oklch(0.680 0.140 150);
   --plan-badge: oklch(0.800 0.150 95);
+  --update-badge: oklch(0.720 0.085 235);
   --ok-fill:      oklch(0.560 0.018 150);
   --caution-fill: oklch(0.700 0.140 75);
   --danger-fill:  oklch(0.580 0.185 27);
