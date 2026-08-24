@@ -163,16 +163,22 @@ h3 {
 }
 
 /* An update is waiting. `display: block` on .navlink means the label is not a
-   flex line, so the dot is floated to the trailing edge rather than laid out
-   beside the text. Deliberately quiet — an available update is information,
-   not a fault, so it does not borrow the danger colour. */
-.nav button.navlink .navlink-dot {
+   flex line, so the pill floats to the trailing edge rather than laying out
+   beside the text. Follows this app's `.pill` convention — visible text and
+   a `title` tooltip in the markup — instead of an unlabeled mark. */
+.nav button.navlink .navlink-update-pill {
   float: inline-end;
-  width: 6px;
-  height: 6px;
-  margin-top: 6px;
-  border-radius: 50%;
-  background: var(--interact);
+  display: inline-flex;
+  align-items: center;
+  margin-top: 2px;
+  padding: 2px 6px;
+  border: 1px solid var(--update-badge);
+  border-radius: 2px;
+  font-size: 10px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--update-badge);
+  white-space: nowrap;
 }
 
 /* Quiet Day/Night/System control anchored to the bottom of the sidebar via
