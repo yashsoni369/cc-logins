@@ -186,7 +186,7 @@ Items 4–8 are all confirmed in scope. Item 8 is the highest-risk item in the l
 | Shell | Tauri 2 | ~8 MB; first-party tray, autostart, updater, notification, single-instance plugins |
 | Frontend | React + TS + Vite + Tailwind | Next.js muscle memory transfers |
 | Charts | Recharts or uPlot | uPlot if history grows large |
-| Backend | Rust | `reqwest`, `serde`, `tokio`, `fs4` (locking), `windows` (DPAPI), `security-framework` (Keychain), `tiny-skia` (icon rendering) |
+| Backend | Rust | `reqwest`, `serde`, `tokio`, `fs4` (locking), `windows` (DPAPI), `/usr/bin/security` shell-out (Keychain), `tiny-skia` (icon rendering) |
 | State | Zustand | TanStack Query is overkill — no server, ~10 accounts |
 | Storage | SQLite via `rusqlite` | Needed for time-series history; JSON is not enough here |
 | Updates | `tauri-plugin-updater` + GitHub Releases | |
@@ -358,8 +358,8 @@ Recorded rather than left as silent unknowns:
 
 | Path | Why it cannot be verified here | Risk |
 |---|---|---|
-| macOS Keychain | No Mac available. The port uses `security-framework` (in-process) where the Python shells out to `/usr/bin/security`. Same Keychain items, but a rebuilt binary is a new "creator" and may re-trigger an access prompt after every update. | Medium — annoying, not destructive |
-| Linux Secret Service | Not exercised. Needs a running D-Bus; headless and minimal systems have none, and must fall back to file storage. | Medium |
+| macOS Keychain | **Fixed**: now shells out to `/usr/bin/security`, matching the Python original — no in-process `security-framework` calls left, so there's no separate "creator" identity to re-prompt on rebuild. Verified live on macOS 15.7.5 (read/write/delete/upsert round-trip, incl. non-ASCII and embedded control bytes). Residual, undertested risk: macOS 26 reportedly truncates long `security` CLI output (broke real Claude Code, upstream #9403) — not verifiable here (no Tahoe machine). | Low — mechanism matches upstream; one known Tahoe-specific caveat documented in code |
+| Linux Secret Service | **Not applicable** — deliberately dropped, not merely unexercised: no Secret Service dependency at all, Linux always uses plain 0600-file storage (`ProtectionScheme::Plain`). A real sibling bug exists elsewhere (`claude-desktop-debian`'s KWallet-vs-gnome-keyring misdetection re-prompts on every launch) — skipping Secret Service avoids that class of bug entirely. | None — working as designed |
 | Windows `LockFileEx` FFI | Written without a compiler available, later compiled clean — but compiling is not interoperating. | High until the interop test lands |
 | `security-framework` credential format | Must remain byte-compatible with what `cswap` writes, or the two tools stop seeing each other's accounts on macOS. | High, unverified |
 

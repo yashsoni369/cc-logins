@@ -11,7 +11,15 @@ A breaking change to any of those bumps the minor version, since major is pinned
 
 ## [Unreleased]
 
-Nothing yet.
+### Fixed
+
+- On macOS, the app could re-prompt for Keychain access on nearly every launch after a rebuild
+  or update, because it talked to Security.framework in-process — making each new build a
+  distinct, unsigned Keychain "creator" macOS had never granted access to before. Keychain
+  access now shells out to `/usr/bin/security`, the same stable, Apple-signed binary every
+  build uses, matching how Claude Code and the original `claude-swap` do it. Known caveat: macOS
+  26 has been reported to truncate very long `security` CLI output, which can also affect real
+  Claude Code (see upstream anthropics/claude-code#9403) — not yet verifiable on hardware here.
 
 ## [0.2.3] - 2026-08-21
 

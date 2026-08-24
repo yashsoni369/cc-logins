@@ -30,10 +30,9 @@
 //! Keychain-vs-file decision tree are ported 1:1 from the Python source.
 //! What differs is necessarily the shape of the API: Python's exceptions
 //! become [`CredentialError`] variants, and the `_StoreHost` `Protocol`
-//! becomes the [`StoreHost`] trait. See the crate-level report for the
-//! macOS Keychain caveats (this file talks to Security.framework via the
-//! `security-framework` crate rather than shelling out to
-//! `/usr/bin/security` as the Python version does).
+//! becomes the [`StoreHost`] trait. macOS Keychain access shells out to
+//! `/usr/bin/security`, matching the Python version exactly (see
+//! [`mod@macos_keychain`]).
 //!
 //! One on-disk format is a deliberate, intentional departure from upstream:
 //! the `.enc` vault files (per-account backups, `.enc.prev` generations, and
@@ -743,18 +742,11 @@ fn unwrap_dpapi(_ciphertext: &[u8]) -> Result<Vec<u8>, String> {
 /// called) on every target so the rest of `credentials.rs` never needs
 /// `#[cfg(target_os = "macos")]` sprinkled through its control flow.
 ///
-/// Unlike the Python version — which deliberately shells out to
-/// `/usr/bin/security` so the creator and reader of a Keychain item are
-/// always the same stable system binary and macOS never re-prompts for
-/// Keychain access after a Python interpreter upgrade — this port talks to
-/// Security.framework in-process via the `security-framework` crate (already
-/// pinned in `Cargo.toml` for `cfg(target_os = "macos")`). Functionally this
-/// reads/writes the exact same generic-password items (same service/account
-/// keys), so it is on-disk-compatible with Claude Code and with `cswap`
-/// itself; the trade-off is that a rebuilt binary of *this* app is a new
-/// Keychain "creator" and macOS may prompt once per rebuild. This could not
-/// be verified end-to-end here (no macOS machine, no Rust toolchain in this
-/// environment) — see the port report.
+/// Like the Python version, shells out to `/usr/bin/security` for every op
+/// instead of calling Security.framework in-process: cc-logins is unsigned
+/// on macOS, so a stable Apple-signed "creator" is what stops every rebuild
+/// from re-triggering the access prompt. Not yet run against a live Keychain
+/// in this environment (no macOS machine here).
 mod macos_keychain {
     #[derive(Debug)]
     pub struct KeychainError(pub String);
@@ -803,30 +795,92 @@ mod macos_keychain {
     #[cfg(all(target_os = "macos", not(test)))]
     mod imp {
         use super::KeychainError;
-        use security_framework::base::Error as SfError;
-        use security_framework::passwords::{
-            delete_generic_password, get_generic_password, set_generic_password,
-        };
+        use std::process::{Command, Output};
 
-        /// `errSecItemNotFound`.
-        const ERR_SEC_ITEM_NOT_FOUND: i32 = -25300;
+        /// Absolute path — never resolved via `$PATH`, so nothing earlier
+        /// on it can intercept credential access.
+        const SECURITY_BIN: &str = "/usr/bin/security";
 
-        fn is_not_found(e: &SfError) -> bool {
-            // `code()` is already i32; the cast was a no-op.
-            e.code() == ERR_SEC_ITEM_NOT_FOUND
+        /// `security`'s exit code for `errSecItemNotFound`; corroborated by
+        /// stderr in [`is_not_found`], never trusted alone.
+        const EXIT_ITEM_NOT_FOUND: i32 = 44;
+
+        fn stderr_says_not_found(output: &Output) -> bool {
+            String::from_utf8_lossy(&output.stderr)
+                .to_lowercase()
+                .contains("could not be found in the keychain")
+        }
+
+        fn is_not_found(output: &Output) -> bool {
+            output.status.code() == Some(EXIT_ITEM_NOT_FOUND) && stderr_says_not_found(output)
+        }
+
+        /// `security` never echoes `-w`'s value back on failure, so this
+        /// leaks no more than the exit code and its own stderr text.
+        fn describe_failure(output: &Output) -> String {
+            let code = output
+                .status
+                .code()
+                .map(|c| c.to_string())
+                .unwrap_or_else(|| "terminated by signal".to_string());
+            format!("exit {code}: {}", String::from_utf8_lossy(&output.stderr).trim())
+        }
+
+        fn run(args: &[&str]) -> Result<Output, KeychainError> {
+            Command::new(SECURITY_BIN)
+                .args(args)
+                .output()
+                .map_err(|e| KeychainError(format!("failed to run {SECURITY_BIN}: {e}")))
+        }
+
+        /// `-g`, not `-w`: `-w` collapses to an unmarked hex dump for any
+        /// non-printable byte; `-g` always labels which form it used.
+        ///
+        /// macOS 26 reportedly truncates long output (broke real Claude
+        /// Code, upstream #9403); odd-length hex fails loudly below.
+        fn parse_password_line(stderr: &[u8]) -> Result<String, KeychainError> {
+            const PREFIX: &str = "password: ";
+            let text = String::from_utf8_lossy(stderr);
+            let line = text
+                .lines()
+                .find(|l| l.starts_with(PREFIX))
+                .ok_or_else(|| KeychainError("no password line in security -g output".into()))?;
+            let rest = &line[PREFIX.len()..];
+            if let Some(quoted) = rest.strip_prefix('"') {
+                // Never escaped by `security`, so the closing quote is
+                // always the line's last byte.
+                Ok(quoted[..quoted.len() - 1].to_string())
+            } else if let Some(hex) = rest.strip_prefix("0x") {
+                let hex: String = hex.chars().take_while(char::is_ascii_hexdigit).collect();
+                if hex.len() % 2 != 0 {
+                    return Err(KeychainError(format!("odd-length hex password: {hex}")));
+                }
+                let bytes: Result<Vec<u8>, _> = (0..hex.len())
+                    .step_by(2)
+                    .map(|i| u8::from_str_radix(&hex[i..i + 2], 16))
+                    .collect();
+                let bytes = bytes
+                    .map_err(|e| KeychainError(format!("malformed hex password from security: {e}")))?;
+                String::from_utf8(bytes)
+                    .map_err(|e| KeychainError(format!("keychain item was not valid UTF-8: {e}")))
+            } else if rest.is_empty() {
+                Ok(String::new()) // `security` prints no quotes at all for an empty password
+            } else {
+                Err(KeychainError(format!("unrecognized password line format: {line}")))
+            }
         }
 
         pub fn get_password(service: &str, account: &str) -> Result<Option<String>, KeychainError> {
-            match get_generic_password(service, account) {
-                Ok(bytes) => String::from_utf8(bytes).map(Some).map_err(|e| {
-                    KeychainError(format!(
-                        "keychain item for {service}/{account} was not valid UTF-8: {e}"
-                    ))
-                }),
-                Err(e) if is_not_found(&e) => Ok(None),
-                Err(e) => Err(KeychainError(format!(
-                    "keychain find-generic-password failed for {service}/{account}: {e}"
-                ))),
+            let output = run(&["find-generic-password", "-s", service, "-a", account, "-g"])?;
+            if output.status.success() {
+                parse_password_line(&output.stderr).map(Some)
+            } else if is_not_found(&output) {
+                Ok(None)
+            } else {
+                Err(KeychainError(format!(
+                    "keychain find-generic-password failed for {service}/{account}: {}",
+                    describe_failure(&output)
+                )))
             }
         }
 
@@ -835,20 +889,39 @@ mod macos_keychain {
             account: &str,
             password: &str,
         ) -> Result<(), KeychainError> {
-            set_generic_password(service, account, password.as_bytes()).map_err(|e| {
-                KeychainError(format!(
-                    "keychain add-generic-password failed for {service}/{account}: {e}"
-                ))
-            })
+            // `-U` upserts instead of erroring "already exists"; `-T`
+            // pre-authorizes this binary so new items never need a prompt.
+            let output = run(&[
+                "add-generic-password",
+                "-U",
+                "-T",
+                SECURITY_BIN,
+                "-s",
+                service,
+                "-a",
+                account,
+                "-w",
+                password,
+            ])?;
+            if output.status.success() {
+                Ok(())
+            } else {
+                Err(KeychainError(format!(
+                    "keychain add-generic-password failed for {service}/{account}: {}",
+                    describe_failure(&output)
+                )))
+            }
         }
 
         pub fn delete_password(service: &str, account: &str) -> Result<(), KeychainError> {
-            match delete_generic_password(service, account) {
-                Ok(()) => Ok(()),
-                Err(e) if is_not_found(&e) => Ok(()), // already absent counts as success
-                Err(e) => Err(KeychainError(format!(
-                    "keychain delete-generic-password failed for {service}/{account}: {e}"
-                ))),
+            let output = run(&["delete-generic-password", "-s", service, "-a", account])?;
+            if output.status.success() || is_not_found(&output) {
+                Ok(()) // already absent counts as success
+            } else {
+                Err(KeychainError(format!(
+                    "keychain delete-generic-password failed for {service}/{account}: {}",
+                    describe_failure(&output)
+                )))
             }
         }
     }
