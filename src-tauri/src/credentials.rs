@@ -254,6 +254,13 @@ pub fn looks_like_api_key(credentials: Option<&str>) -> bool {
     text.starts_with("sk-ant-api") && !text.starts_with('{')
 }
 
+/// True if `raw` is structurally plausible as an active credential: a bare
+/// API key, or valid JSON. Anything else is more likely a truncated or
+/// corrupted read than a genuine new format.
+fn looks_like_active_credential(raw: &str) -> bool {
+    looks_like_api_key(Some(raw)) || serde_json::from_str::<Value>(raw).is_ok()
+}
+
 /// Parse a JSON credential object, excluding managed API keys. `None` for
 /// missing/empty input, a managed key, malformed JSON, or JSON that isn't an
 /// object.
@@ -836,8 +843,8 @@ mod macos_keychain {
         /// `-g`, not `-w`: `-w` collapses to an unmarked hex dump for any
         /// non-printable byte; `-g` always labels which form it used.
         ///
-        /// macOS 26 reportedly truncates long output (broke real Claude
-        /// Code, upstream #9403); odd-length hex fails loudly below.
+        /// macOS 26 has been independently reported to truncate long
+        /// output; odd-length hex fails loudly below either way.
         fn parse_password_line(stderr: &[u8]) -> Result<String, KeychainError> {
             const PREFIX: &str = "password: ";
             let text = String::from_utf8_lossy(stderr);
@@ -1194,10 +1201,20 @@ impl<H: StoreHost> CredentialStore<H> {
             keychain_failed = failed;
             if let Some(v) = val {
                 if !v.is_empty() {
-                    return ActiveCredentials {
-                        value: Some(v),
-                        keychain_unavailable: false,
-                    };
+                    if looks_like_active_credential(&v) {
+                        return ActiveCredentials {
+                            value: Some(v),
+                            keychain_unavailable: false,
+                        };
+                    }
+                    // Neither JSON nor an API key: likely a truncated or
+                    // corrupted read. Fall through to the file tier below
+                    // rather than handing back garbage.
+                    log::warn!(
+                        "Keychain OAuth credential failed a structural sanity check \
+                         (possible truncated/corrupted read); falling back to file"
+                    );
+                    keychain_failed = true;
                 }
             }
         } else if self.host.platform() == Platform::Macos {
@@ -2249,6 +2266,25 @@ mod tests {
         )));
         // A garbled setup token must never be misclassified as a managed key.
         assert!(!looks_like_api_key(Some("sk-ant-oat01-abc123")));
+    }
+
+    #[test]
+    fn looks_like_active_credential_accepts_json_and_bare_api_keys() {
+        assert!(looks_like_active_credential(
+            r#"{"claudeAiOauth": {"accessToken": "tok"}}"#
+        ));
+        assert!(looks_like_active_credential("sk-ant-api03-abc123"));
+    }
+
+    #[test]
+    fn looks_like_active_credential_rejects_truncated_or_corrupted_reads() {
+        // Valid UTF-8, but not valid JSON and not an API key: exactly the
+        // shape a truncated Keychain read (see credentials.rs module docs)
+        // would produce.
+        assert!(!looks_like_active_credential(
+            r#"{"claudeAiOauth": {"accessToken": "sk-ant-oat01-ab"#
+        ));
+        assert!(!looks_like_active_credential("not json at all"));
     }
 
     #[test]

@@ -18,8 +18,12 @@ A breaking change to any of those bumps the minor version, since major is pinned
   distinct, unsigned Keychain "creator" macOS had never granted access to before. Keychain
   access now shells out to `/usr/bin/security`, the same stable, Apple-signed binary every
   build uses, matching how Claude Code and the original `claude-swap` do it. Known caveat: macOS
-  26 has been reported to truncate very long `security` CLI output, which can also affect real
-  Claude Code (see upstream anthropics/claude-code#9403) — not yet verifiable on hardware here.
+  26 has been independently reported to truncate very long `security` CLI output — not yet
+  verifiable on hardware here.
+- A Keychain read that returned a non-empty but structurally invalid value (truncated, or
+  corrupted — Anthropic tracks a live report of concurrent-write Keychain corruption in
+  `anthropics/claude-code#86616`) was accepted outright as the active credential instead of
+  falling back to the plaintext credentials file the way a Keychain read failure already does.
 
 ## [0.2.3] - 2026-08-21
 
