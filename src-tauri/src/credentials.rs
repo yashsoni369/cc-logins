@@ -830,7 +830,10 @@ mod macos_keychain {
                 .code()
                 .map(|c| c.to_string())
                 .unwrap_or_else(|| "terminated by signal".to_string());
-            format!("exit {code}: {}", String::from_utf8_lossy(&output.stderr).trim())
+            format!(
+                "exit {code}: {}",
+                String::from_utf8_lossy(&output.stderr).trim()
+            )
         }
 
         fn run(args: &[&str]) -> Result<Output, KeychainError> {
@@ -866,14 +869,17 @@ mod macos_keychain {
                     .step_by(2)
                     .map(|i| u8::from_str_radix(&hex[i..i + 2], 16))
                     .collect();
-                let bytes = bytes
-                    .map_err(|e| KeychainError(format!("malformed hex password from security: {e}")))?;
+                let bytes = bytes.map_err(|e| {
+                    KeychainError(format!("malformed hex password from security: {e}"))
+                })?;
                 String::from_utf8(bytes)
                     .map_err(|e| KeychainError(format!("keychain item was not valid UTF-8: {e}")))
             } else if rest.is_empty() {
                 Ok(String::new()) // `security` prints no quotes at all for an empty password
             } else {
-                Err(KeychainError(format!("unrecognized password line format: {line}")))
+                Err(KeychainError(format!(
+                    "unrecognized password line format: {line}"
+                )))
             }
         }
 
