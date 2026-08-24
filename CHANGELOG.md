@@ -13,7 +13,7 @@ A breaking change to any of those bumps the minor version, since major is pinned
 
 Nothing yet.
 
-## [0.2.4]
+## [0.2.4] - 2026-08-24
 
 ### Fixed
 
@@ -224,7 +224,8 @@ Nothing yet.
   otherwise.
 - Builds are unsigned. See [SECURITY.md](SECURITY.md).
 
-[Unreleased]: https://github.com/yashsoni369/cc-logins/compare/v0.2.3...HEAD
+[Unreleased]: https://github.com/yashsoni369/cc-logins/compare/v0.2.4...HEAD
+[0.2.4]: https://github.com/yashsoni369/cc-logins/compare/v0.2.3...v0.2.4
 [0.2.3]: https://github.com/yashsoni369/cc-logins/compare/v0.2.2...v0.2.3
 [0.2.2]: https://github.com/yashsoni369/cc-logins/compare/v0.2.1...v0.2.2
 [0.2.1]: https://github.com/yashsoni369/cc-logins/compare/v0.2.0...v0.2.1
