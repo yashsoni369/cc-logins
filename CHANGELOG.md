@@ -11,6 +11,10 @@ A breaking change to any of those bumps the minor version, since major is pinned
 
 ## [Unreleased]
 
+Nothing yet.
+
+## [0.2.4]
+
 ### Fixed
 
 - On macOS, the app could re-prompt for Keychain access on nearly every launch after a rebuild
