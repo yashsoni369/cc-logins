@@ -902,13 +902,16 @@ mod macos_keychain {
             account: &str,
             password: &str,
         ) -> Result<(), KeychainError> {
-            // `-U` upserts instead of erroring "already exists"; `-T`
-            // pre-authorizes this binary so new items never need a prompt.
+            // No `-T` here: on an item that already exists, `-T` is an ACL
+            // *write*, and macOS re-prompts for the login password on every
+            // such call even when the trusted-app list wouldn't change —
+            // confirmed live, and independently by other projects hitting
+            // this exact dialog. Default creator trust already covers a
+            // freshly created item: this binary made it, so this binary
+            // can read it back without ever needing `-T` at all.
             let output = run(&[
                 "add-generic-password",
                 "-U",
-                "-T",
-                SECURITY_BIN,
                 "-s",
                 service,
                 "-a",

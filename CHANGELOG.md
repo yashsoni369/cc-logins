@@ -11,7 +11,16 @@ A breaking change to any of those bumps the minor version, since major is pinned
 
 ## [Unreleased]
 
-Nothing yet.
+### Fixed
+
+- 0.2.4's Keychain fix introduced a new re-prompt of its own: writing to a Keychain item that
+  already existed passed `-T /usr/bin/security` to pin trust, but on an *existing* item that flag
+  is an access-control **write**, not a no-op — macOS asks for the login password every single
+  time, even when the trusted-app list wouldn't change ("'security' wants to change some
+  permissions for..."). Confirmed live (repeatable on every write) and independently by other
+  projects hitting the identical dialog. Writes no longer pass `-T`: a fresh item is already
+  trusted for the binary that created it, so nothing else was needed for the no-prompt goal
+  0.2.4 was after. Pre-existing items already carrying that ACL entry are unaffected either way.
 
 ## [0.2.4] - 2026-08-24
 
