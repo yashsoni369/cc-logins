@@ -11,6 +11,10 @@ A breaking change to any of those bumps the minor version, since major is pinned
 
 ## [Unreleased]
 
+Nothing yet.
+
+## [0.2.5]
+
 ### Fixed
 
 - 0.2.4's Keychain fix introduced a new re-prompt of its own: writing to a Keychain item that
