@@ -35,6 +35,7 @@ pub mod recovery_store;
 pub mod resilience;
 pub mod runtime;
 pub mod settings;
+pub mod sharing;
 pub mod shim_core;
 pub mod switch_journal;
 pub mod switch_transaction;

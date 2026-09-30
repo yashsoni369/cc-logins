@@ -1106,6 +1106,7 @@ pub(crate) fn refresh_claude_command() {
             log::warn!("shim.json not updated: {error}");
         }
     }
+    resync_shared_files(&data);
     let bin_dir = crate::paths::cc_logins_bin_dir();
     let installed = bin_dir
         .join(crate::cli_install::exe_name(crate::shim_core::SHIM_STEM))
@@ -1133,6 +1134,30 @@ pub(crate) fn refresh_claude_command() {
     }
 }
 
+/// Bring every profile's shared files (settings, CLAUDE.md, keybindings) up
+/// to date with the default folder.
+fn resync_shared_files(data: &serde_json::Map<String, serde_json::Value>) {
+    let default_dir = crate::sys_env::default_claude_config_dir();
+    let dirs = data
+        .get("accounts")
+        .and_then(serde_json::Value::as_object)
+        .into_iter()
+        .flat_map(|accounts| accounts.values())
+        .filter_map(serde_json::Value::as_object)
+        .filter_map(crate::profile_registry::profile_of)
+        .filter_map(|profile| profile.config_dir);
+    for dir in dirs {
+        match crate::sharing::resync(std::path::Path::new(&dir), &default_dir) {
+            Ok(conflicts) if !conflicts.is_empty() => log::warn!(
+                "{} shared file(s) changed in both places; the profile's copies were saved beside them",
+                conflicts.len()
+            ),
+            Ok(_) => {}
+            Err(error) => log::warn!("shared file resync skipped: {error}"),
+        }
+    }
+}
+
 /// Create the folder a new account signs in to:
 /// `~/.cc-logins/profiles/p<slot>-<suffix>`, seeded from the default profile.
 fn new_profile_dir() -> IpcResult<String> {
@@ -1143,7 +1168,15 @@ fn new_profile_dir() -> IpcResult<String> {
     let text = crate::profiles::normalize_profile_path(&crate::sys_env::home_dir(), &dir)
         .map_err(|error| IpcError::InvalidInput(error.to_string()))?;
     std::fs::create_dir_all(&text).map_err(io_internal)?;
-    crate::profiles::seed_profile(std::path::Path::new(&text)).map_err(io_internal)?;
+    let path = std::path::Path::new(&text);
+    crate::profiles::seed_profile(path).map_err(io_internal)?;
+    // Settings, CLAUDE.md, agents and friends come along. A failure here
+    // costs convenience, not the account, so it never blocks a sign-in.
+    if let Err(error) =
+        crate::sharing::share_into(path, &crate::sys_env::default_claude_config_dir())
+    {
+        log::warn!("could not share settings into the new profile: {error}");
+    }
     Ok(text)
 }
 
@@ -1152,6 +1185,11 @@ fn new_profile_dir() -> IpcResult<String> {
 fn discard_new_profile_dir(dir: &str) {
     let path = std::path::Path::new(dir);
     if !path.starts_with(crate::paths::profiles_root()) {
+        return;
+    }
+    // Links first, so the recursive delete below can never reach through one.
+    if let Err(error) = crate::sharing::unshare(path) {
+        log::warn!("could not unlink shared folders: {error}");
         return;
     }
     if let Err(error) = std::fs::remove_dir_all(path) {
