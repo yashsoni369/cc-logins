@@ -380,7 +380,7 @@ export default function PopoverPanel() {
                 <span className="pill danger" title="Credential mismatch">mismatch</span>
               )}
               {isNext && <span className="pill">next</span>}
-              {!isNext && bestNext?.number === account.number && !unavailable && <span className="pill best">best next</span>}
+              {!isNext && bestNext?.number === account.number && !unavailable && <span className="pill best" title="Auto-switch would pick this account next">best</span>}
               {isPending && <span className="pill">switching…</span>}
               <div className="pop-meter" style={dimStyle}>
                 <UsageMeter pct={bindingUtilisation(account.usage)} />

@@ -413,6 +413,6 @@ describe("PopoverPanel auto-switch control", () => {
   it("marks the account auto-switch would pick", () => {
     mocks.status = status({ kind: "monitoring" });
     render(<PopoverPanel />);
-    expect(within(screen.getByRole("button", { name: /Next/ })).getByText("best next")).toBeInTheDocument();
+    expect(within(screen.getByRole("button", { name: /Next/ })).getByText("best")).toBeInTheDocument();
   });
 });

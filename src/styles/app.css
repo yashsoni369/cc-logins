@@ -1719,7 +1719,9 @@ hr.rule {
  * under the 4.5:1 floor for body text.
  */
 .pop-item .rst {
-  min-width: 44px;
+  /* Wide enough for the longest countdown ("27d 13h"), so meters align
+     whether or not a row shows one. */
+  min-width: 7ch;
   flex: none;
   font-family: var(--mono);
   font-size: 11px;
@@ -1737,7 +1739,10 @@ hr.rule {
  * The full value is on the element's title.
  */
 .pop-item .alias {
-  min-width: 64px;
+  /* Shrinks (with an ellipsis, full name on hover) before anything else in
+     the row does, so a pill never pushes the meter or countdown out. */
+  min-width: 0;
+  flex: 0 1 auto;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
