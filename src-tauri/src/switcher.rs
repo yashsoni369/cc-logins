@@ -1,113 +1,37 @@
-//! The account-switch core: backup-then-install account activation, and the
-//! account-listing/read path used to build a [`Snapshot`].
+//! The account registry and the snapshot read path.
 //!
-//! Ported from claude-swap (MIT) — <https://github.com/realiti4/claude-swap>,
-//! `claude_swap/switcher.py` (`ClaudeAccountSwitcher`). This is a narrow slice
-//! of a much larger module. The GUI ports the switch invariants it depends on:
-//! coordinated Claude Code locks, generation validation, outgoing credential
-//! provenance, durable journaling/rollback/recovery, and usage attribution.
-//! CLI-only surfaces such as aliases, sessions, and interactive import/export
-//! remain outside this module.
+//! Originally ported from claude-swap (MIT) —
+//! <https://github.com/realiti4/claude-swap>, `claude_swap/switcher.py`.
+//! Since v0.4 this module no longer switches accounts by swapping credential
+//! files, and never registers, copies or refreshes a token:
 //!
-//! # Account management additions
+//! - Registry edits (enable/disable, alias, remove, reorder) are here, each
+//!   under the vault lock with atomic writes. Profile registration and
+//!   selection live in [`crate::profile_registry`], which uses the helpers
+//!   this module exposes.
+//! - [`read_snapshot`] reads each profile account's folder in place
+//!   (identity from `.claude.json`, token via [`crate::usage_reader`]) and
+//!   makes at most one usage request per account. Accounts not yet moved
+//!   from v0.3 are never read; they show their last reading.
+//! - The v0.3 vault is only read or deleted: [`delete_vault_copy`] removes a
+//!   moved account's stored copy, and [`crate::switch_transaction`] keeps
+//!   recovering an interrupted v0.3 switch until v0.5.
 //!
-//! [`add_current_account`], [`add_token`], and [`set_account_enabled`] port
-//! the relevant slices of `add_account` / `add_account_from_token` /
-//! `set_account_disabled` from the same upstream module — registering the
-//! live login or a raw token as a new slot, and toggling the `disabled` flag.
-//! Unlike upstream's `_get_next_account_number` (`max(existing) + 1`), slot
-//! allocation here reuses the lowest free slot number, so a freed slot (e.g.
-//! after upstream removal via the CLI) is recycled rather than left as a
-//! permanent gap.
-//!
-//! [`add_oauth_credential`] is not a port of anything upstream either — it is
-//! this app's own bridge from [`crate::login::interactive_login`]'s captured
-//! credential blob to a registered slot, since [`add_token`] explicitly
-//! rejects anything that looks like a JSON blob rather than a raw token. It
-//! follows [`add_current_account`]'s structure closely (same identity-based
-//! duplicate detection, same injectable-resolver pattern, same lock
-//! discipline) but never touches the live credential/config and never sets
-//! `activeAccountNumber` — see its own doc comment for why.
-//!
-//! # Reused, not reimplemented
-//!
-//! - [`crate::model`] — [`Account`], [`Usage`], [`UsageWindow`], [`Environment`],
-//!   [`Snapshot`] are used as-is; this module defines no shapes of its own.
-//! - [`crate::credentials`] — [`CredentialStore`] does every read/write of the
-//!   active credential and the per-account backup stores (Keychain-vs-file
-//!   routing, atomic writes, `.prev` retention). [`shared_credential_fields`] /
-//!   [`merge_shared_credential_fields`] compose the target's stored login with
-//!   the machine's live shared OAuth fields before activation, mirroring
-//!   Python's `_prepare_credentials_for_activation`.
-//! - [`crate::locking`] — [`crate::locking::acquire_or_err`] guards every
-//!   mutation. Two *different* locks are in play here, not one shared between
-//!   this app and the external store — see the "Locking" section further down
-//!   this file (in `crate::switch_transaction`) for the full split.
-//! - [`crate::paths`] — every on-disk location comes from here, never
-//!   hand-rolled: [`crate::paths::backup_root`] for OUR vault, and
-//!   `global_config_path`/`credentials_path`/`claude_config_home`
-//!   for Claude Code's official files.
-//! - [`crate::oauth`] — usage fetch, token refresh, and (new) profile lookup.
-//!   Inactive refreshes use the generation coordinator; active refreshes use
-//!   the narrower Claude-compatible lock path below so Claude Code and this
-//!   app cannot consume the same grant concurrently. [`add_current_account`]
-//!   and [`add_token`] call `oauth::fetch_oauth_profile` — advisory, `None`
-//!   on any failure — to resolve account identity for duplicate detection;
-//!   see the "Duplicate detection by account identity" section above
-//!   [`find_registered_slot_by_identity`] for why byte-level fingerprinting
-//!   alone (the pre-fix behavior) is not enough.
-//!
-//! # Correctness rules carried over from upstream
-//!
-//! 1. **Lock the whole mutate.** Every mutating function in this module
-//!    acquires a [`crate::locking::FileLock`] before touching any file and
-//!    holds it for the entire operation. [`switch_to`] holds the complete
-//!    live-state lock set — see the "Locking" section below.
-//! 2. **Keep network work outside mutation locks, except active refresh.**
-//!    Profile/usage calls and switch target freshening run without the full
-//!    live-state lock set. Upstream's bounded exception is reproduced:
-//!    an active refresh grant holds Claude's credential locks and the GUI
-//!    vault lock so the refresh generation cannot be consumed twice; it never
-//!    holds the config lock.
-//!    [`add_current_account`],
-//!    [`add_token`], and [`add_oauth_credential`] are the exception to "no
-//!    mutating function makes a network call": each resolves account
-//!    identity via `oauth::fetch_oauth_profile` for duplicate detection, but
-//!    does so strictly BEFORE acquiring the vault lock, and treats a failed
-//!    lookup as advisory (degrade, don't block) — see
-//!    [`find_registered_slot_by_identity`].
-//! 3. **Back up the outgoing credential before installing the new one.** See
-//!    [`switch_to`]'s doc comment and the `backup_happens_before_target_validation…`
-//!    test below.
-//! 4. **Atomic writes.** All local writes in this module go through
-//!    [`atomic_write`] (write-temp-then-rename), matching `credentials.rs`.
-//! 5. **Serialize every refresh of one account.** Active and inactive paths
-//!    share the per-account refresh lease. Active refresh then takes the
-//!    Claude credential and GUI vault locks in that order and re-reads
-//!    identity and credentials before consuming a grant.
-//! 6. **`.claude.json` lives at the home dir, not inside `.claude/`.** Always
-//!    resolved via [`crate::paths::global_config_path`], never hand-rolled.
+//! Slot allocation reuses the lowest free slot number, so a freed slot is
+//! recycled rather than left as a permanent gap. `.claude.json` lives at the
+//! home dir, not inside `.claude/`; always resolve it via [`crate::paths`].
 
-use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
 use serde_json::{Map, Value};
 
-use crate::credentials::{
-    self, CredentialError, CredentialStore, Platform as CredPlatform, StoreHost,
-};
+use crate::credentials::{CredentialError, CredentialStore, Platform as CredPlatform, StoreHost};
 use crate::model::{
     Account, EnvKind, EnvStatus, Environment, Snapshot, SpendWindow, Usage, UsageStatus,
     UsageWindow,
 };
 use crate::oauth;
-use crate::oauth_quarantine::OAuthQuarantine;
-use crate::oauth_refresh::{
-    self, AccountIdentity, CompareAndStore, GenerationStore, RefreshCoordinator,
-    RefreshLeaseProvider, StoredGeneration, ValidatedCredential,
-};
 use crate::paths;
 
 // ---------------------------------------------------------------------------
@@ -205,9 +129,6 @@ pub enum SwitchError {
 
     #[error("JSON error: {0}")]
     Json(#[from] serde_json::Error),
-
-    #[error(transparent)]
-    Refresh(#[from] oauth_refresh::RefreshCoordinatorError),
 
     #[error("account {0}'s credential changed while activation was being validated")]
     TargetGenerationChanged(String),
@@ -472,158 +393,6 @@ fn accounts_from_sequence(data: &Map<String, Value>) -> Vec<Account> {
         });
     }
     out
-}
-
-struct GuiGenerationStore {
-    timeout: Duration,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum ProvenanceVerdict {
-    Owned,
-    Foreign,
-    Unresolved,
-}
-
-/// Mirrors cswap's uuid-first, tri-state profile-oracle decision. A partial
-/// profile can prove ownership through UUID, but a UUID-less slot needs the
-/// complete `(email, organization)` pair before either affirmation or
-/// condemnation is safe.
-fn active_usage_provenance(account: &Account, resolved: &oauth::TokenAccount) -> ProvenanceVerdict {
-    let own_uuid = account.uuid.as_deref().unwrap_or_default().trim();
-    let own_org = account.organization_uuid.as_deref().unwrap_or_default();
-    let resolved_org = resolved.organization_uuid.as_deref();
-
-    if !own_uuid.is_empty() {
-        let compatible_org = match resolved_org {
-            None => true,
-            Some(org) => org.is_empty() || own_org.is_empty() || org == own_org,
-        };
-        return if resolved.uuid == own_uuid && compatible_org {
-            ProvenanceVerdict::Owned
-        } else {
-            ProvenanceVerdict::Foreign
-        };
-    }
-
-    match (resolved.email.as_deref(), resolved_org) {
-        (Some(email), Some(org))
-            if email.trim().eq_ignore_ascii_case(account.email.trim()) && org == own_org =>
-        {
-            ProvenanceVerdict::Owned
-        }
-        (Some(_), Some(_)) => ProvenanceVerdict::Foreign,
-        _ => ProvenanceVerdict::Unresolved,
-    }
-}
-
-impl GuiGenerationStore {
-    fn new(timeout: Duration) -> Self {
-        Self { timeout }
-    }
-
-    fn with_current<T>(
-        &self,
-        identity: &AccountIdentity,
-        operation: impl FnOnce(&mut CredentialStore<GuiStoreHost>, &Account) -> Result<T, String>,
-    ) -> Result<Option<T>, String> {
-        let _lock = crate::locking::acquire_or_err(vault_lock_path(), self.timeout)
-            .map_err(|error| error.to_string())?;
-        let account = read_accounts()
-            .map_err(|error| error.to_string())?
-            .into_iter()
-            .find(|account| {
-                account.number.to_string() == identity.number
-                    && account.email == identity.email
-                    && account.stable_key() == identity.stable_key
-            });
-        let Some(account) = account else {
-            return Ok(None);
-        };
-        let mut store = CredentialStore::new(GuiStoreHost);
-        operation(&mut store, &account).map(Some)
-    }
-}
-
-impl GenerationStore for GuiGenerationStore {
-    fn read(&self, identity: &AccountIdentity) -> Result<Option<StoredGeneration>, String> {
-        self.with_current(identity, |store, account| {
-            let credentials =
-                store.read_account_credentials(&account.number.to_string(), &account.email);
-            Ok((!credentials.is_empty()).then(|| StoredGeneration::new(credentials)))
-        })
-        .map(Option::flatten)
-    }
-
-    fn compare_and_store(
-        &self,
-        identity: &AccountIdentity,
-        expected_generation: &str,
-        successor: &str,
-    ) -> Result<CompareAndStore, String> {
-        self.with_current(identity, |store, account| {
-            let number = account.number.to_string();
-            let current = store.read_account_credentials(&number, &account.email);
-            if current.is_empty() {
-                return Ok(CompareAndStore::Missing);
-            }
-            let current = StoredGeneration::new(current);
-            let successor = StoredGeneration::new(successor.to_string());
-            if current.generation == successor.generation {
-                return Ok(CompareAndStore::AlreadyCurrent(current));
-            }
-            if current.generation != expected_generation {
-                return Ok(CompareAndStore::Superseded(current));
-            }
-            store
-                .write_account_credentials(&number, &account.email, &successor.credentials)
-                .map_err(|error| error.to_string())?;
-            OAuthQuarantine::new(paths::backup_root())
-                .clear_obsolete(
-                    &identity.stable_key,
-                    oauth::credential_fingerprint(&successor.credentials)
-                        .as_deref()
-                        .unwrap_or(&successor.generation),
-                )
-                .map_err(|error| error.to_string())?;
-            Ok(CompareAndStore::Persisted(successor))
-        })
-        .map(|result| result.unwrap_or(CompareAndStore::Missing))
-    }
-
-    fn is_rejected(&self, identity: &AccountIdentity, credentials: &str) -> Result<bool, String> {
-        let fingerprint = oauth::credential_fingerprint(credentials)
-            .unwrap_or_else(|| oauth_refresh::credential_generation(credentials));
-        self.with_current(identity, |_, _| {
-            Ok(OAuthQuarantine::new(paths::backup_root())
-                .is_rejected(&identity.stable_key, &fingerprint))
-        })
-        .map(|value| value.unwrap_or(false))
-    }
-
-    fn reject_if_current(
-        &self,
-        identity: &AccountIdentity,
-        expected_generation: &str,
-        credentials: &str,
-    ) -> Result<bool, String> {
-        self.with_current(identity, |store, account| {
-            let current =
-                store.read_account_credentials(&account.number.to_string(), &account.email);
-            if current.is_empty()
-                || oauth_refresh::credential_generation(&current) != expected_generation
-            {
-                return Ok(false);
-            }
-            let fingerprint = oauth::credential_fingerprint(credentials)
-                .unwrap_or_else(|| expected_generation.to_string());
-            OAuthQuarantine::new(paths::backup_root())
-                .reject(&identity.stable_key, &fingerprint, chrono::Utc::now())
-                .map_err(|error| error.to_string())?;
-            Ok(true)
-        })
-        .map(|value| value.unwrap_or(false))
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -921,191 +690,15 @@ fn to_model_usage(u: &oauth::UsageResult) -> Usage {
 //   therefore cannot use a lock file of our choosing — it requires locking the
 //   directories Claude Code itself honours (see `crate::claude_locks`).
 //
-// So any function that writes the official files — today, only [`switch_to`]
-// — holds the complete lock set from `crate::switch_transaction`: Claude's
-// primary + legacy credential locks, Claude's config lock, then our vault
-// lock. A function that only ever touches our own vault
-// (`add_current_account`, `add_token`, `set_account_enabled`) has no reason to
-// take Claude's locks at all — there is nothing there for another process to
-// race it on — so those take [`vault_lock_path`] alone.
+// Since v0.4 nothing in this module writes Claude Code's official files, so
+// every mutation here takes [`vault_lock_path`] alone. Only
+// `crate::switch_transaction`'s recovery of an interrupted v0.3 switch still
+// takes Claude's locks.
 
 // ---------------------------------------------------------------------------
-// Switch.
+// Registry helpers, shared with `crate::profile_registry`.
 // ---------------------------------------------------------------------------
 
-#[derive(Debug, Clone, Default)]
-struct LiveProvenance {
-    live: String,
-    resolved: Option<oauth::TokenAccount>,
-}
-
-fn classify_outgoing_destination(
-    store: &mut CredentialStore<GuiStoreHost>,
-    data: &mut Map<String, Value>,
-    current_num: &str,
-    current_email: &str,
-    live: &str,
-    provenance: &LiveProvenance,
-) -> crate::switch_transaction::OutgoingDestination {
-    let own_backup = store.read_account_credentials(current_num, current_email);
-    if !own_backup.is_empty()
-        && (own_backup == live
-            || oauth::credential_fingerprint(&own_backup) == oauth::credential_fingerprint(live))
-    {
-        return crate::switch_transaction::OutgoingDestination::Managed {
-            number: current_num.to_string(),
-            email: current_email.to_string(),
-            config_backup_path: account_config_path(current_num, current_email),
-        };
-    }
-
-    let tokens_wiped = oauth::extract_oauth_data(live).is_some_and(|oauth| {
-        !oauth
-            .get("accessToken")
-            .and_then(Value::as_str)
-            .is_some_and(|token| !token.is_empty())
-            && !oauth
-                .get("refreshToken")
-                .and_then(Value::as_str)
-                .is_some_and(|token| !token.is_empty())
-    });
-    if tokens_wiped {
-        log::warn!(
-            "live credential tokens are wiped; preserving them outside account {current_num}"
-        );
-        return crate::switch_transaction::OutgoingDestination::Unclaimed;
-    }
-
-    let Some(resolved) = provenance
-        .resolved
-        .as_ref()
-        .filter(|_| provenance.live == live)
-    else {
-        // Same fail-open rule as current cswap: an unavailable/advisory
-        // identity oracle must not discard a legitimate local rotation.
-        return crate::switch_transaction::OutgoingDestination::Managed {
-            number: current_num.to_string(),
-            email: current_email.to_string(),
-            config_backup_path: account_config_path(current_num, current_email),
-        };
-    };
-
-    let accounts = data.get("accounts").and_then(Value::as_object);
-    let own = accounts.and_then(|accounts| accounts.get(current_num));
-    let own_uuid = own
-        .and_then(|record| record.get("uuid"))
-        .and_then(Value::as_str)
-        .unwrap_or_default();
-    let own_org = own
-        .and_then(|record| record.get("organizationUuid"))
-        .and_then(Value::as_str)
-        .unwrap_or_default();
-    let resolved_org = resolved.organization_uuid.as_deref().unwrap_or_default();
-    if !own_uuid.is_empty()
-        && resolved.uuid == own_uuid
-        && (resolved_org.is_empty() || own_org.is_empty() || resolved_org == own_org)
-    {
-        return crate::switch_transaction::OutgoingDestination::Managed {
-            number: current_num.to_string(),
-            email: current_email.to_string(),
-            config_backup_path: account_config_path(current_num, current_email),
-        };
-    }
-
-    let mut matched_slot = accounts.and_then(|accounts| {
-        resolved.email.as_deref().and_then(|resolved_email| {
-            accounts.iter().find_map(|(number, record)| {
-                let email = record.get("email")?.as_str()?;
-                let org = record
-                    .get("organizationUuid")
-                    .and_then(Value::as_str)
-                    .unwrap_or_default();
-                (email.trim().eq_ignore_ascii_case(resolved_email.trim()) && org == resolved_org)
-                    .then(|| number.clone())
-            })
-        })
-    });
-    if !resolved.uuid.is_empty() {
-        if let Some(stored_uuid) = matched_slot.as_deref().and_then(|slot| {
-            accounts
-                .and_then(|accounts| accounts.get(slot))
-                .and_then(|record| record.get("uuid"))
-                .and_then(Value::as_str)
-                .filter(|uuid| !uuid.is_empty())
-        }) {
-            if stored_uuid != resolved.uuid {
-                // Same email/org with a conflicting account UUID is a
-                // recycled identity, never ownership of that slot.
-                matched_slot = None;
-            }
-        }
-    }
-    if matched_slot.is_none() && !resolved.uuid.is_empty() {
-        matched_slot = accounts.and_then(|accounts| {
-            accounts.iter().find_map(|(number, record)| {
-                let uuid = record.get("uuid")?.as_str()?;
-                let org = record
-                    .get("organizationUuid")
-                    .and_then(Value::as_str)
-                    .unwrap_or_default();
-                (uuid == resolved.uuid && org == resolved_org).then(|| number.clone())
-            })
-        });
-    }
-
-    if matched_slot.as_deref() == Some(current_num) {
-        if own_uuid.is_empty() && !resolved.uuid.is_empty() {
-            if let Some(record) = data
-                .get_mut("accounts")
-                .and_then(Value::as_object_mut)
-                .and_then(|accounts| accounts.get_mut(current_num))
-                .and_then(Value::as_object_mut)
-            {
-                record.insert("uuid".to_string(), Value::String(resolved.uuid.clone()));
-            }
-        }
-        return crate::switch_transaction::OutgoingDestination::Managed {
-            number: current_num.to_string(),
-            email: current_email.to_string(),
-            config_backup_path: account_config_path(current_num, current_email),
-        };
-    }
-
-    let structurally_complete = resolved.email.is_some() && resolved.organization_uuid.is_some();
-    let foreign_uuid_confirmed = matched_slot.as_deref().is_some_and(|slot| {
-        accounts
-            .and_then(|accounts| accounts.get(slot))
-            .and_then(|record| record.get("uuid"))
-            .and_then(Value::as_str)
-            .is_some_and(|uuid| !uuid.is_empty() && uuid == resolved.uuid)
-    });
-    if foreign_uuid_confirmed || structurally_complete {
-        log::warn!(
-            "live credential identity does not belong to configured account {current_num}; \
-             preserving it in the unclaimed safety store"
-        );
-        crate::switch_transaction::OutgoingDestination::Unclaimed
-    } else {
-        crate::switch_transaction::OutgoingDestination::Managed {
-            number: current_num.to_string(),
-            email: current_email.to_string(),
-            config_backup_path: account_config_path(current_num, current_email),
-        }
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Account management: add / add-token / enable-disable.
-//
-// Ported from `claude_swap.switcher.ClaudeAccountSwitcher.add_account`,
-// `.add_account_from_token`, and `.set_account_disabled`. Each mutating
-// function here follows the same two rules as `switch_to`: hold the lock for
-// the whole mutation, and never make a network call while holding it.
-// ---------------------------------------------------------------------------
-
-/// Ensure `data["accounts"]` is an object, replacing anything else (missing,
-/// wrong type, corrupt) with an empty one so callers can always
-/// `and_then(Value::as_object_mut)` without a fallible step of their own.
 pub(crate) fn ensure_accounts_object(data: &mut Map<String, Value>) {
     if !matches!(data.get("accounts"), Some(Value::Object(_))) {
         data.insert("accounts".to_string(), Value::Object(Map::new()));
@@ -1161,180 +754,6 @@ pub(crate) fn add_to_sequence(data: &mut Map<String, Value>, slot: u32) {
                 Value::Array(vec![Value::from(slot)]),
             );
         }
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Duplicate detection by account identity (not credential bytes).
-//
-// Comparing raw credential bytes is not enough on its own:
-// `oauth::try_refresh_oauth_credentials`
-// rotates the refresh token whenever the server issues a new one, and
-// `oauth::credential_fingerprint` hashes the refresh token when one is
-// present — so the SAME account's fingerprint changes across a refresh-token
-// rotation. This caused a confirmed real duplicate registration: two stored
-// credentials for one real account (`charlie@example.com`, one
-// `organizationUuid`) fingerprinted as `e9938586d217fcad` (slot 1) and
-// `0b3c888d8bf0b1b9` (slot 2, added later) — different enough that the old
-// fingerprint-only check let the second slot through.
-//
-// [`find_registered_slot_by_identity`] is the fix: it compares account
-// identity (`uuid`, then `organizationUuid` + email) resolved via
-// [`oauth::fetch_oauth_profile`], and only falls back to a fingerprint
-// comparison when neither side of a given pair has resolvable identity at
-// all.
-// ---------------------------------------------------------------------------
-
-/// Identity used to detect a duplicate account registration, independent of
-/// credential bytes. `None` fields mean "unknown", not "empty" — two
-/// identities that are each entirely unknown must never be treated as
-/// matching each other (see [`identity_matches`]).
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-struct ResolvedIdentity {
-    uuid: Option<String>,
-    organization_uuid: Option<String>,
-    email: Option<String>,
-}
-
-impl From<oauth::TokenAccount> for ResolvedIdentity {
-    fn from(account: oauth::TokenAccount) -> Self {
-        ResolvedIdentity {
-            uuid: Some(account.uuid).filter(|s| !s.is_empty()),
-            organization_uuid: account.organization_uuid.filter(|s| !s.is_empty()),
-            email: account.email.filter(|s| !s.is_empty()),
-        }
-    }
-}
-
-/// The identity a registry record already carries, read straight out of its
-/// `sequence.json` fields (`uuid`, `organizationUuid`, `email`) — the same
-/// shape as [`ResolvedIdentity`] so both sides of a comparison line up. A
-/// record written before this fix may have no `uuid` key at all; that gap
-/// is exactly why [`find_registered_slot_by_identity`] falls back to
-/// `organizationUuid` + email rather than requiring `uuid` on both sides.
-fn identity_from_record(record: &Map<String, Value>) -> ResolvedIdentity {
-    ResolvedIdentity {
-        uuid: record
-            .get("uuid")
-            .and_then(Value::as_str)
-            .filter(|s| !s.is_empty())
-            .map(str::to_string),
-        organization_uuid: record
-            .get("organizationUuid")
-            .and_then(Value::as_str)
-            .filter(|s| !s.is_empty())
-            .map(str::to_string),
-        email: record
-            .get("email")
-            .and_then(Value::as_str)
-            .filter(|s| !s.is_empty())
-            .map(str::to_string),
-    }
-}
-
-/// Whether `new` and `existing` denote the same Claude account, using the
-/// most specific signal both sides actually have:
-///
-/// 1. Account `uuid`, when both sides have one.
-/// 2. Else `organization_uuid` + email (case-insensitive, trimmed), when both
-///    sides have an `organization_uuid`.
-///
-/// Returns `false` (no opinion, not "match") when neither pairing is
-/// available — the caller ([`find_registered_slot_by_identity`]) falls back
-/// to the credential fingerprint for that pair instead of treating "both
-/// unknown" as a match.
-fn identity_matches(new: &ResolvedIdentity, existing: &ResolvedIdentity) -> bool {
-    if let (Some(a), Some(b)) = (new.uuid.as_deref(), existing.uuid.as_deref()) {
-        return a == b;
-    }
-    if let (Some(a), Some(b)) = (
-        new.organization_uuid.as_deref(),
-        existing.organization_uuid.as_deref(),
-    ) {
-        if a != b {
-            return false;
-        }
-        return match (new.email.as_deref(), existing.email.as_deref()) {
-            (Some(e1), Some(e2)) => e1.trim().eq_ignore_ascii_case(e2.trim()),
-            _ => false,
-        };
-    }
-    false
-}
-
-/// Return the slot number of an already-registered account that denotes the
-/// same Claude account as `new_identity`, or `None`. See the module section
-/// above this function for why identity (not just fingerprint) is compared.
-///
-/// For each registered account, in priority order: compare `uuid` (when both
-/// sides have one), else `organization_uuid` + email (when both sides have
-/// one), else fall back to comparing `live_fingerprint` against that
-/// account's own stored credential fingerprint — the only signal left once
-/// neither side offers resolvable identity for that particular pair. Once
-/// identity IS resolved on both sides of a pair, it is authoritative for
-/// that pair — a non-match there is never second-guessed by also checking
-/// the fingerprint.
-fn find_registered_slot_by_identity(
-    store: &mut CredentialStore<GuiStoreHost>,
-    accounts: &Map<String, Value>,
-    new_identity: &ResolvedIdentity,
-    live_fingerprint: Option<&str>,
-) -> Option<String> {
-    for (num, value) in accounts {
-        let Some(record) = value.as_object() else {
-            continue;
-        };
-        let existing_identity = identity_from_record(record);
-
-        let has_uuid_pair = new_identity.uuid.is_some() && existing_identity.uuid.is_some();
-        let has_org_pair = new_identity.organization_uuid.is_some()
-            && existing_identity.organization_uuid.is_some();
-
-        if has_uuid_pair || has_org_pair {
-            if identity_matches(new_identity, &existing_identity) {
-                return Some(num.clone());
-            }
-            continue;
-        }
-
-        if let Some(fp) = live_fingerprint {
-            let email = record
-                .get("email")
-                .and_then(Value::as_str)
-                .unwrap_or_default();
-            let existing_creds = store.read_account_credentials(num, email);
-            if !existing_creds.is_empty()
-                && oauth::credential_fingerprint(&existing_creds).as_deref() == Some(fp)
-            {
-                return Some(num.clone());
-            }
-        }
-    }
-    None
-}
-
-/// Production identity resolver for [`add_current_account`] / [`add_token`]:
-/// bridges to [`oauth::fetch_oauth_profile`], which is `async` and strictly
-/// advisory (`None` on any failure — network blip, timeout, non-2xx, ... —
-/// per its own doc comment).
-///
-/// Both callers must stay synchronous: the Tauri command layer (`commands.rs`)
-/// calls `switcher::add_current_account` / `switcher::add_token` without
-/// `.await`, so changing either to `async fn` is not possible from this file
-/// alone. This function instead hops onto whichever Tokio runtime is already
-/// driving the caller — always a multi-thread runtime here (see
-/// `Cargo.toml`'s `rt-multi-thread` feature, which is what makes
-/// `block_in_place` legal) — via `block_in_place`, which lets sibling tasks
-/// keep running on other worker threads while this one blocks on the HTTP
-/// round trip. Outside any ambient runtime (this module's own tests never
-/// reach this function — every test injects a fake resolver instead, to
-/// satisfy the "no network calls in tests" rule) a disposable one-off
-/// runtime is spun up instead, so this never panics regardless of caller.
-fn default_identity_resolver(access_token: &str) -> Option<oauth::TokenAccount> {
-    let fut = oauth::fetch_oauth_profile(access_token);
-    match tokio::runtime::Handle::try_current() {
-        Ok(handle) => tokio::task::block_in_place(|| handle.block_on(fut)),
-        Err(_) => tokio::runtime::Runtime::new().ok()?.block_on(fut),
     }
 }
 
@@ -1925,94 +1344,8 @@ fn seven_day_reset_ts(account: &Account) -> Option<f64> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::oauth::{OAuthFuture, OAuthNetwork, RefreshError, RefreshOutcome, UsageFetchError};
-    use crate::oauth_refresh::{Clock, LeaseGuard, RefreshLeaseProvider};
     use crate::test_support::{env_lock, EnvGuard, StoreRootGuard};
-    use std::collections::VecDeque;
-    use std::sync::atomic::{AtomicUsize, Ordering};
     use tempfile::TempDir;
-
-    struct ActivationNetwork {
-        successor: String,
-        refresh_calls: AtomicUsize,
-    }
-
-    struct ActiveUsageNetwork {
-        refreshes: Mutex<VecDeque<RefreshOutcome>>,
-        usages: Mutex<VecDeque<Result<Value, UsageFetchError>>>,
-        calls: Mutex<Vec<String>>,
-    }
-
-    impl OAuthNetwork for ActiveUsageNetwork {
-        fn refresh<'a>(&'a self, credentials: &'a str) -> OAuthFuture<'a, RefreshOutcome> {
-            let refresh = oauth::extract_oauth_data(credentials)
-                .and_then(|data| {
-                    data.get("refreshToken")
-                        .and_then(Value::as_str)
-                        .map(str::to_owned)
-                })
-                .unwrap_or_default();
-            Box::pin(async move {
-                self.calls
-                    .lock()
-                    .unwrap()
-                    .push(format!("refresh:{refresh}"));
-                self.refreshes.lock().unwrap().pop_front().unwrap()
-            })
-        }
-
-        fn fetch_usage<'a>(
-            &'a self,
-            access_token: &'a str,
-        ) -> OAuthFuture<'a, Result<Value, UsageFetchError>> {
-            let access_token = access_token.to_string();
-            Box::pin(async move {
-                self.calls
-                    .lock()
-                    .unwrap()
-                    .push(format!("usage:{access_token}"));
-                self.usages.lock().unwrap().pop_front().unwrap()
-            })
-        }
-    }
-
-    impl OAuthNetwork for ActivationNetwork {
-        fn refresh<'a>(&'a self, _: &'a str) -> OAuthFuture<'a, RefreshOutcome> {
-            Box::pin(async move {
-                self.refresh_calls.fetch_add(1, Ordering::SeqCst);
-                RefreshOutcome {
-                    credentials: Some(self.successor.clone()),
-                    error: None,
-                    token_account: None,
-                }
-            })
-        }
-
-        fn fetch_usage<'a>(
-            &'a self,
-            _: &'a str,
-        ) -> OAuthFuture<'a, Result<Value, UsageFetchError>> {
-            Box::pin(async { panic!("activation validation must not fetch usage") })
-        }
-    }
-
-    struct ImmediateLease;
-    struct ImmediateLeaseGuard;
-    impl RefreshLeaseProvider for ImmediateLease {
-        fn acquire<'a>(
-            &'a self,
-            _: &'a str,
-        ) -> OAuthFuture<'a, Result<Box<dyn LeaseGuard>, String>> {
-            Box::pin(async { Ok(Box::new(ImmediateLeaseGuard) as Box<dyn LeaseGuard>) })
-        }
-    }
-
-    struct ActivationClock(f64);
-    impl Clock for ActivationClock {
-        fn now_ms(&self) -> f64 {
-            self.0
-        }
-    }
 
     // -- pick_target ----------------------------------------------------------
 
@@ -2048,59 +1381,6 @@ mod tests {
             usage_status: UsageStatus::Ok,
             ..Default::default()
         }
-    }
-
-    #[test]
-    fn active_usage_provenance_rejects_a_conflicting_uuid() {
-        let account = Account {
-            uuid: Some("slot-uuid".into()),
-            organization_uuid: Some("org-1".into()),
-            ..active_account(1)
-        };
-        let resolved = oauth::TokenAccount {
-            uuid: "foreign-uuid".into(),
-            email: Some(account.email.clone()),
-            organization_uuid: Some("org-1".into()),
-        };
-
-        assert_eq!(
-            active_usage_provenance(&account, &resolved),
-            ProvenanceVerdict::Foreign
-        );
-    }
-
-    #[test]
-    fn active_usage_provenance_accepts_uuid_with_a_partial_profile() {
-        let account = Account {
-            uuid: Some("slot-uuid".into()),
-            organization_uuid: Some("org-1".into()),
-            ..active_account(1)
-        };
-        let resolved = oauth::TokenAccount {
-            uuid: "slot-uuid".into(),
-            email: None,
-            organization_uuid: None,
-        };
-
-        assert_eq!(
-            active_usage_provenance(&account, &resolved),
-            ProvenanceVerdict::Owned
-        );
-    }
-
-    #[test]
-    fn active_usage_provenance_is_unresolved_without_uuid_or_complete_identity() {
-        let account = active_account(1);
-        let resolved = oauth::TokenAccount {
-            uuid: "resolved-uuid".into(),
-            email: Some(account.email.clone()),
-            organization_uuid: None,
-        };
-
-        assert_eq!(
-            active_usage_provenance(&account, &resolved),
-            ProvenanceVerdict::Unresolved
-        );
     }
 
     fn disabled_account(number: u32, pct: f64) -> Account {
@@ -2285,7 +1565,7 @@ mod tests {
         assert!(pick_target(&accounts, Strategy::ConsumeFirst).is_none());
     }
 
-    // -- switch_to --------------------------------------------------------------
+    // -- test environment ---------------------------------------------------------
     //
     // These exercise real filesystem state under a temp HOME/CLAUDE_CONFIG_DIR,
     // the same isolation pattern `paths.rs` and `credentials.rs` already use.
@@ -2396,270 +1676,7 @@ mod tests {
         .unwrap();
     }
 
-    fn bravo_target() -> Account {
-        Account {
-            number: 2,
-            email: "bravo@example.com".to_string(),
-            ..Default::default()
-        }
-    }
-
-    fn bravo_identity() -> AccountIdentity {
-        let account = read_accounts()
-            .unwrap()
-            .into_iter()
-            .find(|account| account.number == 2)
-            .unwrap();
-        AccountIdentity {
-            number: "2".to_string(),
-            email: account.email.clone(),
-            stable_key: account.stable_key(),
-        }
-    }
-
-    #[test]
-    fn proven_foreign_live_credential_is_never_routed_into_the_configured_slot() {
-        let _env = setup_env();
-        seed_two_accounts();
-        let mut data = read_sequence_data().unwrap();
-        data.get_mut("accounts")
-            .and_then(Value::as_object_mut)
-            .and_then(|accounts| accounts.get_mut("2"))
-            .and_then(Value::as_object_mut)
-            .unwrap()
-            .insert("uuid".to_string(), Value::String("uuid-bravo".to_string()));
-        let mut store = CredentialStore::new(GuiStoreHost);
-        let live = store.read_active_credentials().value.unwrap();
-        let provenance = LiveProvenance {
-            live: live.clone(),
-            resolved: Some(oauth::TokenAccount {
-                uuid: "uuid-bravo".to_string(),
-                email: Some("bravo@example.com".to_string()),
-                organization_uuid: Some("org-2".to_string()),
-            }),
-        };
-
-        assert!(matches!(
-            classify_outgoing_destination(
-                &mut store,
-                &mut data,
-                "1",
-                "alpha@example.com",
-                &live,
-                &provenance,
-            ),
-            crate::switch_transaction::OutgoingDestination::Unclaimed
-        ));
-    }
-
-    #[test]
-    fn unresolved_or_moved_live_credential_keeps_cswaps_fail_open_backup_rule() {
-        let _env = setup_env();
-        seed_two_accounts();
-        let mut data = read_sequence_data().unwrap();
-        let mut store = CredentialStore::new(GuiStoreHost);
-        let live = store.read_active_credentials().value.unwrap();
-        for provenance in [
-            LiveProvenance::default(),
-            LiveProvenance {
-                live: "older-prefetch-generation".to_string(),
-                resolved: Some(oauth::TokenAccount {
-                    uuid: "foreign".to_string(),
-                    email: Some("foreign@example.com".to_string()),
-                    organization_uuid: Some("foreign-org".to_string()),
-                }),
-            },
-        ] {
-            assert!(matches!(
-                classify_outgoing_destination(
-                    &mut store,
-                    &mut data,
-                    "1",
-                    "alpha@example.com",
-                    &live,
-                    &provenance,
-                ),
-                crate::switch_transaction::OutgoingDestination::Managed { .. }
-            ));
-        }
-    }
-
-    #[test]
-    fn recycled_email_with_conflicting_uuid_is_treated_as_alien_not_own() {
-        let _env = setup_env();
-        seed_two_accounts();
-        let mut data = read_sequence_data().unwrap();
-        data.get_mut("accounts")
-            .and_then(Value::as_object_mut)
-            .and_then(|accounts| accounts.get_mut("1"))
-            .and_then(Value::as_object_mut)
-            .unwrap()
-            .insert(
-                "uuid".to_string(),
-                Value::String("uuid-original".to_string()),
-            );
-        let mut store = CredentialStore::new(GuiStoreHost);
-        let live = store.read_active_credentials().value.unwrap();
-        let provenance = LiveProvenance {
-            live: live.clone(),
-            resolved: Some(oauth::TokenAccount {
-                uuid: "uuid-recycled".to_string(),
-                email: Some("alpha@example.com".to_string()),
-                organization_uuid: Some("org-1".to_string()),
-            }),
-        };
-        assert!(matches!(
-            classify_outgoing_destination(
-                &mut store,
-                &mut data,
-                "1",
-                "alpha@example.com",
-                &live,
-                &provenance,
-            ),
-            crate::switch_transaction::OutgoingDestination::Unclaimed
-        ));
-    }
-
-    #[test]
-    fn wiped_live_tokens_are_not_allowed_to_replace_a_slot_backup() {
-        let _env = setup_env();
-        seed_two_accounts();
-        let wiped = serde_json::json!({"claudeAiOauth": {
-            "accessToken": "",
-            "refreshToken": "",
-            "expiresAt": 1
-        }})
-        .to_string();
-        let mut data = read_sequence_data().unwrap();
-        let mut store = CredentialStore::new(GuiStoreHost);
-        assert!(matches!(
-            classify_outgoing_destination(
-                &mut store,
-                &mut data,
-                "1",
-                "alpha@example.com",
-                &wiped,
-                &LiveProvenance::default(),
-            ),
-            crate::switch_transaction::OutgoingDestination::Unclaimed
-        ));
-    }
-
-    // -- lock ordering: Claude Code's locks, then ours, always ------------------
-
-    // -- read_accounts ----------------------------------------------------------
-
-    #[test]
-    fn read_accounts_marks_the_live_login_as_active() {
-        let _env = setup_env();
-        seed_two_accounts();
-
-        let accounts = read_accounts().unwrap();
-        assert_eq!(accounts.len(), 2);
-        let alpha = accounts.iter().find(|a| a.number == 1).unwrap();
-        let bravo = accounts.iter().find(|a| a.number == 2).unwrap();
-        assert!(alpha.active);
-        assert!(!bravo.active);
-        assert_eq!(alpha.organization_uuid.as_deref(), Some("org-1"));
-        assert_eq!(alpha.is_organization, Some(true));
-    }
-
-    #[test]
-    fn read_accounts_is_empty_when_no_registry_exists() {
-        let _env = setup_env();
-        assert!(read_accounts().unwrap().is_empty());
-    }
-
-    // -- next_free_slot -----------------------------------------------------
-    // Pure function, no filesystem/env involved.
-
-    #[test]
-    fn next_free_slot_is_one_when_no_accounts_exist() {
-        let data = Map::new();
-        assert_eq!(next_free_slot(&data), 1);
-    }
-
-    #[test]
-    fn next_free_slot_reuses_a_freed_slot_instead_of_only_ever_growing() {
-        let data = serde_json::json!({
-            "accounts": {"1": {}, "3": {}}
-        })
-        .as_object()
-        .unwrap()
-        .clone();
-        // Slot 2 was freed (never allocated between 1 and 3) and must be
-        // reused rather than skipped straight to 4.
-        assert_eq!(next_free_slot(&data), 2);
-    }
-
-    #[test]
-    fn next_free_slot_grows_past_the_highest_slot_when_none_are_free() {
-        let data = serde_json::json!({
-            "accounts": {"1": {}, "2": {}}
-        })
-        .as_object()
-        .unwrap()
-        .clone();
-        assert_eq!(next_free_slot(&data), 3);
-    }
-
-    // -- add_current_account --------------------------------------------------
-    //
-    // Every test below injects a resolver instead of calling the public
-    // `add_current_account`/`add_token` (which default to
-    // `default_identity_resolver`, a REAL network call): this module must
-    // never make a network call in a test. `no_identity` stands in for a
-    // resolver that couldn't determine anything (offline, or — for the
-    // pre-existing tests below that predate identity resolution — simply
-    // "no resolver was wired up yet"), which is also what makes those
-    // pre-existing tests keep exercising exactly the fingerprint-only
-    // behavior they always did.
-
-    fn oauth_creds_json(refresh_token: &str, access_token: &str) -> String {
-        serde_json::json!({
-            "claudeAiOauth": {
-                "accessToken": access_token,
-                "refreshToken": refresh_token,
-                "scopes": ["user:inference"],
-            }
-        })
-        .to_string()
-    }
-
-    fn expiring_oauth_creds_json(
-        refresh_token: &str,
-        access_token: &str,
-        expires_at: f64,
-    ) -> String {
-        serde_json::json!({
-            "claudeAiOauth": {
-                "accessToken": access_token,
-                "refreshToken": refresh_token,
-                "expiresAt": expires_at,
-                "scopes": ["user:inference"],
-            }
-        })
-        .to_string()
-    }
-
-    fn no_identity(_access_token: &str) -> Option<oauth::TokenAccount> {
-        None
-    }
-
-    // -- add_current_account: identity-based duplicate detection (the fix) ----
-    //
-    // These reproduce the confirmed real bug and lock in the fix's exact
-    // priority order: account `uuid` first, then `organizationUuid` + email,
-    // then the credential fingerprint only as a last resort — plus the
-    // "advisory, never block on a network failure" degrade path.
-
-    // -- add_token ------------------------------------------------------------
-
-    // -- add_oauth_credential ---------------------------------------------------
-    //
-    // Same "inject a resolver, never touch the network" discipline as the
-    // `add_current_account`/`add_token` tests above.
+    // -- registry mutations ------------------------------------------------------
 
     #[test]
     fn registry_mutations_refuse_pending_switch_recovery() {
@@ -2959,5 +1976,56 @@ mod tests {
         assert_eq!(sweep_orphaned_slot_files().unwrap(), 0);
         let kept = store.read_account_credentials("1", "alpha@example.com");
         assert_eq!(kept, "only-copy");
+    }
+
+    #[test]
+    fn next_free_slot_grows_past_the_highest_slot_when_none_are_free() {
+        let data = serde_json::json!({
+            "accounts": {"1": {}, "2": {}}
+        })
+        .as_object()
+        .unwrap()
+        .clone();
+        assert_eq!(next_free_slot(&data), 3);
+    }
+
+    #[test]
+    fn next_free_slot_reuses_a_freed_slot_instead_of_only_ever_growing() {
+        let data = serde_json::json!({
+            "accounts": {"1": {}, "3": {}}
+        })
+        .as_object()
+        .unwrap()
+        .clone();
+        // Slot 2 was freed (never allocated between 1 and 3) and must be
+        // reused rather than skipped straight to 4.
+        assert_eq!(next_free_slot(&data), 2);
+    }
+
+    #[test]
+    fn next_free_slot_is_one_when_no_accounts_exist() {
+        let data = Map::new();
+        assert_eq!(next_free_slot(&data), 1);
+    }
+
+    #[test]
+    fn read_accounts_is_empty_when_no_registry_exists() {
+        let _env = setup_env();
+        assert!(read_accounts().unwrap().is_empty());
+    }
+
+    #[test]
+    fn read_accounts_marks_the_live_login_as_active() {
+        let _env = setup_env();
+        seed_two_accounts();
+
+        let accounts = read_accounts().unwrap();
+        assert_eq!(accounts.len(), 2);
+        let alpha = accounts.iter().find(|a| a.number == 1).unwrap();
+        let bravo = accounts.iter().find(|a| a.number == 2).unwrap();
+        assert!(alpha.active);
+        assert!(!bravo.active);
+        assert_eq!(alpha.organization_uuid.as_deref(), Some("org-1"));
+        assert_eq!(alpha.is_organization, Some(true));
     }
 }

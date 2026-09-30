@@ -26,7 +26,6 @@ pub mod migration;
 pub mod model;
 pub mod oauth;
 pub mod oauth_quarantine;
-pub mod oauth_refresh;
 pub mod paths;
 pub mod poll_budget;
 pub mod poller;

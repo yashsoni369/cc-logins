@@ -122,16 +122,6 @@ impl From<SwitchError> for IpcError {
                 crate::switch_transaction::TransactionError::RollbackIncomplete { .. },
             ) => IpcError::RecoveryRequired(e.to_string()),
             SwitchError::TargetGenerationChanged(_) => IpcError::Busy(e.to_string()),
-            SwitchError::Refresh(crate::oauth_refresh::RefreshCoordinatorError::Lease(_)) => {
-                IpcError::Busy(e.to_string())
-            }
-            SwitchError::Refresh(
-                crate::oauth_refresh::RefreshCoordinatorError::ReloginRequired,
-            ) => IpcError::ReloginRequired(e.to_string()),
-            SwitchError::Refresh(
-                crate::oauth_refresh::RefreshCoordinatorError::RefreshFailed(_)
-                | crate::oauth_refresh::RefreshCoordinatorError::Usage(_),
-            ) => IpcError::Unreachable(e.to_string()),
             // Credential-store problems: the store itself is unreadable,
             // missing, empty, or otherwise not trustworthy — as distinct
             // from a business-rule refusal below, where the store is fine
@@ -152,12 +142,7 @@ impl From<SwitchError> for IpcError {
             | SwitchError::Stash(_)
             | SwitchError::NoLiveCredential
             | SwitchError::InvalidCredential(_)
-            | SwitchError::RemovedWithLeftovers(..)
-            | SwitchError::Refresh(
-                crate::oauth_refresh::RefreshCoordinatorError::Missing
-                | crate::oauth_refresh::RefreshCoordinatorError::PersistenceFailed(_)
-                | crate::oauth_refresh::RefreshCoordinatorError::InvalidCredential,
-            ) => IpcError::Credential(e.to_string()),
+            | SwitchError::RemovedWithLeftovers(..) => IpcError::Credential(e.to_string()),
             // Business-rule refusals: the requested mutation is invalid
             // given the current state, not an I/O or credential-store
             // failure. Each gets its own structural kind so the UI can
@@ -1910,21 +1895,6 @@ mod tests {
         };
         let mapped: IpcError = SwitchError::Locking(underlying).into();
         assert!(matches!(mapped, IpcError::Busy(_)), "got {mapped:?}");
-    }
-
-    #[test]
-    fn manual_relogin_required_is_a_structured_ipc_error() {
-        let mapped: IpcError =
-            SwitchError::Refresh(crate::oauth_refresh::RefreshCoordinatorError::ReloginRequired)
-                .into();
-        assert!(matches!(mapped, IpcError::ReloginRequired(_)));
-        assert_eq!(
-            serde_json::to_value(mapped).unwrap(),
-            serde_json::json!({
-                "kind": "reloginRequired",
-                "detail": "account requires re-login"
-            })
-        );
     }
 
     #[test]
