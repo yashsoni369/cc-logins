@@ -409,7 +409,7 @@ export default function SettingsScreen({
           <div className="field">
             <div className="k">
               When an account needs a fresh sign-in
-              <i>Its saved login was rejected.</i>
+              <i>Its Claude Code folder is signed out.</i>
             </div>
             <div className="v">
               <Toggle
@@ -522,14 +522,14 @@ export default function SettingsScreen({
 
           <div className="field">
             <div className="k">
-              Account store
-              <i>Where your saved logins are kept.</i>
+              Account folders
+              <i>Where each account's Claude Code login lives.</i>
             </div>
             <div className="v">
               <span style={{ fontSize: 12, color: "var(--muted)" }}>
-                This app keeps your accounts in its own folder, separate from any other tool&apos;s, so a fault on
-                either side can only affect its own store. Switching installs the chosen login into Claude Code&apos;s
-                official location, the only thing anything else here touches. Exact paths are under About.
+                Each account signs in once, through Claude Code itself, into its own folder under ~/.cc-logins/profiles
+                (the account signed in to your usual ~/.claude stays there). This app keeps no copy of any login and never
+                refreshes one; picking an account only changes which folder new sessions use.
               </span>
             </div>
           </div>

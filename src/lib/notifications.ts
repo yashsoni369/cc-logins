@@ -86,7 +86,7 @@ export function quotaNotices(
       if (prev.relogin.has(number)) continue;
       out.push({
         title: `${nameOf(number)} needs a fresh sign-in`,
-        body: "Its saved login was rejected. Open CC Logins and choose Re-sign in.",
+        body: "Its Claude Code folder is signed out. Open CC Logins and choose Re-sign in.",
       });
     }
   }
