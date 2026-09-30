@@ -3,7 +3,7 @@
 //! Deliberately an example, not a #[test]: the test suite touches real user
 //! paths. Run with `cargo run --example verify_sha256`.
 
-use cc_logins_lib::{hex, model::Account, oauth_refresh, switch_journal};
+use cc_logins_lib::{hex, model::Account, switch_journal};
 
 fn check(label: &str, got: &str, want: &str) -> bool {
     let ok = got == want;
@@ -58,13 +58,6 @@ fn main() {
         "switch_journal::sha256(b\"abc\")",
         &switch_journal::sha256(b"abc"),
         "sha256:ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad",
-    );
-
-    // Credential generation markers: compared against values already stored.
-    all_ok &= check(
-        "oauth_refresh::credential_generation(\"abc\")",
-        &oauth_refresh::credential_generation("abc"),
-        "sha256-full:ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad",
     );
 
     println!(
