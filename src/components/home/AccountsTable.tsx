@@ -7,7 +7,16 @@ import MenuButton from "../ui/MenuButton";
 import { useClockFormat } from "../../lib/clockFormat";
 import { weeklyPaceMark, type Projection } from "../../lib/coverage";
 import { formatClock, formatCountdown } from "../../lib/time";
-import { currentLabel, currentTitle, freshnessLabel, profileProblem, useLabel } from "../../lib/sessionCopy";
+import {
+  currentLabel,
+  currentTitle,
+  freshnessLabel,
+  MOVE_TITLE,
+  needsMove,
+  profileProblem,
+  removeBlocked,
+  useLabel,
+} from "../../lib/sessionCopy";
 import {
   ageLabel,
   bindingUtilisation,
@@ -155,6 +164,11 @@ export default function AccountsTable(props: AccountsTableProps) {
                           </span>
                         )}
                         {problem && <span className="pill danger">{problem}</span>}
+                        {needsMove(account) && (
+                          <span className="pill" title={MOVE_TITLE}>
+                            sign in to move
+                          </span>
+                        )}
                         {isBest && <span className="pill best">best next</span>}
                         {heldOut && <span className="pill">held out</span>}
                         {mismatch && <span className="pill danger">credential mismatch</span>}
@@ -219,6 +233,20 @@ export default function AccountsTable(props: AccountsTableProps) {
                       >
                         {props.pendingReloginAccount === account.number ? "Signing in…" : "Re-login"}
                       </button>
+                    ) : needsMove(account) ? (
+                      <button
+                        type="button"
+                        className="btn"
+                        title={MOVE_TITLE}
+                        disabled={mutationInFlight}
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          props.onRelogin(account.number);
+                        }}
+                        onKeyDown={(e) => e.stopPropagation()}
+                      >
+                        {props.pendingReloginAccount === account.number ? "Signing in…" : "Move"}
+                      </button>
                     ) : !account.active && !heldOut ? (
                       <button
                         type="button"
@@ -250,8 +278,8 @@ export default function AccountsTable(props: AccountsTableProps) {
                           id: "remove",
                           label: "Remove…",
                           tone: "danger",
-                          disabled: mutationInFlight || account.active,
-                          title: account.active ? "Switch to another account before removing this one." : undefined,
+                          disabled: mutationInFlight || removeBlocked(account),
+                          title: removeBlocked(account) ? "Switch to another account before removing this one." : undefined,
                           onSelect: () => props.onRemove(account.number),
                         },
                       ]}

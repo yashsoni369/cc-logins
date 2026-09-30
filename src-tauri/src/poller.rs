@@ -565,8 +565,17 @@ pub fn decide(
         .collect();
 
     // Rule 3: hysteresis pre-filter, scoped to `last_switch_from` only.
+    // Once any account has its own folder, auto-switch only ever selects a
+    // ready profile account; it never swaps a v0.3 account in again.
+    let profiles_in_use = all_accounts.iter().any(|a| a.profile.is_some());
     let candidates: Vec<Account> = all_accounts
         .iter()
+        .filter(|a| {
+            !profiles_in_use
+                || a.profile
+                    .as_ref()
+                    .is_some_and(|p| p.state == crate::model::ProfileState::Ready)
+        })
         .filter(|a| hysteresis_ok(a, state, config))
         .cloned()
         .collect();

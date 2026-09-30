@@ -467,7 +467,8 @@ pub async fn add_current_account(
     alias: Option<String>,
 ) -> IpcResult<Snapshot> {
     refuse_if_recovery_required()?;
-    switcher::add_current_account(alias.as_deref())?;
+    let setting = claude_binary_setting(&state);
+    off_runtime(move || adopt_default_login(setting, alias)).await??;
     let snap = snapshot_uncached(&state).await?;
     crate::poller::publish_snapshot(&app, &snap);
     Ok(snap)
@@ -591,6 +592,35 @@ pub async fn relogin_account(
         crate::poller::publish_snapshot(&app, &snap);
         return Ok(snap);
     }
+    // A v0.3 account: sign in once into its own folder. Its stored copy is
+    // deleted only after the new login is verified as this same account.
+    if target.profile.is_none() {
+        let dir = off_runtime(new_profile_dir).await??;
+        let signed_in = match login::sign_in_to_profile(setting, dir.clone()).await {
+            Ok(signed_in) => signed_in,
+            Err(error) => {
+                discard_new_profile_dir(&dir);
+                return Err(error.into());
+            }
+        };
+        if !switcher::folder_matches(&target, &signed_in.identity) {
+            discard_new_profile_dir(&dir);
+            return Err(IpcError::InvalidInput(format!(
+                "That signed in as a different account. Sign in as {} to move this one.",
+                crate::model::mask_email(&target.email)
+            )));
+        }
+        let new = crate::migration::new_profile(&signed_in.identity, Some(dir));
+        off_runtime(move || crate::profile_registry::register(&new)).await??;
+        off_runtime(|| {
+            clean_up_moved_vault_copies();
+            refresh_claude_command();
+        })
+        .await?;
+        let snap = snapshot_uncached(&state).await?;
+        crate::poller::publish_snapshot(&app, &snap);
+        return Ok(snap);
+    }
     let outcome = login::interactive_login(setting).await?;
     refuse_if_recovery_required()?;
     switcher::replace_oauth_credential(
@@ -693,7 +723,11 @@ pub async fn remove_account(
     account_number: u32,
 ) -> IpcResult<Snapshot> {
     refuse_if_recovery_required()?;
-    let task = move || switcher::remove_account(account_number);
+    let task = move || {
+        let result = switcher::remove_account(account_number);
+        refresh_claude_command();
+        result
+    };
     if let Err(error) = off_runtime(task).await? {
         if matches!(error, SwitchError::RemovedWithLeftovers(..)) {
             // The registry did change: show that before reporting the rest.
@@ -1080,6 +1114,97 @@ fn cli_status_now(launchers: Vec<CliLauncher>) -> CliStatus {
         bin_dir: bin_dir.display().to_string(),
         command_path: command.display().to_string(),
         launchers,
+    }
+}
+
+fn claude_binary_setting(state: &AppState) -> Option<std::path::PathBuf> {
+    state
+        .settings
+        .snapshot()
+        .settings
+        .claude_binary_path
+        .clone()
+        .map(std::path::PathBuf::from)
+}
+
+/// Register the login already signed in to Claude Code's default folder as
+/// the default profile, after `claude auth status` confirms it. Nothing is
+/// copied: the login stays where Claude Code keeps it. A v0.3 record for the
+/// same account is upgraded in place and its stored copy deleted.
+pub(crate) fn adopt_default_login(
+    claude_setting: Option<std::path::PathBuf>,
+    alias: Option<String>,
+) -> IpcResult<u32> {
+    let global = crate::paths::default_global_config_path();
+    let identity = crate::auth_status::read_folder_identity(&global).ok_or_else(|| {
+        IpcError::InvalidInput(
+            "Claude Code isn't signed in on this computer. Add the account with Sign in instead."
+                .to_string(),
+        )
+    })?;
+    let claude = crate::claude_cli::resolve(claude_setting)
+        .map_err(|not_found| IpcError::PrerequisiteMissing(not_found.to_string()))?;
+    let status = crate::auth_status::check(&claude.path, None)
+        .map_err(|error| IpcError::Internal(error.to_string()))?;
+    let confirmed = status.is_claude_account()
+        && status
+            .email
+            .as_deref()
+            .is_some_and(|email| email.eq_ignore_ascii_case(&identity.email));
+    if !confirmed {
+        return Err(IpcError::InvalidInput(
+            "Claude Code's default login couldn't be confirmed. Run claude once, then try again."
+                .to_string(),
+        ));
+    }
+    let mut new = crate::migration::new_profile(&identity, None);
+    new.alias = alias;
+    let slot = crate::profile_registry::register(&new)?;
+    clean_up_moved_vault_copies();
+    refresh_claude_command();
+    Ok(slot)
+}
+
+/// Delete the v0.3 stored copies of accounts that have moved to a folder
+/// (flagged `legacyVault` when their record was upgraded). A failure keeps
+/// the flag, so the next start tries again.
+pub(crate) fn clean_up_moved_vault_copies() {
+    let data = switcher::read_sequence_data().unwrap_or_default();
+    for (number, email) in crate::migration::vault_cleanup_due(&data) {
+        match switcher::delete_vault_copy(number, &email) {
+            Ok(()) => {
+                let cleared = crate::profile_registry::edit(|data| {
+                    crate::migration::set_legacy_vault(data, number, false);
+                    Ok(())
+                });
+                if let Err(error) = cleared {
+                    log::warn!("vault copy of account {number} deleted; flag not cleared: {error}");
+                }
+            }
+            Err(error) => log::warn!("vault copy of account {number} not deleted yet: {error}"),
+        }
+    }
+}
+
+/// Startup: finish what migration can do without the user. Adopts the
+/// default login when a v0.3 record matches it, then retries any pending
+/// vault deletions. Never runs while an interrupted v0.3 switch is still
+/// being recovered, since that touches the same files.
+pub(crate) fn startup_migration(claude_setting: Option<std::path::PathBuf>) {
+    if crate::switch_transaction::recovery_requirement().is_some() {
+        return;
+    }
+    let data = switcher::read_sequence_data().unwrap_or_default();
+    let global = crate::paths::default_global_config_path();
+    let candidate = crate::auth_status::read_folder_identity(&global)
+        .and_then(|identity| crate::migration::default_adoption_candidate(&data, &identity));
+    if candidate.is_some() {
+        match adopt_default_login(claude_setting, None) {
+            Ok(slot) => log::info!("account {slot} now uses Claude Code's default folder"),
+            Err(error) => log::info!("default login not adopted yet: {error:?}"),
+        }
+    } else {
+        clean_up_moved_vault_copies();
     }
 }
 

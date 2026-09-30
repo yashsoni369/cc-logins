@@ -22,6 +22,7 @@ pub mod linux;
 pub mod locking;
 pub mod login;
 pub mod migrate;
+pub mod migration;
 pub mod model;
 pub mod oauth;
 pub mod oauth_quarantine;
@@ -388,6 +389,20 @@ pub fn run() {
             // Keep an installed `claude` command in step with this build, so
             // an app update also updates the shim. Never installs it.
             tauri::async_runtime::spawn_blocking(commands::refresh_claude_command);
+
+            // Move what can move without the user (the default login), and
+            // retry deleting stored copies of accounts that already moved.
+            {
+                let setting = app
+                    .state::<commands::AppState>()
+                    .settings
+                    .snapshot()
+                    .settings
+                    .claude_binary_path
+                    .clone()
+                    .map(std::path::PathBuf::from);
+                tauri::async_runtime::spawn_blocking(move || commands::startup_migration(setting));
+            }
 
             // A hard process termination leaves Claude Code's proper-lockfile
             // directories behind. Claude Code deliberately protects a fresh

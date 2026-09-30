@@ -3035,8 +3035,19 @@ fn remove_account_with_timeout(number: u32, timeout: Duration) -> Result<(), Swi
         return Err(SwitchError::UnknownAccount(num));
     };
 
-    if current_account_number(&data).as_deref() == Some(num.as_str()) {
+    // A profile account can always be removed: nothing live depends on this
+    // app for it. Its folder, and the history in it, stays on disk.
+    let is_profile = data
+        .get("accounts")
+        .and_then(Value::as_object)
+        .and_then(|accounts| accounts.get(&num))
+        .and_then(Value::as_object)
+        .is_some_and(|record| record.contains_key("configDir"));
+    if !is_profile && current_account_number(&data).as_deref() == Some(num.as_str()) {
         return Err(SwitchError::CannotRemoveActive(num));
+    }
+    if crate::profile_registry::selected_number(&data) == Some(number) {
+        data.remove("selectedAccountNumber");
     }
 
     // 1. The registry, durably, so nothing references the files below.
@@ -3073,6 +3084,18 @@ fn remove_account_with_timeout(number: u32, timeout: Duration) -> Result<(), Swi
         let detail = failures.join("; ");
         Err(SwitchError::RemovedWithLeftovers(num, detail))
     }
+}
+
+/// Delete a moved account's v0.3 vault copy (credential backup and config
+/// backup). Called only after its token-free login has been verified and
+/// registered; the registry record itself stays.
+pub(crate) fn delete_vault_copy(number: u32, email: &str) -> Result<(), SwitchError> {
+    let _lock = crate::locking::acquire_or_err(vault_lock_path(), crate::locking::DEFAULT_TIMEOUT)?;
+    let num = number.to_string();
+    let mut store = CredentialStore::new(GuiStoreHost);
+    store.delete_account_credentials_strict(&num, email)?;
+    remove_file_if_present(&account_config_path(&num, email))?;
+    Ok(())
 }
 
 /// `remove_file` that treats an already-absent file as success.

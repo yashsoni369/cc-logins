@@ -188,6 +188,7 @@ pub fn apply_registration(
         }
     }
 
+    let mut upgrading_v03 = false;
     let slot = match existing {
         Some(number) => {
             let record = data["accounts"][number.to_string()]
@@ -196,6 +197,7 @@ pub fn apply_registration(
             if record.contains_key(CONFIG_DIR) && !same_folder(record, new.config_dir.as_deref()) {
                 return Err(RegisterError::AlreadyRegistered(number));
             }
+            upgrading_v03 = !record.contains_key(CONFIG_DIR);
             number
         }
         None => {
@@ -246,6 +248,11 @@ pub fn apply_registration(
         record.insert(LAUNCHER.into(), Value::String(slug));
     }
     record.insert(PROFILE_STATE.into(), text(ProfileState::Ready.as_str()));
+    // A v0.3 record's stored login is now redundant. Flag it in this same
+    // write, so a crash before the deletion still leaves a record of it.
+    if upgrading_v03 {
+        record.insert(crate::migration::LEGACY_VAULT.into(), Value::Bool(true));
+    }
     record.insert(
         "lastVerifiedAt".into(),
         Value::String(chrono::Utc::now().to_rfc3339()),
@@ -303,7 +310,7 @@ pub fn apply_state(data: &mut Map<String, Value>, number: u32, state: ProfileSta
 
 /// Load, change and save the registry under the vault lock, then mirror it
 /// into `shim.json`.
-fn edit<T>(
+pub(crate) fn edit<T>(
     change: impl FnOnce(&mut Map<String, Value>) -> Result<T, SwitchError>,
 ) -> Result<T, SwitchError> {
     let _lock = crate::locking::acquire_or_err(
@@ -395,6 +402,7 @@ mod tests {
         assert_eq!(selected_number(&data), Some(1));
         let record = data["accounts"]["1"].as_object().unwrap();
         assert_eq!(record["configDir"], "/p/1");
+        assert!(record.get("legacyVault").is_none());
         assert_eq!(record["launcher"], "sam");
         assert_eq!(record["profileState"], "ready");
         assert_eq!(data["sequence"], json!([1]));
@@ -425,6 +433,7 @@ mod tests {
         assert_eq!(record["configDir"], Value::Null);
         assert_eq!(record["alias"], "Main");
         assert_eq!(record["launcher"], "main");
+        assert_eq!(record["legacyVault"], true);
         assert_eq!(data["sequence"], json!([3]));
     }
 

@@ -70,6 +70,22 @@ export function freshnessLabel(account: Account, formatAge: (seconds: number) =>
   return age ? `idle · ${age}` : "idle";
 }
 
+/**
+ * A v0.3 account: its login is a stored copy. It moves by signing in once
+ * into its own folder; until then it cannot be used for new sessions.
+ */
+export function needsMove(account: Account): boolean {
+  return !isProfile(account);
+}
+
+export const MOVE_TITLE =
+  "Sign in once so this account gets its own Claude Code folder. Its stored copy is deleted after the sign-in is confirmed.";
+
+/** Removing is refused only for a v0.3 account that is live in Claude Code. */
+export function removeBlocked(account: Account): boolean {
+  return account.active && !isProfile(account);
+}
+
 /** Badge for a profile account that cannot start sessions right now. */
 export function profileProblem(account: Account): string | null {
   switch (account.profile?.state) {

@@ -72,6 +72,11 @@ const snapshot: Snapshot = {
   ],
 };
 
+// v0.4 accounts have their own Claude Code folder.
+for (const account of snapshot.environments[0]!.accounts) {
+  account.profile = { isDefault: account.number === 1, launcher: account.alias?.toLowerCase(), state: "ready" };
+}
+
 function props(overrides: Partial<HomeScreenProps> = {}): HomeScreenProps {
   return {
     snapshot,
@@ -195,9 +200,22 @@ describe("Home accounts table", () => {
   it("switches from a row without opening the drawer", () => {
     const p = props();
     render(<HomeScreen {...p} />);
-    fireEvent.click(within(screen.getByRole("button", { name: "Beta — details" })).getByRole("button", { name: "Switch" }));
+    fireEvent.click(within(screen.getByRole("button", { name: "Beta — details" })).getByRole("button", { name: "Use" }));
     expect(p.onSwitch).toHaveBeenCalledWith(2);
     expect(p.onDrawerChange).not.toHaveBeenCalled();
+  });
+
+  it("offers Move, never Switch, for an account still held the v0.3 way", () => {
+    const legacy: Snapshot = JSON.parse(JSON.stringify(snapshot));
+    delete legacy.environments[0]!.accounts[1]!.profile;
+    const p = props({ snapshot: legacy });
+    render(<HomeScreen {...p} />);
+    const row = screen.getByRole("button", { name: "Beta — details" });
+    expect(within(row).getByText("sign in to move")).toBeInTheDocument();
+    expect(within(row).queryByRole("button", { name: "Use" })).not.toBeInTheDocument();
+    fireEvent.click(within(row).getByRole("button", { name: "Move" }));
+    expect(p.onRelogin).toHaveBeenCalledWith(2);
+    expect(p.onSwitch).not.toHaveBeenCalled();
   });
 
   it("offers Re-login instead of Switch for a rejected login, and never says expired", () => {
@@ -221,8 +239,16 @@ describe("Home accounts table", () => {
     expect(p.onReorder).toHaveBeenCalledWith([2, 1, 3]);
   });
 
-  it("does not offer to remove the account in use", () => {
+  it("lets a profile account be removed even while new sessions use it", () => {
     render(<HomeScreen {...props()} />);
+    fireEvent.click(screen.getByRole("button", { name: "More actions for Alpha" }));
+    expect(screen.getByRole("menuitem", { name: "Remove…" })).toBeEnabled();
+  });
+
+  it("does not offer to remove a v0.3 account that is live in Claude Code", () => {
+    const legacy: Snapshot = JSON.parse(JSON.stringify(snapshot));
+    delete legacy.environments[0]!.accounts[0]!.profile;
+    render(<HomeScreen {...props({ snapshot: legacy })} />);
     fireEvent.click(screen.getByRole("button", { name: "More actions for Alpha" }));
     expect(screen.getByRole("menuitem", { name: "Remove…" })).toBeDisabled();
   });

@@ -7,7 +7,7 @@ import Dialog from "../ui/Dialog";
 import { useClockFormat } from "../../lib/clockFormat";
 import { weeklyPaceMark, type Projection } from "../../lib/coverage";
 import { formatClock, formatWhen } from "../../lib/time";
-import { currentLabel, useLongLabel } from "../../lib/sessionCopy";
+import { currentLabel, MOVE_TITLE, needsMove, removeBlocked, useLongLabel } from "../../lib/sessionCopy";
 import { ageLabel, displayName, formatSpend, isEnterprise, maskEmail, type Account } from "../../types";
 
 export type DrawerIntent = "view" | "rename" | "remove";
@@ -260,14 +260,23 @@ function DrawerBody({
         {confirmRemove ? (
           <div className="confirm-remove" role="group" aria-label="Confirm removal">
             <p>
-              Remove <b>{displayName(account)}</b> from CC Logins? Its saved login is deleted from this app&apos;s store.
-              Claude Code&apos;s own login is not touched, and you can add the account again later.
+              {needsMove(account) ? (
+                <>
+                  Remove <b>{displayName(account)}</b> from CC Logins? Its stored login is deleted from this app&apos;s
+                  store. Claude Code&apos;s own login is not touched, and you can add the account again later.
+                </>
+              ) : (
+                <>
+                  Remove <b>{displayName(account)}</b> from CC Logins? Its Claude Code folder, with its sign-in and
+                  session history, stays on disk. You can add the account again later.
+                </>
+              )}
             </p>
             <div className="confirm-actions">
               <button type="button" className="btn" autoFocus onClick={() => setConfirmRemove(false)}>
                 Keep it
               </button>
-              <button type="button" className="btn danger" disabled={mutationInFlight || account.active} onClick={() => void remove()}>
+              <button type="button" className="btn danger" disabled={mutationInFlight || removeBlocked(account)} onClick={() => void remove()}>
                 Remove account
               </button>
             </div>
@@ -277,6 +286,10 @@ function DrawerBody({
             {needsRelogin ? (
               <button type="button" className="btn primary" disabled={mutationInFlight} onClick={() => onRelogin(account.number)}>
                 Re-sign in
+              </button>
+            ) : needsMove(account) ? (
+              <button type="button" className="btn primary" title={MOVE_TITLE} disabled={mutationInFlight} onClick={() => onRelogin(account.number)}>
+                Sign in to move
               </button>
             ) : (
               !account.active &&
@@ -293,8 +306,8 @@ function DrawerBody({
             <button
               type="button"
               className="btn ghost danger-text"
-              disabled={mutationInFlight || account.active}
-              title={account.active ? "Switch to another account before removing this one." : undefined}
+              disabled={mutationInFlight || removeBlocked(account)}
+              title={removeBlocked(account) ? "Switch to another account before removing this one." : undefined}
               onClick={() => setConfirmRemove(true)}
             >
               Remove…
