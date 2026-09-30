@@ -98,7 +98,18 @@ impl Sandbox {
         for (key, value) in extra_env {
             command.env(key, value);
         }
-        command.output().unwrap()
+        // Tests run in parallel: another test copying a shim while this one
+        // forks can leave the new file briefly open for writing in a child,
+        // and Linux refuses to exec it ("Text file busy"). Retry that only.
+        for _ in 0..50 {
+            match command.output() {
+                Err(error) if error.kind() == std::io::ErrorKind::ExecutableFileBusy => {
+                    std::thread::sleep(std::time::Duration::from_millis(20));
+                }
+                result => return result.unwrap(),
+            }
+        }
+        panic!("shim stayed busy");
     }
 }
 
