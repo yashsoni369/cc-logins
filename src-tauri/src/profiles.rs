@@ -204,6 +204,16 @@ pub fn write_shim_config(path: &Path, config: &ShimConfig) -> std::io::Result<()
     Ok(())
 }
 
+/// Read-modify-write `shim.json`, stamping the current format version.
+pub fn update_shim_config(update: impl FnOnce(&mut ShimConfig)) -> std::io::Result<ShimConfig> {
+    let path = shim_config_path();
+    let mut config = read_shim_config(&path).unwrap_or_default();
+    config.v = crate::shim_core::SHIM_CONFIG_VERSION;
+    update(&mut config);
+    write_shim_config(&path, &config)?;
+    Ok(config)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

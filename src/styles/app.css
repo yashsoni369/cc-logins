@@ -3046,3 +3046,36 @@ table.home-accts tbody tr.acct-row:focus-visible {
     transform: none;
   }
 }
+
+/* Settings › Claude command */
+.cli-status {
+  font-size: 12px;
+  color: var(--muted);
+}
+.cli-warn {
+  color: var(--caution);
+}
+.field .v.cli-row,
+.cli-row {
+  display: flex;
+  flex-direction: row;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+.cli-row code,
+.field .k code {
+  font-family: var(--mono);
+  font-size: 12px;
+}
+.cli-row code {
+  background: var(--raised);
+  border: 1px solid var(--line-soft);
+  border-radius: var(--r);
+  padding: 3px 6px;
+  overflow-wrap: anywhere;
+  min-width: 0;
+}
+.field .v > .btn {
+  align-self: flex-start;
+}

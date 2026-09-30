@@ -11,6 +11,7 @@
 pub mod claude_cli;
 pub mod claude_locks;
 mod claude_resolve;
+pub mod cli_install;
 pub mod commands;
 pub mod credentials;
 pub mod durable_fs;
@@ -164,6 +165,27 @@ fn popover_position(
 /// that no registry slot references, so a recycled slot number never inherits
 /// another account's files. Best-effort and logged; never touches the live
 /// Claude Code login.
+/// Refresh the `claude` shim copies if the user installed the command.
+fn refresh_claude_command() {
+    let bin_dir = paths::cc_logins_bin_dir();
+    let installed = bin_dir
+        .join(cli_install::exe_name(shim_core::SHIM_STEM))
+        .exists();
+    let Some(shim) = cli_install::bundled_shim() else {
+        return;
+    };
+    if !installed {
+        return;
+    }
+    match cli_install::materialize(&bin_dir, &shim, &[]) {
+        Ok(changed) if !changed.written.is_empty() => {
+            log::info!("refreshed {} claude command copies", changed.written.len())
+        }
+        Ok(_) => {}
+        Err(error) => log::warn!("claude command refresh skipped: {error}"),
+    }
+}
+
 fn sweep_orphaned_backups() {
     match switcher::sweep_orphaned_slot_files() {
         Ok(0) => {}
@@ -339,6 +361,9 @@ pub fn run() {
             commands::resume_auto_switch,
             commands::data_locations,
             commands::claude_binary_status,
+            commands::cli_status,
+            commands::install_cli,
+            commands::uninstall_cli,
         ])
         .setup(move |app| {
             let handle = app.handle().clone();
@@ -376,6 +401,10 @@ pub fn run() {
             // Off the UI thread: it waits on the vault lock. After the
             // single-instance check, so a rejected second launch never sweeps.
             tauri::async_runtime::spawn_blocking(sweep_orphaned_backups);
+
+            // Keep an installed `claude` command in step with this build, so
+            // an app update also updates the shim. Never installs it.
+            tauri::async_runtime::spawn_blocking(refresh_claude_command);
 
             // A hard process termination leaves Claude Code's proper-lockfile
             // directories behind. Claude Code deliberately protects a fresh

@@ -6,6 +6,7 @@ import RulePreview from "./settings/RulePreview";
 import Segmented, { type SegOption } from "./ui/Segmented";
 import type { UseUpdateResult } from "../lib/useUpdate";
 import { claudeBinaryStatus, IpcError } from "../lib/api";
+import ClaudeCommandSection from "./settings/ClaudeCommandSection";
 import { ensureNotificationPermission, useAutostart } from "../lib/notifications";
 import { useNow, type ClockFormat } from "../lib/time";
 import { useBurnSamples } from "../lib/useBurnSamples";
@@ -552,6 +553,8 @@ export default function SettingsScreen({
           </div>
         </div>
       </section>
+
+      <ClaudeCommandSection />
 
       <section className="settings-group" aria-labelledby="set-advanced">
         <h2 id="set-advanced">Advanced</h2>

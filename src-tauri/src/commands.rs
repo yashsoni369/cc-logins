@@ -984,6 +984,99 @@ fn claude_binary_status_from(
     }
 }
 
+// ─── the claude command ──────────────────────────────────────────────────────
+// Installing the `claude` shim on PATH. Explicit and reversible; nothing here
+// reads or writes a Claude credential.
+
+/// One `claude-<slug>` launcher, for the settings list.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CliLauncher {
+    pub slug: String,
+    pub account_number: u32,
+    pub command: String,
+}
+
+/// Whether the `claude` command is installed, and where.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CliStatus {
+    pub health: crate::cli_install::CliHealth,
+    /// This build ships the shim. False in development builds, where the
+    /// install button explains instead of failing.
+    pub shim_available: bool,
+    pub bin_dir: String,
+    /// Full path of the `claude` copy, for editor settings that need one.
+    pub command_path: String,
+    pub launchers: Vec<CliLauncher>,
+}
+
+fn cli_status_now(launchers: Vec<CliLauncher>) -> CliStatus {
+    let bin_dir = crate::paths::cc_logins_bin_dir();
+    let command = bin_dir.join(crate::cli_install::exe_name(crate::shim_core::SHIM_STEM));
+    CliStatus {
+        health: crate::cli_install::health(&bin_dir),
+        shim_available: crate::cli_install::bundled_shim().is_some(),
+        bin_dir: bin_dir.display().to_string(),
+        command_path: command.display().to_string(),
+        launchers,
+    }
+}
+
+fn io_internal(error: std::io::Error) -> IpcError {
+    IpcError::Internal(error.to_string())
+}
+
+/// Report whether new terminals get this app's `claude`. Runs the user's
+/// login shell on macOS and Linux, so it is off the async runtime.
+#[tauri::command]
+pub async fn cli_status() -> IpcResult<CliStatus> {
+    off_runtime(|| cli_status_now(Vec::new())).await
+}
+
+/// Copy the shim into `~/.cc-logins/bin` and put that first on `PATH`.
+#[tauri::command]
+pub async fn install_cli(state: tauri::State<'_, AppState>) -> IpcResult<CliStatus> {
+    let claude_binary = state
+        .settings
+        .snapshot()
+        .settings
+        .claude_binary_path
+        .clone()
+        .map(std::path::PathBuf::from);
+    off_runtime(move || install_cli_blocking(claude_binary)).await?
+}
+
+fn install_cli_blocking(claude_binary: Option<std::path::PathBuf>) -> IpcResult<CliStatus> {
+    let shim = crate::cli_install::bundled_shim().ok_or_else(|| {
+        IpcError::PrerequisiteMissing(
+            "This build doesn't include the claude command. Install CC Logins from a              release to use it."
+                .to_string(),
+        )
+    })?;
+    let bin_dir = crate::paths::cc_logins_bin_dir();
+    // The shim reads this before anything else; write it first so the very
+    // first `claude` after install already finds the configured binary.
+    crate::profiles::update_shim_config(|config| config.claude_binary = claude_binary)
+        .map_err(io_internal)?;
+    crate::cli_install::materialize(&bin_dir, &shim, &[]).map_err(io_internal)?;
+    crate::cli_install::install_path(&bin_dir).map_err(io_internal)?;
+    Ok(cli_status_now(Vec::new()))
+}
+
+/// Take the `claude` command off `PATH` and remove the copies. Profile
+/// folders and their history are untouched.
+#[tauri::command]
+pub async fn uninstall_cli() -> IpcResult<CliStatus> {
+    off_runtime(|| {
+        let bin_dir = crate::paths::cc_logins_bin_dir();
+        crate::cli_install::uninstall_path(&bin_dir).map_err(io_internal)?;
+        crate::cli_install::clear_bin_dir(&bin_dir).map_err(io_internal)?;
+        Ok(cli_status_now(Vec::new()))
+    })
+    .await?
+}
+
 // ─── settings ────────────────────────────────────────────────────────────────
 
 const SETTINGS_UPDATED_EVENT: &str = "settings://updated";

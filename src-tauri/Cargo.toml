@@ -90,6 +90,10 @@ windows-sys = { version = "0.61", features = [
   "Win32_Security_Cryptography",
   # The shim: keeps Ctrl+C from killing it while Claude Code runs as its child.
   "Win32_System_Console",
+  # "Install the claude command": the per-user Path registry value, and the
+  # WM_SETTINGCHANGE broadcast that tells Explorer it changed.
+  "Win32_System_Registry",
+  "Win32_UI_WindowsAndMessaging",
 ] }
 
 [dev-dependencies]

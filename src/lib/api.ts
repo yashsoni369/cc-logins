@@ -21,6 +21,7 @@
 import type {
   Account,
   ClaudeBinaryStatus,
+  CliStatus,
   DaemonStatus,
   DataLocations,
   DayStat,
@@ -724,6 +725,32 @@ export async function dataLocations(): Promise<Sourced<DataLocations | null>> {
 export async function claudeBinaryStatus(): Promise<Sourced<ClaudeBinaryStatus | null>> {
   if (!hasBackend()) return { data: null, live: false };
   return { data: await call<ClaudeBinaryStatus>("claude_binary_status"), live: true };
+}
+
+/**
+ * Whether the `claude` command is installed and wins on PATH. A reader, so
+ * it degrades to `null` with no backend. Can take a few seconds on macOS and
+ * Linux, where it asks a fresh login shell.
+ */
+export async function cliStatus(): Promise<Sourced<CliStatus | null>> {
+  if (!hasBackend()) return { data: null, live: false };
+  return { data: await call<CliStatus>("cli_status"), live: true };
+}
+
+/** Install the `claude` command: copy the shim and put it first on PATH. */
+export async function installCli(): Promise<CliStatus> {
+  if (!hasBackend()) {
+    throw new IpcError("internal", "Not running in the desktop app, so nothing can be installed.");
+  }
+  return call<CliStatus>("install_cli");
+}
+
+/** Remove the `claude` command from PATH and delete the copies. */
+export async function uninstallCli(): Promise<CliStatus> {
+  if (!hasBackend()) {
+    throw new IpcError("internal", "Not running in the desktop app, so nothing can be removed.");
+  }
+  return call<CliStatus>("uninstall_cli");
 }
 
 /**

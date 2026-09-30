@@ -434,6 +434,33 @@ export interface DataLocations {
  * `src-tauri/src/commands.rs::claude_binary_status`. Read-only — set the
  * override via `Settings.claudeBinaryPath` instead.
  */
+/**
+ * Whether a new terminal gets this app's `claude` command (the shim that
+ * starts Claude Code on the account picked for new sessions).
+ */
+export type CliHealth =
+  | { state: "notInstalled" }
+  | { state: "installed" }
+  /** Installed, but another `claude` earlier on PATH wins. */
+  | { state: "shadowed"; by: string };
+
+/** A per-account `claude-<slug>` command. */
+export interface CliLauncher {
+  slug: string;
+  accountNumber: number;
+  command: string;
+}
+
+export interface CliStatus {
+  health: CliHealth;
+  /** False in development builds, which do not ship the shim. */
+  shimAvailable: boolean;
+  binDir: string;
+  /** Full path of the `claude` copy, for editor settings that want one. */
+  commandPath: string;
+  launchers: CliLauncher[];
+}
+
 export interface ClaudeBinaryStatus {
   /** Whether a usable binary was found. */
   found: boolean;
