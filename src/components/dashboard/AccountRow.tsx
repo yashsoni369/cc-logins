@@ -182,7 +182,7 @@ export default function AccountRow({
         <Sparkline runs={series?.runs ?? []} last={series?.last ?? null} label={name} />
         <span className="row-meter" style={degraded ? { opacity: 0.55 } : undefined}>
           <UsageMeter pct={binding} />
-          <small>binding</small>
+          <small>limit</small>
         </span>
         {enterprise && spend ? (
           <span className="row-cell" title={formatSpend(spend)}>

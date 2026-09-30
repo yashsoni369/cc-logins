@@ -378,6 +378,13 @@ export interface Settings {
    * Trimmed by the backend; empty commits as null.
    */
   claudeBinaryPath: string | null;
+  /**
+   * Whether meters read as utilisation ("used") or what remains ("left").
+   * Display only: quota state and its colour always follow utilisation, so
+   * flipping this can never make a nearly-full account look calm. Optional
+   * because a pre-0.3 backend does not send it.
+   */
+  displayMode?: "used" | "left";
 }
 
 export interface SettingsSnapshot {

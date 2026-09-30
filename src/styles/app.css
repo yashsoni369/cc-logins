@@ -181,38 +181,6 @@ h3 {
   white-space: nowrap;
 }
 
-/* Quiet Day/Night/System control anchored to the bottom of the sidebar via
-   margin-top: auto (.nav is already a flex column). Chrome, not quota state —
-   uses --muted/--ink/--interact only, same as .navlink above; never
-   --caution/--danger, which are reserved for utilisation. */
-.nav-theme {
-  margin-top: auto;
-  display: flex;
-  gap: 2px;
-  padding: 8px 2px 2px;
-  border-top: 1px solid var(--line-soft);
-}
-.nav-theme-btn {
-  all: unset;
-  box-sizing: border-box;
-  flex: 1;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  padding: 6px 0;
-  border-radius: var(--r);
-  color: var(--muted);
-  cursor: pointer;
-}
-.nav-theme-btn:hover {
-  background: var(--surface);
-  color: var(--ink);
-}
-.nav-theme-btn.on {
-  background: var(--raised);
-  color: var(--ink);
-}
-
 .pane {
   height: 100%;
   min-height: 0;
@@ -343,6 +311,7 @@ table.accts tr.is-active td {
   gap: 9px;
 }
 .track {
+  position: relative;
   width: 92px;
   height: 5px;
   background: var(--raised);
@@ -352,8 +321,12 @@ table.accts tr.is-active td {
 }
 .fill {
   height: 100%;
+  width: 100%;
   background: var(--ok-fill);
   display: block;
+  /* Scaled, not resized (see UsageMeter): the compositor animates it. */
+  transform-origin: left center;
+  transition: transform var(--dur-slow) var(--ease-out), background-color var(--dur-med) linear;
 }
 .fill.caution {
   background: var(--caution-fill);
@@ -916,151 +889,6 @@ hr.rule {
   color: var(--muted);
 }
 
-/* ── capacity ── */
-.cap {
-  display: flex;
-  align-items: flex-end;
-  gap: 14px 32px;
-  flex-wrap: wrap;
-}
-.cap-figure {
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-}
-.cap-figure .lab {
-  font-family: var(--mono);
-  font-size: 10px;
-  letter-spacing: 0.1em;
-  text-transform: uppercase;
-  color: var(--muted);
-}
-.cap-big {
-  font-size: 36px;
-  line-height: 1.05;
-  letter-spacing: -0.02em;
-}
-.cap-sub {
-  font-size: 11px;
-  color: var(--muted);
-}
-.cap-meta {
-  display: flex;
-  flex-direction: column;
-  gap: 3px;
-  padding-bottom: 4px;
-  font-size: 11px;
-  color: var(--muted);
-}
-
-/*
- * Headroom the switcher can actually reach, on its own full-width row.
- *
- * The track is the fleet's whole capacity — 100 points per usable account —
- * and the fill is what remains. Sized to its container instead, the bar always
- * spanned the full width, so its most obvious property carried no information:
- * a nearly-spent fleet drew exactly as long as an untouched one.
- */
-.pool {
-  margin-top: 18px;
-}
-.pool-head {
-  display: flex;
-  align-items: baseline;
-  gap: 12px;
-  flex-wrap: wrap;
-  margin-bottom: 6px;
-}
-.pool-head .lab {
-  font-family: var(--mono);
-  font-size: 10px;
-  letter-spacing: 0.1em;
-  text-transform: uppercase;
-  color: var(--muted);
-}
-.pool-total {
-  font-size: 11px;
-  color: var(--muted);
-}
-.pool-bar {
-  display: flex;
-  gap: 2px;
-  height: 18px;
-  border-radius: 2px;
-  overflow: hidden;
-  background: var(--surface);
-}
-.pool-seg {
-  /* A twentieth of the bar is still a visible mark, and a spent account keeps
-     a hairline rather than vanishing from a fleet it is still part of. */
-  min-width: 2px;
-  background: var(--ok-fill);
-}
-.pool-seg.caution {
-  background: var(--caution-fill);
-}
-.pool-seg.danger {
-  background: var(--danger-fill);
-}
-/* Capacity already consumed. Not a quota state, so it takes no state colour. */
-.pool-spent {
-  background: var(--raised);
-}
-
-/*
- * Names on a second row, each cell exactly as wide as the segment above it.
- *
- * Every segment carries the same colour on purpose — tokens.css reserves hue
- * for quota state, so a per-account tint would make a healthy account read as
- * a different one. Four identical blocks left no way to tell whose was whose;
- * position answers that without touching the colour system, and it still works
- * at twenty accounts, where a narrow cell truncates instead of disappearing.
- */
-.pool-labels {
-  display: flex;
-  gap: 2px;
-  margin-top: 5px;
-}
-.pool-lbl {
-  display: flex;
-  align-items: baseline;
-  gap: 5px;
-  min-width: 0;
-  padding-right: 4px;
-  font-size: 10px;
-  line-height: 1.3;
-  color: var(--muted);
-  white-space: nowrap;
-  overflow: hidden;
-}
-.pool-lbl b {
-  font-weight: 500;
-  color: var(--ink);
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-.pool-lbl .num {
-  flex: none;
-}
-/* Consumed capacity is not an account and does not get an account's emphasis. */
-.pool-lbl.is-spent b {
-  font-weight: 400;
-  color: var(--faint);
-}
-.pool-lbl.is-spent .num {
-  color: var(--faint);
-}
-
-.pool-out {
-  margin: 9px 0 0;
-  font-size: 11px;
-  color: var(--muted);
-}
-.pool-out b {
-  font-weight: 500;
-  color: var(--ink);
-}
-
 /* ── rotation chart ── */
 .chartwrap {
   overflow-x: auto;
@@ -1488,56 +1316,8 @@ hr.rule {
   color: var(--muted);
 }
 
-
-/* ─────────── dashboard: reset stagger ─────────── */
-
-.stagger {
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-  padding-top: 18px;
-}
-.stagger svg {
-  display: block;
-  width: 100%;
-  height: auto;
-}
-.stagger-band {
-  fill: var(--ok-fill);
-}
-.stagger-band.caution {
-  fill: var(--caution-fill);
-}
-.stagger-band.danger {
-  fill: var(--danger-fill);
-}
-/* The band's full extent. Measured, not guessed: a tint of the state colour
-   tops out at 2.55:1 on --bg at any usable alpha, and --raised reaches 1.19:1,
-   so neither can carry the outline. --muted measures 6.02:1 dark / 6.37:1
-   light. State stays in the fill; the outline is chrome. */
-.stagger-track {
-  fill: none;
-  stroke: var(--muted);
-  stroke-width: 1;
-}
-.stagger-axis {
-  stroke: var(--line);
-  stroke-width: 1;
-}
 /* The same class lands on the in-SVG labels. Text needs a fill and no stroke —
    inheriting the line's stroke outlines every glyph and leaves it colourless. */
-/* --muted, not --faint, for the same reason `.mail` above uses it: --faint
-   measures 3.04:1 dark and 3.66:1 light against --bg, under the 4.5:1 minimum,
-   and these are 10-11px data labels a user reads, not decoration. */
-text.stagger-axis {
-  stroke: none;
-  fill: var(--muted);
-  font-family: var(--mono);
-}
-.stagger-tick {
-  stroke: var(--line-soft);
-  stroke-width: 1;
-}
 
 /* ─────────── dashboard: daily range chart ─────────── */
 
@@ -1607,7 +1387,6 @@ text.stagger-axis {
   border-radius: 1px;
   margin-right: 5px;
 }
-
 
 /* ─────────── realm (Environments) ─────────── */
 
@@ -2044,58 +1823,7 @@ table.accts tbody tr.acct-row.is-active:hover td {
   background: var(--raised);
 }
 
-.acct-caret {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  flex: none;
-  color: var(--faint);
-  transition: transform 120ms ease;
-}
-.acct-caret.is-open {
-  transform: rotate(90deg);
-}
-@media (prefers-reduced-motion: reduce) {
-  .acct-caret {
-    transition: none;
-  }
-}
-
-/* ─────────── accounts: add row (Add account / Add token) ─────────── */
-
-.add-row {
-  display: flex;
-  flex-direction: column;
-  gap: 10px;
-}
-.add-row-actions {
-  display: flex;
-  gap: 9px;
-  align-items: center;
-}
-.add-hint {
-  margin: 0;
-  font-size: 11.5px;
-  color: var(--faint);
-  line-height: 1.5;
-}
-.add-hint b {
-  color: var(--muted);
-  font-weight: 600;
-}
-
 /* ─────────── accounts: interactive sign-in (SignInFlow) ─────────── */
-/*
- * Not a modal — sits inline above the other two add-paths, matching the rest
- * of this screen. No --caution/--danger here: nothing in this flow is a
- * quota state, so its error banner and waiting copy stay chrome-neutral.
- */
-.signin-flow {
-  display: flex;
-  flex-direction: column;
-  align-items: flex-start;
-  gap: 10px;
-}
 
 .signin-wait {
   display: flex;
@@ -2213,65 +1941,6 @@ table.accts tbody tr.acct-row.is-active:hover td {
   cursor: not-allowed;
 }
 
-/* ─────────── accounts: row expansion (in place, no modal) ─────────── */
-
-tr.acct-details-row td {
-  padding: 0;
-  border-bottom: 1px solid var(--line-soft);
-}
-.acct-details {
-  padding: 14px 10px 16px 21px;
-  background: var(--surface);
-  display: flex;
-  flex-direction: column;
-  gap: 14px;
-}
-.acct-details-grid {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
-  gap: 12px 20px;
-}
-.acct-details-field {
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-}
-.acct-details-field .lab {
-  font-size: 10px;
-  letter-spacing: 0.08em;
-  text-transform: uppercase;
-  color: var(--faint);
-}
-.acct-details-field .val {
-  font-size: 13px;
-  color: var(--ink);
-}
-.acct-details-models {
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-}
-.acct-details-sub {
-  font-size: 10px;
-  letter-spacing: 0.08em;
-  text-transform: uppercase;
-  color: var(--faint);
-}
-.acct-details-model-row {
-  display: flex;
-  align-items: center;
-  gap: 12px;
-}
-.acct-details-model-name {
-  font-size: 12.5px;
-  min-width: 90px;
-}
-.acct-details-reset {
-  font-size: 11px;
-  color: var(--faint);
-  margin-left: auto;
-}
-
 /* ─────────── about section (inside Settings) ─────────── */
 
 /* Chrome, not quota state: --interact is the interactive colour, same as
@@ -2372,34 +2041,1003 @@ tr.acct-details-row td {
   color: var(--ink);
 }
 
-/* Accounts on a monthly spend cap, listed beneath the hourly stagger rather
-   than plotted on it — a reset weeks away is always off the right edge of a
-   12-hour horizon, so a band for it would never move. */
-.stagger-monthly {
-  list-style: none;
-  margin: 8px 0 0;
+
+/* ═════════════════════════ v0.3 redesign ═════════════════════════
+   Same instrument vocabulary as above: hairlines, --r corners, mono figures,
+   colour only for quota state. Motion uses the --dur-* / --ease-* tokens and
+   touches transform and opacity only. */
+
+/* ─────────── meter additions ─────────── */
+
+/* Where utilisation should be by now. Ink, not a state colour: it is a
+   reference mark, and fill past it already carries the state. */
+.track .pace {
+  position: absolute;
+  top: -2px;
+  bottom: -2px;
+  width: 1.5px;
+  margin-left: -0.75px;
+  background: var(--ink);
+  opacity: 0.55;
+}
+.track .pace.ahead {
+  opacity: 0.9;
+}
+/* The track clips its fill; the tick needs its 2px overhang to show. */
+.track:has(.pace) {
+  overflow: visible;
+}
+.pct-unit {
+  font-size: 10px;
+  color: var(--faint);
+}
+
+/* ─────────── sidebar ─────────── */
+
+.nav .nav-cmdk {
+  all: unset;
+  box-sizing: border-box;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-top: 10px;
+  padding: 6px 8px;
+  border: 1px solid var(--line-soft);
+  border-radius: var(--r);
+  font-size: 12px;
+  color: var(--faint);
+  cursor: pointer;
+  transition: border-color var(--dur-fast) linear, color var(--dur-fast) linear;
+}
+.nav .nav-cmdk:hover {
+  border-color: var(--line);
+  color: var(--muted);
+}
+.nav .nav-cmdk:focus-visible {
+  outline: 2px solid var(--interact);
+  outline-offset: 2px;
+}
+.nav .nav-cmdk span {
+  display: inline;
   padding: 0;
+  font-size: inherit;
+  color: inherit;
+}
+.nav .nav-cmdk .kbd {
+  padding: 1px 4px;
+}
+
+.nav-auto {
+  margin-top: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 10px 8px 4px;
+  border-top: 1px solid var(--line-soft);
+}
+.nav .nav-auto span {
+  padding: 0;
+  font-size: 11.5px;
+}
+.nav-auto-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+.nav .nav-auto-row > span:first-child {
+  font-size: 12.5px;
+  color: var(--ink);
+}
+.nav .nav-auto-phase {
+  font-family: var(--mono);
+  color: var(--muted);
+}
+.nav .nav-auto-next {
+  color: var(--faint);
+}
+.nav .nav-auto-err {
+  color: var(--danger);
+}
+
+/* ─────────── generic bits ─────────── */
+
+.sp {
+  flex: 1;
+}
+.faint {
+  color: var(--faint);
+}
+.btn.danger {
+  border-color: var(--danger);
+  color: var(--danger);
+}
+.btn.danger-text {
+  color: var(--danger);
+}
+.btn-sm {
+  font-size: 11px;
+  padding: 2px 8px;
+}
+.pill.best {
+  border-color: var(--switch-on);
+  color: var(--ink);
+}
+.row-error {
+  margin-top: 6px;
+  font-size: 11px;
+  color: var(--danger);
+  text-align: right;
+}
+.row-hint {
+  margin-top: 3px;
+  font-size: 11px;
+}
+.row-hint.danger {
+  color: var(--danger);
+}
+.field-error {
+  font-size: 12px;
+  color: var(--danger);
+}
+.btn {
+  transition:
+    background-color var(--dur-fast) linear,
+    border-color var(--dur-fast) linear,
+    transform var(--dur-fast) var(--ease-out);
+}
+.btn:active:not(:disabled) {
+  transform: translateY(1px);
+}
+.seg.seg-compact span {
+  padding: 3px 8px;
+  font-size: 11px;
+}
+.seg[aria-disabled="true"] {
+  opacity: 0.5;
+}
+
+/* ─────────── menu button ─────────── */
+
+.menubtn {
+  position: relative;
+  display: inline-flex;
+}
+.menubtn .caret {
+  margin-left: 6px;
+  vertical-align: -1px;
+}
+.menu {
+  position: absolute;
+  top: calc(100% + 4px);
+  z-index: var(--z-overlay);
+  min-width: 170px;
+  padding: 4px;
+  display: flex;
+  flex-direction: column;
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: var(--r);
+  box-shadow: 0 10px 30px -12px rgb(0 0 0 / 0.45);
+  transform-origin: top right;
+  animation: menu-in var(--dur-med) var(--ease-out);
+}
+.menu-end {
+  right: 0;
+}
+.menu-start {
+  left: 0;
+  transform-origin: top left;
+}
+.menu.menu-wide {
+  width: 330px;
+}
+.menu-item {
+  all: unset;
+  box-sizing: border-box;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 7px 9px;
+  border-radius: 2px;
+  font-size: 12.5px;
+  color: var(--ink);
+  cursor: pointer;
+  text-align: left;
+}
+.menu-item:hover:not(:disabled),
+.menu-item:focus-visible {
+  background: var(--raised);
+}
+.menu-item:focus-visible {
+  outline: 1px solid var(--interact);
+  outline-offset: -1px;
+}
+.menu-item:disabled {
+  color: var(--faint);
+  cursor: default;
+}
+.menu-item.danger:not(:disabled) {
+  color: var(--danger);
+}
+.menu-desc {
+  font-size: 11.5px;
+  color: var(--muted);
+  line-height: 1.4;
+}
+.menu-desc code {
+  font-family: var(--mono);
+  font-size: 11px;
+}
+.menu-found {
+  display: block;
+  font-family: var(--mono);
+  font-size: 9.5px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--switch-on);
+  margin-bottom: 2px;
+}
+@keyframes menu-in {
+  from {
+    opacity: 0;
+    transform: scale(0.97) translateY(-2px);
+  }
+}
+
+/* ─────────── dialog / drawer ─────────── */
+
+.dlg {
+  padding: 0;
+  border: 1px solid var(--line);
+  border-radius: var(--r);
+  background: var(--bg);
+  color: var(--ink);
+  max-width: none;
+  max-height: none;
+}
+.dlg::backdrop {
+  background: rgb(0 0 0 / 0.35);
+  animation: fade-in var(--dur-med) linear;
+}
+.dlg[open] {
+  animation: fade-in var(--dur-med) var(--ease-out);
+}
+.dlg-center {
+  width: min(560px, calc(100vw - 48px));
+  margin: 12vh auto auto;
+}
+.dlg-drawer {
+  position: fixed;
+  inset: 0 0 0 auto;
+  height: 100vh;
+  width: min(440px, 92vw);
+  margin: 0;
+  border-width: 0 0 0 1px;
+  border-radius: 0;
+}
+.dlg-drawer[open] {
+  animation: drawer-in var(--dur-slow) var(--ease-out);
+}
+.dlg-body {
+  height: 100%;
+}
+@keyframes fade-in {
+  from {
+    opacity: 0;
+  }
+}
+@keyframes drawer-in {
+  from {
+    transform: translateX(24px);
+    opacity: 0;
+  }
+}
+
+.adrawer {
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+}
+.adrawer-head {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 18px 18px 14px;
+  border-bottom: 1px solid var(--line-soft);
+}
+.adrawer-head .mark {
+  margin-top: 7px;
+}
+.adrawer-title {
+  flex: 1;
+  min-width: 0;
+}
+.adrawer-name {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.adrawer-name h3 {
+  font-size: 16px;
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+.adrawer-sub {
+  margin-top: 3px;
+  font-family: var(--mono);
+  font-size: 11.5px;
+  color: var(--muted);
+  overflow-wrap: anywhere;
+}
+.rename-form {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+}
+.rename-form .input {
+  flex: 1;
+  min-width: 0;
+}
+.adrawer > .banner {
+  margin: 12px 18px 0;
+}
+.adrawer-body {
+  flex: 1;
+  overflow-y: auto;
+  padding: 16px 18px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+.limit-card {
+  border: 1px solid var(--line-soft);
+  border-radius: var(--r);
+  padding: 11px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.limit-card .meter .track {
+  flex: 1;
+  width: auto;
+}
+.lc-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 10px;
+}
+.lc-head .lab {
+  font-size: 10px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--faint);
+}
+.lc-when {
+  font-size: 11.5px;
+  color: var(--muted);
+}
+.lc-foot {
+  font-size: 11.5px;
+  color: var(--muted);
+}
+.lc-foot.caution {
+  color: var(--caution);
+}
+.lc-model {
+  display: grid;
+  grid-template-columns: 90px minmax(0, 1fr) auto;
+  gap: 10px;
+  align-items: center;
+  font-size: 12.5px;
+}
+.adrawer-facts {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 10px 16px;
+  margin: 4px 0 0;
+  font-size: 12.5px;
+  align-items: center;
+}
+.adrawer-facts dt {
+  color: var(--muted);
+}
+.adrawer-facts dd {
+  margin: 0;
+  justify-self: end;
+}
+.adrawer-foot {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+  padding: 14px 18px;
+  border-top: 1px solid var(--line-soft);
+}
+.confirm-remove {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  width: 100%;
+  font-size: 12.5px;
+  color: var(--muted);
+  animation: fade-in var(--dur-med) var(--ease-out);
+}
+.confirm-remove p {
+  margin: 0;
+  line-height: 1.5;
+}
+.confirm-remove b {
+  color: var(--ink);
+}
+.confirm-actions {
+  display: flex;
+  gap: 8px;
+}
+
+/* ─────────── toast ─────────── */
+
+/* Mounted once, empty, so screen readers announce what lands in it. */
+.toast-region {
+  position: fixed;
+  right: 16px;
+  bottom: 16px;
+  z-index: var(--z-overlay);
+  pointer-events: none;
+}
+.toast {
+  pointer-events: auto;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 8px 8px 12px;
+  border: 1px solid var(--line);
+  border-radius: var(--r);
+  background: var(--surface);
+  box-shadow: 0 10px 30px -12px rgb(0 0 0 / 0.45);
+  font-size: 12.5px;
+  animation: toast-in var(--dur-med) var(--ease-out);
+}
+.toast-action {
+  color: var(--interact);
+}
+@keyframes toast-in {
+  from {
+    opacity: 0;
+    transform: translateY(8px);
+  }
+}
+
+/* ─────────── command palette ─────────── */
+
+.cmdk-dialog {
+  width: min(560px, calc(100vw - 48px));
+}
+.cmdk-q {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 12px 14px;
+  border-bottom: 1px solid var(--line-soft);
+  color: var(--muted);
+}
+.cmdk-q input {
+  flex: 1;
+  min-width: 0;
+  border: 0;
+  outline: 0;
+  background: transparent;
+  color: var(--ink);
+  font: inherit;
+  font-size: 14px;
+}
+.cmdk-list {
+  max-height: min(380px, 60vh);
+  overflow-y: auto;
+  padding: 6px;
+}
+.cmdk-list [cmdk-group-heading] {
+  padding: 8px 8px 4px;
+  font-size: 10px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--faint);
+}
+.cmdk-list [cmdk-item] {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 8px 9px;
+  border-radius: 2px;
+  font-size: 13px;
+  cursor: pointer;
+}
+.cmdk-list [cmdk-item][data-selected="true"] {
+  background: var(--raised);
+}
+.cmdk-meta {
+  font-size: 11.5px;
+  color: var(--muted);
+  white-space: nowrap;
+}
+.cmdk-empty {
+  padding: 18px 10px;
+  font-size: 12.5px;
+  color: var(--muted);
+  text-align: center;
+}
+
+/* ─────────── Home ─────────── */
+
+.home .pane-head {
+  align-items: center;
+}
+.home .pane-head .sub {
+  margin-left: 0;
+}
+.add-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.token-hint {
+  margin: -4px 0 0;
+  font-size: 12px;
+  color: var(--muted);
+}
+.token-hint code {
+  font-family: var(--mono);
+  font-size: 11.5px;
+}
+
+.kpis {
+  display: grid;
+  grid-template-columns: minmax(0, 1.4fr) minmax(0, 1fr) minmax(0, 1fr);
+  border: 1px solid var(--line-soft);
+  border-radius: var(--r);
+}
+.kpi {
+  padding: 14px 16px;
+  border-left: 1px solid var(--line-soft);
+  min-width: 0;
+}
+.kpi:first-child {
+  border-left: 0;
+}
+.kpi-l {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 10px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--faint);
+}
+.kpi-v {
+  margin-top: 6px;
+  font-size: 20px;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  transition: opacity var(--dur-med) linear;
+}
+.kpi-hero .kpi-v {
+  font-size: 28px;
+  font-family: var(--mono);
+  letter-spacing: -0.03em;
+}
+.kpi-name {
+  font-family: var(--sans);
+}
+.kpi-h {
+  margin-top: 3px;
+  font-size: 12px;
+  color: var(--muted);
+}
+.kpi-h.caution {
+  color: var(--caution);
+}
+.kpi-h.danger {
+  color: var(--danger);
+}
+
+/* Coverage timeline: HTML lanes positioned in %, so it stays crisp at any width. */
+.cov-grid {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  transition: opacity var(--dur-med) linear;
+}
+.cov-axis,
+.cov-lane {
+  display: grid;
+  grid-template-columns: 150px minmax(0, 1fr);
+  gap: 14px;
+  align-items: center;
+}
+.cov-ticks {
+  position: relative;
+  height: 14px;
+}
+.cov-tick {
+  position: absolute;
+  top: 0;
+  transform: translateX(-50%);
+  font-size: 10.5px;
+  color: var(--faint);
+  white-space: nowrap;
+}
+.cov-tick:first-child {
+  transform: none;
+}
+.cov-tick:last-child {
+  transform: translateX(-100%);
+}
+.cov-who {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+.cov-name {
+  font-size: 12.5px;
+  font-weight: 550;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.cov-note {
+  font-size: 10.5px;
+  color: var(--faint);
+}
+.cov-lane.is-off {
+  opacity: 0.5;
+}
+.cov-track {
+  position: relative;
+  height: 18px;
+  background: var(--raised);
+  border-radius: 2px;
+}
+.cov-gridline {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 1px;
+  background: var(--line-soft);
+}
+.cov-seg {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  border-radius: 2px;
+  transform-origin: left center;
+  animation: seg-grow var(--dur-slow) var(--ease-out) both;
+}
+.cov-seg.free {
+  background: var(--ok-fill);
+  opacity: 0.45;
+}
+/* In use is not a quota state, so it is drawn in ink, not a state colour;
+   only the projected limit (hatched danger) carries colour. */
+.cov-seg.inUse {
+  background: var(--ink);
+  opacity: 0.55;
+}
+.cov-seg.limited {
+  background: repeating-linear-gradient(135deg, var(--danger-fill) 0 3px, transparent 3px 6px);
+}
+.cov-seg.unknown {
+  background: repeating-linear-gradient(90deg, var(--line) 0 2px, transparent 2px 6px);
+  opacity: 0.6;
+}
+@keyframes seg-grow {
+  from {
+    transform: scaleX(0);
+  }
+}
+.cov-mark {
+  position: absolute;
+  top: -3px;
+  bottom: -3px;
+  width: 2px;
+  margin-left: -1px;
+  background: var(--ink);
+}
+.cov-mark span {
+  position: absolute;
+  bottom: calc(100% + 1px);
+  left: 3px;
+  font-family: var(--mono);
+  font-size: 9.5px;
+  color: var(--muted);
+  white-space: nowrap;
+}
+.cov-mark.limit {
+  background: var(--danger);
+}
+.cov-mark.limit span {
+  color: var(--danger);
+}
+.cov-mark.handoff {
+  background: var(--switch-on);
+}
+.cov-mark.handoff span {
+  color: var(--ink);
+}
+.cov-legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 16px;
+  margin-top: 10px;
+  font-size: 11px;
+  color: var(--muted);
+}
+.cov-legend i {
+  display: inline-block;
+  width: 12px;
+  height: 7px;
+  margin-right: 5px;
+  border-radius: 1px;
+  vertical-align: middle;
+}
+.cov-legend i.free {
+  background: var(--ok-fill);
+  opacity: 0.45;
+}
+.cov-legend i.inUse {
+  background: var(--ink);
+  opacity: 0.55;
+}
+.cov-legend i.limited {
+  background: repeating-linear-gradient(135deg, var(--danger-fill) 0 3px, transparent 3px 6px);
+}
+.cov-legend i.reset {
+  width: 2px;
+  background: var(--ink);
+}
+.cov-foot {
+  flex-basis: 100%;
+  color: var(--faint);
+}
+
+/* Home accounts table */
+table.home-accts th.c,
+table.home-accts td.c {
+  text-align: center;
+}
+.limit-chip {
+  font-family: var(--mono);
+  font-size: 10.5px;
+  padding: 1px 5px;
+  border-radius: 2px;
+  background: var(--raised);
+  color: var(--muted);
+  white-space: nowrap;
+}
+.used-cell {
   display: flex;
   flex-direction: column;
   gap: 3px;
 }
-.stagger-monthly li {
-  display: grid;
-  grid-template-columns: 118px minmax(0, 1fr);
-  gap: 10px;
-  align-items: baseline;
-  font-size: 11px;
-  color: var(--muted);
-}
-.stagger-monthly .nm {
-  font-family: var(--mono);
+.used-sub {
   font-size: 10.5px;
-  color: var(--muted);
-  text-align: right;
-  overflow: hidden;
-  text-overflow: ellipsis;
+  color: var(--faint);
+}
+td.runs-out,
+td.resets {
+  font-size: 12px;
   white-space: nowrap;
 }
-.stagger-monthly .num {
-  color: var(--ink);
+td.runs-out.danger {
+  color: var(--danger);
+}
+td.runs-out.muted,
+td.resets {
+  color: var(--muted);
+}
+td.runs-out.faint,
+td.resets.faint {
+  color: var(--faint);
+}
+table.home-accts tbody tr.acct-row {
+  cursor: pointer;
+  transition: background-color var(--dur-fast) linear;
+}
+table.home-accts tbody tr.acct-row:hover td {
+  background: var(--surface);
+}
+table.home-accts tbody tr.acct-row:focus-visible {
+  outline: 2px solid var(--interact);
+  outline-offset: -2px;
+}
+
+/* Environments */
+.env-list {
+  display: flex;
+  flex-direction: column;
+}
+.env-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 10px 0;
+  border-bottom: 1px solid var(--line-soft);
+}
+.env-row:last-child {
+  border-bottom: 0;
+}
+.env-dot {
+  width: 6px;
+  height: 6px;
+  margin-top: 6px;
+  border-radius: 50%;
+  background: var(--line);
+  flex: none;
+}
+.env-dot.on {
+  background: var(--switch-on);
+}
+.env-main {
+  flex: 1;
+  min-width: 0;
+}
+.env-name {
+  font-size: 13px;
+  font-weight: 550;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.env-detail {
+  font-size: 12px;
+  color: var(--muted);
+  margin-top: 2px;
+}
+.env-path {
+  font-size: 11px;
+  color: var(--faint);
+  margin-top: 2px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* History: the anchor a "View history" scroll lands on. */
+.history-row {
+  scroll-margin-top: 12px;
+}
+
+/* ─────────── Settings ─────────── */
+
+.settings-group {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.settings-group h2 {
+  margin: 8px 0 4px;
+  font-size: 10.5px;
+  font-weight: 500;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--faint);
+}
+.rule {
+  border: 1px solid var(--line-soft);
+  border-radius: var(--r);
+  padding: 12px 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.rule-sentence {
+  margin: 0;
+  font-size: 14px;
+  line-height: 1.6;
+}
+.rule-sentence b {
+  font-weight: 600;
+}
+.rule-preview {
+  margin: 0;
+  font-size: 12.5px;
+  color: var(--muted);
+}
+.rule-tag {
+  font-family: var(--mono);
+  font-size: 9.5px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  padding: 1px 5px;
+  border: 1px solid var(--line);
+  border-radius: 2px;
+  margin-right: 6px;
+  color: var(--faint);
+}
+
+/* ─────────── popover additions ─────────── */
+
+.pop-proj {
+  margin: 10px 0 0;
+  font-size: 11.5px;
+  color: var(--caution);
+}
+.pop-item {
+  position: relative;
+}
+/* A visible "Switch" on hover or keyboard focus, so the row reads as the
+   action it is. It overlays the reset column rather than reflowing the row. */
+.pop-item .pop-go {
+  position: absolute;
+  right: 8px;
+  top: 50%;
+  transform: translateY(-50%);
+  padding: 2px 8px;
+  border-radius: 2px;
+  background: var(--ink);
+  color: var(--bg);
+  font-size: 11px;
+  font-weight: 600;
+  opacity: 0;
+  transition: opacity var(--dur-fast) linear;
+  pointer-events: none;
+}
+.pop-item:hover:not(:disabled) .pop-go,
+.pop-item:focus-visible .pop-go {
+  opacity: 1;
+}
+.pop-item .rst {
+  transition: opacity var(--dur-fast) linear;
+}
+.pop-item:hover:not(:disabled) .rst,
+.pop-item:focus-visible .rst {
+  opacity: 0;
+}
+.pop {
+  animation: fade-in var(--dur-med) var(--ease-out);
+}
+
+/* ─────────── responsive ─────────── */
+
+@media (max-width: 1000px) {
+  .kpis {
+    grid-template-columns: 1fr 1fr;
+  }
+  .kpi-hero {
+    grid-column: 1 / -1;
+    border-bottom: 1px solid var(--line-soft);
+  }
+  .kpi:nth-child(2) {
+    border-left: 0;
+  }
+  .cov-axis,
+  .cov-lane {
+    grid-template-columns: 110px minmax(0, 1fr);
+  }
+}
+
+/* ─────────── reduced motion: one switch for everything above ─────────── */
+
+@media (prefers-reduced-motion: reduce) {
+  :root {
+    --dur-fast: 0ms;
+    --dur-med: 0ms;
+    --dur-slow: 0ms;
+  }
+  .menu,
+  .dlg[open],
+  .dlg::backdrop,
+  .toast,
+  .cov-seg,
+  .confirm-remove,
+  .pop {
+    animation: none;
+  }
+  .btn:active:not(:disabled) {
+    transform: none;
+  }
 }

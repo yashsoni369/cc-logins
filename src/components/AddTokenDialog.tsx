@@ -11,7 +11,7 @@ interface AddTokenDialogProps {
 
 /**
  * Small inline form for registering an account by setup-token or API key,
- * rendered in place under the Accounts table — not a modal.
+ * rendered in place under the Add account menu — not a modal.
  *
  * The token never leaves this component except as an argument to `onSubmit`:
  * it is not logged, not echoed anywhere else in the UI, and is cleared from
@@ -22,6 +22,9 @@ export default function AddTokenDialog({ pending, error, onSubmit, onCancel }: A
   const [token, setToken] = useState("");
   const [email, setEmail] = useState("");
   const [alias, setAlias] = useState("");
+
+  // Only the prefix is inspected, to word the hint; the token goes nowhere but `onSubmit`.
+  const looksLikeApiKey = token.trim().startsWith("sk-ant-api");
 
   const handleSubmit = (e: FormEvent) => {
     e.preventDefault();
@@ -44,7 +47,7 @@ export default function AddTokenDialog({ pending, error, onSubmit, onCancel }: A
   return (
     <form className="token-form" onSubmit={handleSubmit}>
       <div className="row">
-        <label htmlFor="acct-token">Setup token or API key</label>
+        <label htmlFor="acct-token">Setup token</label>
         <input
           id="acct-token"
           className="input mono"
@@ -54,6 +57,30 @@ export default function AddTokenDialog({ pending, error, onSubmit, onCancel }: A
           value={token}
           onChange={(e) => setToken(e.target.value)}
           placeholder="sk-ant-…"
+          disabled={pending}
+          aria-describedby="acct-token-hint"
+        />
+      </div>
+      <p id="acct-token-hint" className="token-hint">
+        {looksLikeApiKey ? (
+          "This looks like an API key. API keys are billed per request and have no 5-hour or weekly limits, so this account will show no quota."
+        ) : (
+          <>
+            Create one with <code>claude setup-token</code>. An API key also works, but has no quota to track.
+          </>
+        )}
+      </p>
+      <div className="row">
+        <label htmlFor="acct-token-alias">Name (optional)</label>
+        <input
+          id="acct-token-alias"
+          className="input"
+          type="text"
+          autoComplete="off"
+          maxLength={40}
+          placeholder="e.g. Work"
+          value={alias}
+          onChange={(e) => setAlias(e.target.value)}
           disabled={pending}
         />
       </div>
@@ -66,18 +93,6 @@ export default function AddTokenDialog({ pending, error, onSubmit, onCancel }: A
           autoComplete="off"
           value={email}
           onChange={(e) => setEmail(e.target.value)}
-          disabled={pending}
-        />
-      </div>
-      <div className="row">
-        <label htmlFor="acct-token-alias">Alias (optional)</label>
-        <input
-          id="acct-token-alias"
-          className="input"
-          type="text"
-          autoComplete="off"
-          value={alias}
-          onChange={(e) => setAlias(e.target.value)}
           disabled={pending}
         />
       </div>

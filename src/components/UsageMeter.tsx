@@ -1,3 +1,4 @@
+import { useDisplayMode } from "../lib/displayMode";
 import { quotaState } from "../types";
 
 interface UsageMeterProps {
@@ -11,6 +12,11 @@ interface UsageMeterProps {
    * can do: tell you that you have headroom when you are nearly out.
    */
   pct: number | null | undefined;
+  /**
+   * Where utilisation *should* be by now in this window (0..100), drawn as a
+   * tick. Fill past the tick means spending faster than the window lasts.
+   */
+  pace?: number | null;
 }
 
 /**
@@ -20,8 +26,13 @@ interface UsageMeterProps {
  * healthy meter renders in ink/muted tones like everything else at rest. The
  * percentage is always rendered as text, because state must never be carried
  * by hue alone.
+ *
+ * In "left" display mode the text reads what remains, but fill and colour
+ * still follow utilisation: a nearly-full account stays red and nearly full
+ * whichever way the number is phrased.
  */
-export default function UsageMeter({ pct }: UsageMeterProps) {
+export default function UsageMeter({ pct, pace }: UsageMeterProps) {
+  const mode = useDisplayMode();
   // Unknown is a distinct visual state, never a value. An empty track plus
   // "··" reads as "no reading"; "0%" reads as "no usage".
   if (pct == null || !Number.isFinite(pct)) {
@@ -36,13 +47,26 @@ export default function UsageMeter({ pct }: UsageMeterProps) {
   const clamped = Math.max(0, Math.min(100, pct));
   const state = quotaState(clamped);
   const stateClass = state === "ok" ? "" : ` ${state}`;
+  const shown = Math.round(mode === "left" ? 100 - clamped : clamped);
+  const paceAt = pace != null && Number.isFinite(pace) ? Math.max(0, Math.min(100, pace)) : null;
 
   return (
     <div className="meter">
       <span className="track">
-        <span className={`fill${stateClass}`} style={{ width: `${clamped}%` }} />
+        {/* Scaled rather than resized: a transform animates on the compositor,
+            so a refresh that moves every meter at once costs no layout. */}
+        <span className={`fill${stateClass}`} style={{ transform: `scaleX(${clamped / 100})` }} />
+        {paceAt !== null && (
+          <span
+            className={`pace${clamped > paceAt + 1 ? " ahead" : ""}`}
+            style={{ left: `${paceAt}%` }}
+            title={`On pace would be ${Math.round(paceAt)}% by now`}
+          />
+        )}
       </span>
-      <span className={`pct${stateClass}`}>{Math.round(clamped)}%</span>
+      <span className={`pct${stateClass}`} key={shown}>
+        {shown}%{mode === "left" && <span className="pct-unit"> left</span>}
+      </span>
     </div>
   );
 }

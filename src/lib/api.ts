@@ -55,6 +55,8 @@ export type IpcErrorKind =
   | "noTerminalAvailable"
   | "alreadyRegistered"
   | "cannotDisableActive"
+  | "cannotRemoveActive"
+  | "invalidInput"
   | "reloginRequired"
   | "recoveryRequired"
   | "settingsConflict"
@@ -125,6 +127,16 @@ export class IpcError extends Error {
   /** Refused to disable the currently-active account. */
   get isCannotDisableActive() {
     return this.kind === "cannotDisableActive";
+  }
+
+  /** Refused to remove the currently-active account. */
+  get isCannotRemoveActive() {
+    return this.kind === "cannotRemoveActive";
+  }
+
+  /** The request itself was malformed, e.g. a name longer than 40 characters. */
+  get isInvalidInput() {
+    return this.kind === "invalidInput";
   }
 
   /** The selected account needs a fresh interactive login before activation. */
@@ -400,6 +412,56 @@ export async function setAccountEnabled(accountNumber: number, enabled: boolean)
   return call<Snapshot>("set_account_enabled", { accountNumber, enabled });
 }
 
+/**
+ * Renames an account. `null` or a blank string clears the name so the masked
+ * email shows again; names over 40 characters are refused (`invalidInput`).
+ *
+ * Throws rather than falling back when there is no backend, exactly like
+ * `switchAccount`.
+ */
+export async function setAccountAlias(accountNumber: number, alias: string | null): Promise<Snapshot> {
+  if (!hasBackend()) {
+    throw new IpcError("internal", "Not running in the desktop app, so accounts cannot be renamed.");
+  }
+  const trimmed = alias?.trim() ?? "";
+  return call<Snapshot>("set_account_alias", { accountNumber, alias: trimmed === "" ? null : trimmed });
+}
+
+/**
+ * Removes an account from this app's own store. Claude Code's live login is
+ * never touched, and removing the account in use is refused
+ * (`cannotRemoveActive`) — switch away first.
+ */
+export async function removeAccount(accountNumber: number): Promise<Snapshot> {
+  if (!hasBackend()) {
+    throw new IpcError("internal", "Not running in the desktop app, so accounts cannot be removed.");
+  }
+  return call<Snapshot>("remove_account", { accountNumber });
+}
+
+/**
+ * Sets the account order. This is the backend's rotation order too, so the
+ * "next available" strategy follows it. `order` must list every slot once.
+ */
+export async function reorderAccounts(order: number[]): Promise<Snapshot> {
+  if (!hasBackend()) {
+    throw new IpcError("internal", "Not running in the desktop app, so accounts cannot be reordered.");
+  }
+  return call<Snapshot>("reorder_accounts", { order });
+}
+
+/**
+ * Starts a stopped WSL distro and checks it for a Claude Code login. The only
+ * call allowed to boot a Linux VM, so it is wired to an explicit button only —
+ * never an effect or a timer.
+ */
+export async function wakeEnvironment(envId: string): Promise<Snapshot> {
+  if (!hasBackend()) {
+    throw new IpcError("internal", "Not running in the desktop app, so a WSL distro cannot be started.");
+  }
+  return call<Snapshot>("wake_environment", { envId });
+}
+
 
 // ─── history (read-only) ───────────────────────────────────────────────────
 // Backed by a local SQLite store the desktop app writes to as it polls.
@@ -556,6 +618,7 @@ export const DEFAULT_SETTINGS: Settings = {
   theme: "system",
   clockFormat: "system",
   claudeBinaryPath: null,
+  displayMode: "used",
 };
 
 /** Current settings. Falls back to the same defaults the backend ships with. */

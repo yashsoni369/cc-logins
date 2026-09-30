@@ -3,12 +3,16 @@
  * action comes from the backend's revisioned `DaemonStatus` contract.
  */
 
-import { useCallback, useEffect, useRef, useState, type CSSProperties } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
 
 import { Loading } from "@/components/Loading";
 import { RefreshButton } from "@/components/RefreshButton";
 import UsageMeter from "@/components/UsageMeter";
 import PlanBadge from "@/components/PlanBadge";
+import AutoSwitchControl from "@/components/popover/AutoSwitchControl";
+import { predictTarget, projectLimit, weeklyPaceMark } from "@/lib/coverage";
+import { DisplayModeProvider } from "@/lib/displayMode";
+import { useBurnSamples } from "@/lib/useBurnSamples";
 import { hasBackend, IpcError, switchAccount } from "@/lib/api";
 import { formatClock, formatCountdown, useNow } from "@/lib/time";
 import { useDaemonStatus } from "@/lib/useDaemonStatus";
@@ -149,8 +153,13 @@ export default function PopoverPanel() {
     return () => window.clearInterval(timer);
   }, [phase]);
 
-  const accounts = snapshot?.environments.flatMap((environment) => environment.accounts) ?? [];
+  const accounts = useMemo(
+    () => snapshot?.environments.flatMap((environment) => environment.accounts) ?? [],
+    [snapshot],
+  );
   const activeAccount = accounts.find((account) => account.active) ?? null;
+  // Local history only — for the "runs out at" line. Never a request to Anthropic.
+  const { activeSamples } = useBurnSamples(accounts, snapshot);
   const warningTarget =
     phase?.kind === "warning" ? accounts.find((account) => account.number === phase.to) ?? null : null;
 
@@ -182,6 +191,16 @@ export default function PopoverPanel() {
       setActionError(reason instanceof Error ? reason.message : "Couldn't pause auto-switch.");
     });
   }, [settings.snooze]);
+
+  const setAutoSwitch = useCallback(
+    (enabled: boolean) => {
+      setActionError(null);
+      void settings.update({ autoSwitchEnabled: enabled }).catch((reason: unknown) => {
+        setActionError(reason instanceof Error ? reason.message : "Couldn't change auto-switch.");
+      });
+    },
+    [settings.update],
+  );
 
   const resume = useCallback(() => {
     setActionError(null);
@@ -236,7 +255,11 @@ export default function PopoverPanel() {
       ? Math.max(0, Math.ceil((Date.parse(phase.deadline) - now) / 1000))
       : null;
 
+  const projection = projectLimit(activeAccount, activeSamples, minuteNow);
+  const bestNext = phase?.kind === "warning" ? null : predictTarget(accounts, settings.settings?.strategy ?? "most-headroom", minuteNow);
+
   return (
+    <DisplayModeProvider value={settings.settings?.displayMode ?? "used"}>
     <div className="pop" ref={rootRef}>
       {!live && <SampleDataBanner />}
 
@@ -305,11 +328,21 @@ export default function PopoverPanel() {
           {sevenDay && (
             <div className="row">
               <span className="lab">7d</span>
-              <div style={dimStyle}><UsageMeter pct={sevenDay.pct} /></div>
+              <div style={dimStyle}><UsageMeter pct={sevenDay.pct} pace={weeklyPaceMark(activeAccount.usage, minuteNow)} /></div>
               <span className="rst">{resetLabel(sevenDay, minuteNow)}</span>
             </div>
           )}
         </div>
+        {projection.at !== null && projection.beforeReset && phase?.kind !== "exhausted" && (
+          <p className="pop-proj num" style={dimStyle}>
+            {projection.at <= minuteNow
+              ? "At its limit now."
+              : `At this pace it hits the limit ~${formatClock(new Date(projection.at).toISOString(), clockFormat, minuteNow) ?? "soon"}`}
+            {projection.resetsAt !== null && projection.at > minuteNow
+              ? `, before it resets ${formatClock(new Date(projection.resetsAt).toISOString(), clockFormat, minuteNow) ?? ""}.`
+              : ""}
+          </p>
+        )}
         {phase?.kind === "exhausted" && (
           <p style={{ margin: "12px 0 0", fontSize: 12, color: "var(--muted)" }}>
             {phase.earliestReset
@@ -347,11 +380,13 @@ export default function PopoverPanel() {
                 <span className="pill danger" title="Credential mismatch">mismatch</span>
               )}
               {isNext && <span className="pill">next</span>}
+              {!isNext && bestNext?.number === account.number && !unavailable && <span className="pill best">best next</span>}
               {isPending && <span className="pill">switching…</span>}
               <div className="pop-meter" style={dimStyle}>
                 <UsageMeter pct={bindingUtilisation(account.usage)} />
               </div>
               <span className="rst">{reset}</span>
+              {!unavailable && <span className="pop-go" aria-hidden="true">Switch</span>}
             </button>
           );
         })}
@@ -381,12 +416,19 @@ export default function PopoverPanel() {
         ) : (
           <>
             <span>{phase?.kind === "disabled" ? "Auto-switch off" : "Auto-switch"}</span>
-            {phase?.kind !== "disabled" && <span className="pill on">on</span>}
+            <AutoSwitchControl
+              phase={phase}
+              disabled={recoveryBlocked || settings.settings === null}
+              onEnable={() => setAutoSwitch(true)}
+              onDisable={() => setAutoSwitch(false)}
+              onHold={snooze}
+            />
             <span className="sp" />
             <RefreshButton compact />
           </>
         )}
       </div>
     </div>
+    </DisplayModeProvider>
   );
 }

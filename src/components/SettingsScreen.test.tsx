@@ -100,19 +100,36 @@ describe("SettingsScreen", () => {
     expect(update).toHaveBeenCalledWith({ clockFormat: "24h" });
   });
 
-  it("does not expose deferred notification or start-at-login controls", () => {
+  it("saves each alert as a single field", () => {
+    const update = vi.fn().mockResolvedValue({ revision: 2, settings: {} });
     render(
-      <SettingsScreen
-        runtime={owner(vi.fn())}
-        theme="system"
-        onThemeChange={vi.fn()}
-        themeError={null}
-        update={noUpdate}
-      />,
+      <SettingsScreen runtime={owner(update)} theme="system" onThemeChange={vi.fn()} themeError={null} update={noUpdate} />,
     );
 
-    expect(screen.queryByText("Notify me")).not.toBeInTheDocument();
-    expect(screen.queryByText("Start at login")).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole("switch", { name: "Notify when an account needs a fresh sign-in" }));
+    expect(update).toHaveBeenCalledWith({ notifyOnExpiry: true });
+  });
+
+  it("saves retention, cooldown and display mode as single fields", () => {
+    const update = vi.fn().mockResolvedValue({ revision: 2, settings: {} });
+    render(
+      <SettingsScreen runtime={owner(update)} theme="system" onThemeChange={vi.fn()} themeError={null} update={noUpdate} />,
+    );
+
+    fireEvent.click(within(screen.getByRole("radiogroup", { name: "Keep detailed readings for" })).getByRole("radio", { name: "30 days" }));
+    expect(update).toHaveBeenCalledWith({ historyRetentionDays: 30 });
+    fireEvent.click(within(screen.getByRole("radiogroup", { name: "Switch cooldown" })).getByRole("radio", { name: "1 hour" }));
+    expect(update).toHaveBeenCalledWith({ cooldownSeconds: 3600 });
+    fireEvent.click(within(screen.getByRole("radiogroup", { name: "Show quota as" })).getByRole("radio", { name: "Left" }));
+    expect(update).toHaveBeenCalledWith({ displayMode: "left" });
+  });
+
+  it("reads the auto-switch rule back as one sentence", () => {
+    render(
+      <SettingsScreen runtime={owner(vi.fn())} theme="system" onThemeChange={vi.fn()} themeError={null} update={noUpdate} />,
+    );
+    expect(screen.getByText(/When the account in use passes/)).toBeInTheDocument();
+    expect(screen.getByText(/Auto-switch is off, so nothing moves on its own|No account is in use yet/)).toBeInTheDocument();
   });
 
   it("commits the trimmed claude binary path on blur", () => {
