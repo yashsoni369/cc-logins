@@ -10,6 +10,7 @@
 
 pub mod claude_cli;
 pub mod claude_locks;
+mod claude_resolve;
 pub mod commands;
 pub mod credentials;
 pub mod durable_fs;
@@ -26,16 +27,20 @@ pub mod oauth_refresh;
 pub mod paths;
 pub mod poll_budget;
 pub mod poller;
+pub mod profiles;
 pub mod recovery_store;
 pub mod resilience;
 pub mod runtime;
 pub mod settings;
+pub mod shim_core;
 pub mod switch_journal;
 pub mod switch_transaction;
 pub mod switcher;
+pub mod sys_env;
 pub mod tray;
 pub mod tray_menu;
 pub mod usage_cache;
+pub mod usage_projection;
 pub mod wsl;
 
 #[cfg(test)]

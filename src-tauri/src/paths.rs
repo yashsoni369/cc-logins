@@ -25,119 +25,13 @@
 //! - claude-code `utils/env.ts` `getGlobalClaudeFile`
 //! - claude-code `utils/secureStorage/plainTextStorage.ts` `getStoragePath`
 
-use std::env;
 use std::path::{Path, PathBuf};
 
-// ---------------------------------------------------------------------------
-// Small env helpers
-// ---------------------------------------------------------------------------
-
-/// Read an environment variable, treating an unset *or empty* value as
-/// absent. Mirrors Python's `if os.environ.get("X"):` truthiness check,
-/// which is falsy for both a missing var and `""`.
-pub(crate) fn env_non_empty(name: &str) -> Option<String> {
-    match env::var(name) {
-        Ok(v) if !v.is_empty() => Some(v),
-        _ => None,
-    }
-}
-
-/// Resolve the current user's home directory.
-///
-/// Mirrors Python's `Path.home()` (== `os.path.expanduser("~")`) closely
-/// enough for this app's needs:
-///
-/// - macOS/Linux/WSL: `HOME` is authoritative, matching CPython's
-///   `posixpath.expanduser`. (CPython additionally falls back to a
-///   `pwd`-database lookup when `HOME` is unset; we do not reproduce that
-///   fallback — see the crate-free caveat in the module's port notes.)
-/// - Windows: CPython's `ntpath.expanduser` prefers `USERPROFILE`, then
-///   `HOMEDRIVE`+`HOMEPATH`. We check those in the same order, with `HOME`
-///   as a last-resort fallback (e.g. Git Bash / MSYS environments that set
-///   only `HOME`).
-///
-/// Deliberately hand-rolled rather than built on the `dirs` crate (already a
-/// workspace dependency, used elsewhere for exactly this kind of lookup):
-/// empirically, `dirs::home_dir()` on Windows resolves the profile directory
-/// straight from the OS (`SHGetKnownFolderPath`/`FOLDERID_Profile`) and
-/// **ignores `USERPROFILE`/`HOME` entirely**, even when both are set. Python's
-/// `Path.home()` does honor `USERPROFILE` on Windows (see above), so using
-/// `dirs` here would silently diverge from the CLI's behavior for anyone who
-/// overrides their profile dir (portable installs, CI, corporate imaging) —
-/// exactly the kind of case this module exists to get right.
-pub(crate) fn home_dir() -> PathBuf {
-    #[cfg(windows)]
-    {
-        if let Some(profile) = env_non_empty("USERPROFILE") {
-            return PathBuf::from(profile);
-        }
-        if let (Some(drive), Some(path)) = (env_non_empty("HOMEDRIVE"), env_non_empty("HOMEPATH")) {
-            return PathBuf::from(format!("{drive}{path}"));
-        }
-        if let Some(home) = env_non_empty("HOME") {
-            return PathBuf::from(home);
-        }
-        PathBuf::from(".")
-    }
-    #[cfg(not(windows))]
-    {
-        match env_non_empty("HOME") {
-            Some(home) => PathBuf::from(home),
-            None => PathBuf::from("."),
-        }
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Platform detection
-// ---------------------------------------------------------------------------
-
-/// Supported platforms, mirroring `claude_swap.models.Platform`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Platform {
-    Macos,
-    Linux,
-    Wsl,
-    Windows,
-    Unknown,
-}
-
-impl Platform {
-    /// Detect the current platform.
-    ///
-    /// The Python original uses `sys.platform` (a single cross-platform
-    /// interpreter deciding at runtime) and treats WSL as Linux plus a
-    /// `WSL_DISTRO_NAME` env var check. cc-logins instead ships one
-    /// compiled binary per OS, so the OS itself is pinned at compile time
-    /// via `#[cfg(target_os = ...)]` — equivalent in effect, since a
-    /// Windows-built binary never runs under WSL and vice versa. WSL runs
-    /// Linux binaries, so a Linux-target build takes the `target_os =
-    /// "linux"` branch there too, and `WSL_DISTRO_NAME` (set by WSL itself)
-    /// distinguishes it from bare Linux at runtime, exactly as upstream
-    /// does.
-    pub fn detect() -> Self {
-        #[cfg(target_os = "macos")]
-        {
-            Platform::Macos
-        }
-        #[cfg(target_os = "windows")]
-        {
-            Platform::Windows
-        }
-        #[cfg(target_os = "linux")]
-        {
-            if env::var_os("WSL_DISTRO_NAME").is_some() {
-                Platform::Wsl
-            } else {
-                Platform::Linux
-            }
-        }
-        #[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
-        {
-            Platform::Unknown
-        }
-    }
-}
+// Environment and platform helpers live in `sys_env.rs` so the shim binary
+// can share them without linking this library. `Platform` is re-exported
+// under its long-standing path so existing callers are unchanged.
+pub use crate::sys_env::Platform;
+use crate::sys_env::{env_non_empty, home_dir};
 
 // ---------------------------------------------------------------------------
 // Path resolution (the core of this module)
@@ -204,6 +98,45 @@ pub fn default_global_config_path() -> PathBuf {
 /// Return the path to the Claude credentials file.
 pub fn credentials_path() -> PathBuf {
     claude_config_home().join(".credentials.json")
+}
+
+/// Global config file inside an explicit config folder: what Claude Code reads
+/// when started with `CLAUDE_CONFIG_DIR=<dir>`. Same legacy `.config.json`
+/// fallback as [`global_config_path`]. Read-only callers (identity checks on
+/// a profile) use this; nothing in the app writes a profile's config.
+pub fn global_config_path_in(dir: &Path) -> PathBuf {
+    let legacy = dir.join(".config.json");
+    if legacy.exists() {
+        return legacy;
+    }
+    dir.join(".claude.json")
+}
+
+/// Credentials file inside an explicit config folder (Windows and Linux; on
+/// macOS the login normally lives in the Keychain instead).
+pub fn credentials_path_in(dir: &Path) -> PathBuf {
+    dir.join(".credentials.json")
+}
+
+/// `~/.cc-logins`: the shim, its `shim.json`, and the per-account profile
+/// folders. Asserted to be a temp directory under `cfg(test)`, like the other
+/// roots this app writes to.
+pub fn cc_logins_home() -> PathBuf {
+    let resolved = crate::sys_env::cc_logins_home_dir();
+    #[cfg(test)]
+    crate::test_support::guard_real_store(&resolved);
+    resolved
+}
+
+/// Where the shim copies live. Prepended to `PATH` when the user installs
+/// the `claude` command.
+pub fn cc_logins_bin_dir() -> PathBuf {
+    cc_logins_home().join(crate::shim_core::SHIM_BIN_DIR)
+}
+
+/// Parent of every profile folder.
+pub fn profiles_root() -> PathBuf {
+    cc_logins_home().join("profiles")
 }
 
 /// Claude Code 2.1.218+'s primary OAuth refresh directory lock.
@@ -401,6 +334,7 @@ pub fn get_backup_root() -> PathBuf {
 mod tests {
     use super::*;
     use crate::test_support::{env_lock, EnvGuard};
+    use std::env;
     use std::fs;
     use tempfile::TempDir;
 
@@ -564,6 +498,45 @@ mod tests {
             credentials_path(),
             home.path().join(".claude").join(".credentials.json")
         );
+    }
+
+    // -- per-profile resolvers ------------------------------------------------
+
+    #[test]
+    fn per_dir_resolvers_stay_inside_the_given_folder() {
+        let dir = TempDir::new().unwrap();
+        assert_eq!(
+            global_config_path_in(dir.path()),
+            dir.path().join(".claude.json")
+        );
+        assert_eq!(
+            credentials_path_in(dir.path()),
+            dir.path().join(".credentials.json")
+        );
+        fs::write(dir.path().join(".config.json"), "{}").unwrap();
+        assert_eq!(
+            global_config_path_in(dir.path()),
+            dir.path().join(".config.json")
+        );
+    }
+
+    #[test]
+    fn cc_logins_home_honours_its_override_and_defaults_under_home() {
+        let _lock = env_lock();
+        let home = TempDir::new().unwrap();
+        let custom = TempDir::new().unwrap();
+        let _home_guard = set_home(home.path());
+
+        let _unset = EnvGuard::unset("CC_LOGINS_HOME");
+        assert_eq!(cc_logins_home(), home.path().join(".cc-logins"));
+        assert_eq!(
+            cc_logins_bin_dir(),
+            home.path().join(".cc-logins").join("bin")
+        );
+
+        let _set = EnvGuard::set("CC_LOGINS_HOME", custom.path().to_str().unwrap());
+        assert_eq!(cc_logins_home(), custom.path());
+        assert_eq!(profiles_root(), custom.path().join("profiles"));
     }
 
     // -- get_* compatibility aliases -----------------------------------------
