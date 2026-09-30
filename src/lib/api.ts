@@ -21,6 +21,7 @@
 import type {
   Account,
   ClaudeBinaryStatus,
+  CliStatus,
   DaemonStatus,
   DataLocations,
   DayStat,
@@ -55,6 +56,8 @@ export type IpcErrorKind =
   | "noTerminalAvailable"
   | "alreadyRegistered"
   | "cannotDisableActive"
+  | "cannotRemoveActive"
+  | "invalidInput"
   | "reloginRequired"
   | "recoveryRequired"
   | "settingsConflict"
@@ -125,6 +128,16 @@ export class IpcError extends Error {
   /** Refused to disable the currently-active account. */
   get isCannotDisableActive() {
     return this.kind === "cannotDisableActive";
+  }
+
+  /** Refused to remove the currently-active account. */
+  get isCannotRemoveActive() {
+    return this.kind === "cannotRemoveActive";
+  }
+
+  /** The request itself was malformed, e.g. a name longer than 40 characters. */
+  get isInvalidInput() {
+    return this.kind === "invalidInput";
   }
 
   /** The selected account needs a fresh interactive login before activation. */
@@ -365,24 +378,6 @@ export async function reloginAccount(accountNumber: number): Promise<Snapshot> {
 }
 
 /**
- * Registers an account from a pasted setup-token or API key rather than a
- * live Claude Code session. The token only ever passes through here on its
- * way to the backend — callers must not log, echo, or hold onto it.
- *
- * Throws rather than falling back when there is no backend, exactly like
- * `switchAccount`.
- */
-export async function addToken(token: string, email?: string, alias?: string): Promise<Snapshot> {
-  if (!hasBackend()) {
-    throw new IpcError(
-      "internal",
-      "Not running in the desktop app, so a token cannot be added.",
-    );
-  }
-  return call<Snapshot>("add_token", { token, email, alias });
-}
-
-/**
  * Holds an account out of (or back into) auto-rotation. Disabling the
  * currently-active account is refused by the backend — callers should
  * surface that refusal specifically rather than as a generic failure.
@@ -398,6 +393,56 @@ export async function setAccountEnabled(accountNumber: number, enabled: boolean)
     );
   }
   return call<Snapshot>("set_account_enabled", { accountNumber, enabled });
+}
+
+/**
+ * Renames an account. `null` or a blank string clears the name so the masked
+ * email shows again; names over 40 characters are refused (`invalidInput`).
+ *
+ * Throws rather than falling back when there is no backend, exactly like
+ * `switchAccount`.
+ */
+export async function setAccountAlias(accountNumber: number, alias: string | null): Promise<Snapshot> {
+  if (!hasBackend()) {
+    throw new IpcError("internal", "Not running in the desktop app, so accounts cannot be renamed.");
+  }
+  const trimmed = alias?.trim() ?? "";
+  return call<Snapshot>("set_account_alias", { accountNumber, alias: trimmed === "" ? null : trimmed });
+}
+
+/**
+ * Removes an account from this app's own store. Claude Code's live login is
+ * never touched, and removing the account in use is refused
+ * (`cannotRemoveActive`) — switch away first.
+ */
+export async function removeAccount(accountNumber: number): Promise<Snapshot> {
+  if (!hasBackend()) {
+    throw new IpcError("internal", "Not running in the desktop app, so accounts cannot be removed.");
+  }
+  return call<Snapshot>("remove_account", { accountNumber });
+}
+
+/**
+ * Sets the account order. This is the backend's rotation order too, so the
+ * "next available" strategy follows it. `order` must list every slot once.
+ */
+export async function reorderAccounts(order: number[]): Promise<Snapshot> {
+  if (!hasBackend()) {
+    throw new IpcError("internal", "Not running in the desktop app, so accounts cannot be reordered.");
+  }
+  return call<Snapshot>("reorder_accounts", { order });
+}
+
+/**
+ * Starts a stopped WSL distro and checks it for a Claude Code login. The only
+ * call allowed to boot a Linux VM, so it is wired to an explicit button only —
+ * never an effect or a timer.
+ */
+export async function wakeEnvironment(envId: string): Promise<Snapshot> {
+  if (!hasBackend()) {
+    throw new IpcError("internal", "Not running in the desktop app, so a WSL distro cannot be started.");
+  }
+  return call<Snapshot>("wake_environment", { envId });
 }
 
 
@@ -556,6 +601,7 @@ export const DEFAULT_SETTINGS: Settings = {
   theme: "system",
   clockFormat: "system",
   claudeBinaryPath: null,
+  displayMode: "used",
 };
 
 /** Current settings. Falls back to the same defaults the backend ships with. */
@@ -661,6 +707,32 @@ export async function dataLocations(): Promise<Sourced<DataLocations | null>> {
 export async function claudeBinaryStatus(): Promise<Sourced<ClaudeBinaryStatus | null>> {
   if (!hasBackend()) return { data: null, live: false };
   return { data: await call<ClaudeBinaryStatus>("claude_binary_status"), live: true };
+}
+
+/**
+ * Whether the `claude` command is installed and wins on PATH. A reader, so
+ * it degrades to `null` with no backend. Can take a few seconds on macOS and
+ * Linux, where it asks a fresh login shell.
+ */
+export async function cliStatus(): Promise<Sourced<CliStatus | null>> {
+  if (!hasBackend()) return { data: null, live: false };
+  return { data: await call<CliStatus>("cli_status"), live: true };
+}
+
+/** Install the `claude` command: copy the shim and put it first on PATH. */
+export async function installCli(): Promise<CliStatus> {
+  if (!hasBackend()) {
+    throw new IpcError("internal", "Not running in the desktop app, so nothing can be installed.");
+  }
+  return call<CliStatus>("install_cli");
+}
+
+/** Remove the `claude` command from PATH and delete the copies. */
+export async function uninstallCli(): Promise<CliStatus> {
+  if (!hasBackend()) {
+    throw new IpcError("internal", "Not running in the desktop app, so nothing can be removed.");
+  }
+  return call<CliStatus>("uninstall_cli");
 }
 
 /**

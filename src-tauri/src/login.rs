@@ -128,28 +128,6 @@ const UNKNOWN_LINUX_TERMINAL: LinuxTerminal = LinuxTerminal {
 // Public types
 // ---------------------------------------------------------------------------
 
-/// A completed interactive login.
-#[derive(Debug, Clone)]
-pub struct LoginOutcome {
-    /// The full `.credentials.json` contents captured from the isolated temp
-    /// config dir — a JSON object with a `claudeAiOauth` key, the same shape
-    /// Claude Code itself writes and the same shape [`crate::credentials::CredentialStore`]
-    /// expects for a stored account.
-    pub credentials: String,
-    /// Stable account UUID from the resolved profile. Replacement flows use
-    /// this to prove an isolated login belongs to the selected existing slot.
-    pub uuid: Option<String>,
-    /// Best-effort identity resolved via [`crate::oauth::fetch_oauth_profile`].
-    /// `None` if the profile lookup failed or was unreachable — the login
-    /// itself still succeeded; the caller should fall back to a placeholder
-    /// label rather than treat this as an error.
-    pub email: Option<String>,
-    /// Best-effort organization UUID from the same profile lookup. This is an
-    /// identifier, not a human-readable org name — [`crate::oauth::TokenAccount`]
-    /// (what `fetch_oauth_profile` resolves) does not carry a display name.
-    pub organization_uuid: Option<String>,
-}
-
 /// Failure modes for [`interactive_login`]. The UI is expected to branch on
 /// these — see each variant's doc for the intended user-facing meaning.
 #[derive(Debug, Error)]
@@ -418,164 +396,9 @@ fn spawn_launch(plan: &LaunchPlan) -> io::Result<(std::process::Child, bool)> {
 // Credential validation (pure)
 // ---------------------------------------------------------------------------
 
-/// Read `path` and return its contents only if they parse as JSON containing
-/// a non-empty `claudeAiOauth.accessToken`. `None` on any read/parse/shape
-/// failure — including a partially-written file mid-flush, which is expected
-/// and simply means "keep polling", not an error.
-fn try_read_valid_credential(path: &Path) -> Option<String> {
-    let text = std::fs::read_to_string(path).ok()?;
-    let token = crate::oauth::extract_access_token(&text)?;
-    if token.is_empty() {
-        return None;
-    }
-    Some(text)
-}
-
-/// Run `claude auth status` against `config_dir` as the authoritative
-/// success check (rather than trusting the credential file's existence
-/// alone, per this module's design). `false` on any spawn failure or non-zero
-/// exit.
-fn verify_login_status(claude_path: &Path, config_dir: &Path) -> bool {
-    let mut cmd = std::process::Command::new(claude_path);
-    cmd.args(["auth", "status"])
-        .env("CLAUDE_CONFIG_DIR", config_dir);
-    // A silent check, unlike the sign-in terminal above, which is meant to be
-    // seen — so it must not flash a console of its own.
-    #[cfg(windows)]
-    {
-        use std::os::windows::process::CommandExt;
-        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-        cmd.creation_flags(CREATE_NO_WINDOW);
-    }
-    cmd.output()
-        .map(|out| out.status.success())
-        .unwrap_or(false)
-}
-
-/// Final determination once the terminal window has closed and no more
-/// waiting will happen. Distinguishes three outcomes the UI should treat
-/// differently:
-///
-/// - No credential file (or an empty one) ever appeared: [`LoginError::Cancelled`]
-///   — the ordinary "the user closed the window" case, not an error.
-/// - A file appeared but doesn't hold a usable token, or `claude auth status`
-///   doesn't confirm it: [`LoginError::BadCredential`] — something landed but
-///   it isn't trustworthy, worth telling the user about distinctly from a
-///   plain cancellation.
-/// - A file appeared, validates, and `claude auth status` confirms it: `Ok`.
-fn classify_window_closed(claude_path: &Path, config_dir: &Path) -> Result<String, LoginError> {
-    let credentials_path = config_dir.join(".credentials.json");
-    let text = match std::fs::read_to_string(&credentials_path) {
-        Ok(t) if !t.trim().is_empty() => t,
-        _ => return Err(LoginError::Cancelled),
-    };
-
-    let has_token = crate::oauth::extract_access_token(&text)
-        .map(|t| !t.is_empty())
-        .unwrap_or(false);
-    if !has_token {
-        return Err(LoginError::BadCredential(
-            "credential file did not contain a usable access token",
-        ));
-    }
-
-    if !verify_login_status(claude_path, config_dir) {
-        return Err(LoginError::BadCredential(
-            "claude auth status did not confirm the captured credential",
-        ));
-    }
-
-    Ok(text)
-}
-
 // ---------------------------------------------------------------------------
 // The blocking poll loop
 // ---------------------------------------------------------------------------
-
-/// Spawn the terminal and poll until a validated credential appears, the
-/// window closes with nothing valid captured, or [`LOGIN_TIMEOUT`] elapses.
-///
-/// Runs on a blocking thread (see [`interactive_login`]) — every step here
-/// (`spawn`, `try_wait`, `fs::read_to_string`, `Command::output`) is
-/// synchronous I/O, deliberately not `tokio::fs`/`tokio::process` (neither is
-/// among this crate's enabled `tokio` features).
-fn run_login_blocking(
-    claude_path: &Path,
-    config_dir: &Path,
-    plan: LaunchPlan,
-) -> Result<String, LoginError> {
-    let (child, tracks_window_lifetime) = spawn_launch(&plan)?;
-
-    // Only a genuine "this child *is* the terminal window" handle is worth
-    // polling for exit. The detached-launcher case (Windows `start`, macOS
-    // `osascript`) exits almost immediately regardless of user action; reap
-    // it so it doesn't linger as a zombie, but treat it as gone from here on.
-    let mut window_child = if tracks_window_lifetime {
-        Some(child)
-    } else {
-        let mut child = child;
-        let _ = child.wait();
-        None
-    };
-
-    let credentials_path = config_dir.join(".credentials.json");
-    let started = Instant::now();
-    let deadline = started + LOGIN_TIMEOUT;
-
-    loop {
-        if let Some(creds) = try_read_valid_credential(&credentials_path) {
-            if verify_login_status(claude_path, config_dir) {
-                return Ok(creds);
-            }
-            // File present and parses, but `claude auth status` doesn't
-            // (yet) agree — could be a write race with a still-settling
-            // config dir. Keep polling rather than trusting the file alone.
-        }
-
-        if let Some(child) = window_child.as_mut() {
-            let wait_result = child.try_wait();
-            match wait_result {
-                Ok(Some(status)) if started.elapsed() < MIN_WINDOW_LIFETIME => {
-                    window_child = None;
-                    if !status.success() {
-                        // Too fast *and* failed: the emulator rejected our
-                        // flags, so no window ever opened. Don't wait 10 min.
-                        return Err(LoginError::Io(io::Error::other(
-                            "terminal emulator exited immediately without opening a window",
-                        )));
-                    }
-                    // Exited cleanly and instantly: a hand-off to a window we
-                    // can't observe. Keep polling for the credential.
-                    log::info!("login terminal handed off; falling back to credential polling");
-                }
-                Ok(Some(_status)) => {
-                    // Window closed. Give the filesystem one last instant in
-                    // case completion raced the window closing itself, then
-                    // make the final call (Cancelled vs BadCredential vs Ok).
-                    std::thread::sleep(Duration::from_millis(300));
-                    return classify_window_closed(claude_path, config_dir);
-                }
-                Ok(None) => {}
-                Err(_) => {
-                    // Can no longer observe this child (platform-specific
-                    // wait failure) — fall back to file-polling + timeout
-                    // only, same as the detached-launcher platforms.
-                    window_child = None;
-                }
-            }
-        }
-
-        if Instant::now() >= deadline {
-            if let Some(mut child) = window_child.take() {
-                let _ = child.kill();
-                let _ = child.wait();
-            }
-            return Err(LoginError::TimedOut);
-        }
-
-        std::thread::sleep(POLL_INTERVAL);
-    }
-}
 
 // ---------------------------------------------------------------------------
 // Public entry point
@@ -644,76 +467,137 @@ pub fn sweep_stale_login_dirs(min_age: std::time::Duration) -> usize {
     removed
 }
 
-pub async fn interactive_login(
+// ---------------------------------------------------------------------------
+// v0.4: signing in to a profile folder
+// ---------------------------------------------------------------------------
+
+/// Who a finished profile sign-in turned out to be. Carries no credential:
+/// the login stays in the folder, where Claude Code put it.
+#[derive(Debug, Clone)]
+pub struct ProfileSignIn {
+    pub identity: crate::auth_status::FolderIdentity,
+    pub subscription_type: Option<String>,
+}
+
+fn modified(path: &Path) -> Option<std::time::SystemTime> {
+    std::fs::metadata(path).and_then(|m| m.modified()).ok()
+}
+
+/// A completed sign-in in `config_dir`: `.claude.json` names an account and
+/// has been written since `baseline` (so an old login in the folder does not
+/// count), and `claude auth status` agrees.
+fn profile_signed_in(
+    claude_path: &Path,
+    config_dir: &str,
+    baseline: Option<std::time::SystemTime>,
+) -> Option<ProfileSignIn> {
+    let global = crate::paths::global_config_path_in(Path::new(config_dir));
+    let changed = match (baseline, modified(&global)) {
+        (Some(before), Some(now)) => now != before,
+        (None, Some(_)) => true,
+        (_, None) => false,
+    };
+    if !changed {
+        return None;
+    }
+    let identity = crate::auth_status::read_folder_identity(&global)?;
+    let status = crate::auth_status::check(claude_path, Some(config_dir)).ok()?;
+    if !status.is_claude_account() {
+        return None;
+    }
+    Some(ProfileSignIn {
+        identity,
+        subscription_type: status.subscription_type,
+    })
+}
+
+fn run_profile_login_blocking(
+    claude_path: &Path,
+    config_dir: &str,
+    plan: LaunchPlan,
+) -> Result<ProfileSignIn, LoginError> {
+    let global = crate::paths::global_config_path_in(Path::new(config_dir));
+    let baseline = modified(&global);
+    let (child, tracks_window_lifetime) = spawn_launch(&plan)?;
+    let mut window_child = if tracks_window_lifetime {
+        Some(child)
+    } else {
+        let mut child = child;
+        let _ = child.wait();
+        None
+    };
+
+    let started = Instant::now();
+    let deadline = started + LOGIN_TIMEOUT;
+    loop {
+        if let Some(done) = profile_signed_in(claude_path, config_dir, baseline) {
+            return Ok(done);
+        }
+        if let Some(child) = window_child.as_mut() {
+            match child.try_wait() {
+                Ok(Some(status)) if started.elapsed() < MIN_WINDOW_LIFETIME => {
+                    window_child = None;
+                    if !status.success() {
+                        return Err(LoginError::Io(io::Error::other(
+                            "terminal emulator exited immediately without opening a window",
+                        )));
+                    }
+                }
+                Ok(Some(_)) => {
+                    std::thread::sleep(Duration::from_millis(300));
+                    return profile_signed_in(claude_path, config_dir, baseline)
+                        .ok_or(LoginError::Cancelled);
+                }
+                Ok(None) => {}
+                Err(_) => window_child = None,
+            }
+        }
+        if Instant::now() >= deadline {
+            if let Some(mut child) = window_child.take() {
+                let _ = child.kill();
+                let _ = child.wait();
+            }
+            return Err(LoginError::TimedOut);
+        }
+        // `claude auth status` only runs once `.claude.json` has changed, so
+        // a slower poll than the credential-file loop costs nothing.
+        std::thread::sleep(POLL_INTERVAL * 2);
+    }
+}
+
+/// Sign in to Claude in `config_dir` through Claude Code's own
+/// `claude auth login`, in a visible terminal. The login lands in that folder
+/// and stays there: this app never reads it back as a credential, only asks
+/// who it belongs to.
+pub async fn sign_in_to_profile(
     claude_binary_setting: Option<PathBuf>,
-) -> Result<LoginOutcome, LoginError> {
+    config_dir: String,
+) -> Result<ProfileSignIn, LoginError> {
     let resolved =
         claude_cli::resolve(claude_binary_setting).map_err(LoginError::ClaudeNotInstalled)?;
-    log::info!(
-        "using claude binary from {}: {}",
-        resolved.source.label(),
-        resolved.path.display()
-    );
     let claude_path = resolved.path;
-
-    // Distinctive prefix on purpose: `TempDir::new()` produces a generic
-    // `.tmpXXXXXX` name, indistinguishable from every other program's scratch
-    // directory — which makes the startup sweep below impossible to do safely.
-    // See `sweep_stale_login_dirs`.
-    let temp_dir = tempfile::Builder::new().prefix(TEMP_DIR_PREFIX).tempdir()?;
-    let temp_path = temp_dir.path().to_path_buf();
-    log::info!(
-        "interactive login: isolated config dir {} (real ~/.claude untouched)",
-        temp_path.display()
-    );
-
-    let plan = build_launch_plan(&claude_path, &temp_path)?;
-
-    let blocking_claude_path = claude_path.clone();
-    let blocking_temp_path = temp_path.clone();
-    let poll_result = tokio::task::spawn_blocking(move || {
-        run_login_blocking(&blocking_claude_path, &blocking_temp_path, plan)
+    std::fs::create_dir_all(&config_dir)?;
+    let plan = build_launch_plan(&claude_path, Path::new(&config_dir))?;
+    let result = tokio::task::spawn_blocking(move || {
+        run_profile_login_blocking(&claude_path, &config_dir, plan)
     })
     .await;
-
-    let credentials = match poll_result {
-        Ok(Ok(creds)) => creds,
-        Ok(Err(e)) => {
+    match result {
+        Ok(Ok(done)) => {
+            log::info!("profile sign-in succeeded");
+            Ok(done)
+        }
+        Ok(Err(error)) => {
             log::info!(
-                "interactive login did not complete: {}",
-                login_outcome_kind(&e)
+                "profile sign-in did not complete: {}",
+                login_outcome_kind(&error)
             );
-            return Err(e);
-            // `temp_dir` drops here, deleting the temp config dir.
+            Err(error)
         }
-        Err(_join_err) => {
-            log::warn!("interactive login worker task did not finish cleanly");
-            return Err(LoginError::Io(io::Error::other(
-                "login worker task did not finish cleanly",
-            )));
-            // `temp_dir` drops here too.
-        }
-    };
-
-    // Best-effort identity resolution — never fatal to a successful login.
-    let access_token = crate::oauth::extract_access_token(&credentials);
-    let identity = match access_token {
-        Some(token) => crate::oauth::fetch_oauth_profile(&token).await,
-        None => None,
-    };
-
-    log::info!("interactive login succeeded");
-
-    Ok(LoginOutcome {
-        credentials,
-        uuid: identity
-            .as_ref()
-            .map(|i| i.uuid.clone())
-            .filter(|uuid| !uuid.is_empty()),
-        email: identity.as_ref().and_then(|i| i.email.clone()),
-        organization_uuid: identity.as_ref().and_then(|i| i.organization_uuid.clone()),
-    })
-    // `temp_dir` drops here on the success path too.
+        Err(_) => Err(LoginError::Io(io::Error::other(
+            "login worker task did not finish cleanly",
+        ))),
+    }
 }
 
 /// A short, content-free label for a [`LoginError`], for the one log line
@@ -1065,108 +949,7 @@ mod tests {
 
     // -- credential validation -------------------------------------------------
 
-    #[test]
-    fn try_read_valid_credential_accepts_a_good_blob() {
-        let dir = TempDir::new().unwrap();
-        let path = dir.path().join(".credentials.json");
-        std::fs::write(
-            &path,
-            r#"{"claudeAiOauth":{"accessToken":"sk-ant-oat-real-token","refreshToken":"r1"}}"#,
-        )
-        .unwrap();
-
-        let result = try_read_valid_credential(&path);
-        assert!(result.is_some());
-        assert!(result.unwrap().contains("sk-ant-oat-real-token"));
-    }
-
-    #[test]
-    fn try_read_valid_credential_rejects_missing_file() {
-        let dir = TempDir::new().unwrap();
-        let path = dir.path().join(".credentials.json");
-        // Never created.
-        assert_eq!(try_read_valid_credential(&path), None);
-    }
-
-    #[test]
-    fn try_read_valid_credential_rejects_malformed_json() {
-        let dir = TempDir::new().unwrap();
-        let path = dir.path().join(".credentials.json");
-        std::fs::write(&path, b"{not valid json").unwrap();
-        assert_eq!(try_read_valid_credential(&path), None);
-    }
-
-    #[test]
-    fn try_read_valid_credential_rejects_empty_access_token() {
-        let dir = TempDir::new().unwrap();
-        let path = dir.path().join(".credentials.json");
-        std::fs::write(&path, r#"{"claudeAiOauth":{"accessToken":""}}"#).unwrap();
-        assert_eq!(try_read_valid_credential(&path), None);
-    }
-
-    #[test]
-    fn try_read_valid_credential_rejects_missing_oauth_key() {
-        let dir = TempDir::new().unwrap();
-        let path = dir.path().join(".credentials.json");
-        std::fs::write(&path, r#"{"somethingElse": true}"#).unwrap();
-        assert_eq!(try_read_valid_credential(&path), None);
-    }
-
-    #[test]
-    fn try_read_valid_credential_rejects_partially_written_file() {
-        // Simulates a write caught mid-flush: valid UTF-8, truncated JSON.
-        let dir = TempDir::new().unwrap();
-        let path = dir.path().join(".credentials.json");
-        std::fs::write(&path, r#"{"claudeAiOauth":{"accessToken":"sk-ant-oat"#).unwrap();
-        assert_eq!(try_read_valid_credential(&path), None);
-    }
-
     // -- window-closed classification (Cancelled vs BadCredential) ------------
-
-    #[test]
-    fn classify_window_closed_is_cancelled_when_nothing_ever_appeared() {
-        let dir = TempDir::new().unwrap();
-        // No .credentials.json written at all — the ordinary "closed the
-        // window without logging in" case.
-        let bogus_claude = Path::new("definitely-not-a-real-claude-binary-xyz");
-        let err = classify_window_closed(bogus_claude, dir.path()).unwrap_err();
-        assert!(matches!(err, LoginError::Cancelled));
-    }
-
-    #[test]
-    fn classify_window_closed_is_cancelled_when_file_is_empty() {
-        let dir = TempDir::new().unwrap();
-        std::fs::write(dir.path().join(".credentials.json"), b"").unwrap();
-        let bogus_claude = Path::new("definitely-not-a-real-claude-binary-xyz");
-        let err = classify_window_closed(bogus_claude, dir.path()).unwrap_err();
-        assert!(matches!(err, LoginError::Cancelled));
-    }
-
-    #[test]
-    fn classify_window_closed_is_bad_credential_when_file_has_no_token() {
-        let dir = TempDir::new().unwrap();
-        std::fs::write(dir.path().join(".credentials.json"), r#"{"oops": true}"#).unwrap();
-        let bogus_claude = Path::new("definitely-not-a-real-claude-binary-xyz");
-        let err = classify_window_closed(bogus_claude, dir.path()).unwrap_err();
-        assert!(matches!(err, LoginError::BadCredential(_)));
-    }
-
-    #[test]
-    fn classify_window_closed_is_bad_credential_when_status_check_fails() {
-        let dir = TempDir::new().unwrap();
-        std::fs::write(
-            dir.path().join(".credentials.json"),
-            r#"{"claudeAiOauth":{"accessToken":"sk-ant-oat-looks-real"}}"#,
-        )
-        .unwrap();
-        // A token is present, but the "claude" binary here doesn't exist, so
-        // `claude auth status` can't run and can't confirm it — this
-        // exercises the failure path of `verify_login_status` without
-        // spawning any real process (Command::spawn fails with NotFound).
-        let bogus_claude = Path::new("definitely-not-a-real-claude-binary-xyz");
-        let err = classify_window_closed(bogus_claude, dir.path()).unwrap_err();
-        assert!(matches!(err, LoginError::BadCredential(_)));
-    }
 
     // -- temp-dir cleanup -------------------------------------------------------
 

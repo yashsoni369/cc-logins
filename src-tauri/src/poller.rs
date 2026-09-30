@@ -565,8 +565,17 @@ pub fn decide(
         .collect();
 
     // Rule 3: hysteresis pre-filter, scoped to `last_switch_from` only.
+    // Once any account has its own folder, auto-switch only ever selects a
+    // ready profile account; it never swaps a v0.3 account in again.
+    let profiles_in_use = all_accounts.iter().any(|a| a.profile.is_some());
     let candidates: Vec<Account> = all_accounts
         .iter()
+        .filter(|a| {
+            !profiles_in_use
+                || a.profile
+                    .as_ref()
+                    .is_some_and(|p| p.state == crate::model::ProfileState::Ready)
+        })
         .filter(|a| hysteresis_ok(a, state, config))
         .cloned()
         .collect();
@@ -1000,6 +1009,8 @@ pub(crate) struct TrayCache(Mutex<Option<u64>>);
 pub fn publish_snapshot(app: &AppHandle, snapshot: &Snapshot) {
     let spec = tray_spec_for(snapshot, ambient_theme_cached());
     paint_icon(app, spec);
+    // Coalesced and applied off this thread; see `tray_menu::schedule_update`.
+    crate::tray_menu::schedule_update(app, snapshot);
 
     if let Err(e) = app.emit("snapshot://updated", snapshot) {
         log::debug!("publish_snapshot: emit snapshot failed: {e}");
@@ -1130,6 +1141,8 @@ pub async fn run(
     );
 
     let history = open_history(&app);
+    let started = std::time::Instant::now();
+    let mut last_prune: Option<std::time::Instant> = None;
     let mut budget = open_budget(&app);
     let mut state = PollerLoopState::new(initial_policy);
     let mut prev_binding_pct: Option<f64> = None;
@@ -1255,6 +1268,11 @@ pub async fn run(
                 Ok(Err(e)) => log::warn!("poller: history record failed: {e}"),
                 Err(_) => log::warn!("poller: history record panicked; continuing"),
             }
+
+            if history_prune_due(started.elapsed(), last_prune.map(|at| at.elapsed())) {
+                last_prune = Some(std::time::Instant::now());
+                prune_history(&app, store);
+            }
         }
 
         // Paint the tray and push the update to the frontend — see
@@ -1376,7 +1394,13 @@ async fn perform_switch(app: &AppHandle, snapshot: &Snapshot, from: u32, to: u32
         return false;
     };
 
-    let result = tokio::spawn(async move { switcher::switch_to(&target).await }).await;
+    // Auto-switch selects an account for new sessions (registry + shim.json).
+    // A v0.3 account is never swapped into Claude Code again.
+    if target.profile.is_none() {
+        log::warn!("poller: account {to} has not moved to its own folder; not selecting it");
+        return false;
+    }
+    let result = tokio::task::spawn_blocking(move || crate::profile_registry::select(to)).await;
     match result {
         Ok(Ok(())) => {
             let _ = app.emit(
@@ -1462,6 +1486,38 @@ fn open_history(app: &AppHandle) -> Option<HistoryStore> {
             log::warn!("poller: could not open history store: {e}");
             None
         }
+    }
+}
+
+/// First prune this long after the loop starts: late enough to stay out of
+/// the startup burst, early enough that a session never runs unpruned.
+const HISTORY_PRUNE_FIRST_AFTER: Duration = Duration::from_secs(60);
+
+/// Then at most this often. Retention is measured in days.
+const HISTORY_PRUNE_EVERY: Duration = Duration::from_secs(24 * 3600);
+
+/// Whether raw history is due for pruning, given time since the loop started
+/// and since the last prune (`None` when this run has not pruned yet).
+fn history_prune_due(since_start: Duration, since_last_prune: Option<Duration>) -> bool {
+    match since_last_prune {
+        Some(elapsed) => elapsed >= HISTORY_PRUNE_EVERY,
+        None => since_start >= HISTORY_PRUNE_FIRST_AFTER,
+    }
+}
+
+/// Roll raw samples older than the user's retention setting into daily
+/// rollups. Best-effort: a failure is logged and retried at the next due time.
+fn prune_history(app: &AppHandle, store: &HistoryStore) {
+    let keep_days = app
+        .state::<crate::commands::AppState>()
+        .settings
+        .snapshot()
+        .settings
+        .history_retention_days;
+    match std::panic::catch_unwind(AssertUnwindSafe(|| store.prune(keep_days))) {
+        Ok(Ok(n)) => log::info!("poller: pruned {n} raw sample(s) older than {keep_days}d"),
+        Ok(Err(e)) => log::warn!("poller: history prune failed: {e}"),
+        Err(_) => log::warn!("poller: history prune panicked; continuing"),
     }
 }
 
@@ -1604,6 +1660,18 @@ mod tests {
     use super::*;
     use crate::model::{EnvKind, EnvStatus, Environment, Usage, UsageWindow};
     use crate::settings::{Settings, Strategy as SettingsStrategy};
+
+    // -- history pruning cadence ------------------------------------------------
+
+    #[test]
+    fn history_is_pruned_once_shortly_after_start_then_at_most_daily() {
+        let minute = Duration::from_secs(60);
+        assert!(!history_prune_due(Duration::from_secs(5), None));
+        assert!(history_prune_due(minute, None));
+        assert!(!history_prune_due(Duration::from_secs(7200), Some(minute)));
+        let day = Some(HISTORY_PRUNE_EVERY);
+        assert!(history_prune_due(Duration::from_secs(90_000), day));
+    }
 
     // -- fixtures -------------------------------------------------------------
 

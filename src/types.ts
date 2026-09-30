@@ -108,7 +108,10 @@ export interface Account {
   organizationName?: string;
   organizationUuid?: string;
   isOrganization?: boolean;
-  /** True for the one account whose credentials are currently live. */
+  /**
+   * The current account: for a profile account, the one new sessions start
+   * with; for a v0.3 account, the one whose credentials are live.
+   */
   active: boolean;
   usageStatus: UsageStatus;
   usage?: Usage;
@@ -116,7 +119,32 @@ export interface Account {
   usageFetchedAt?: string;
   /** Age of the measurement. Drives the staleness badge. */
   usageAgeSeconds?: number;
+  /**
+   * Present once the account has its own Claude Code folder (v0.4). Absent
+   * for an account still held the v0.3 way.
+   */
+  profile?: AccountProfile;
+  /** How current `usage` is, for profile accounts. */
+  usageFreshness?: UsageFreshness;
 }
+
+export interface AccountProfile {
+  /** Uses Claude Code's own default folder. */
+  isDefault: boolean;
+  /** Slug of its `claude-<slug>` command. */
+  launcher?: string;
+  state: "ready" | "loginRequired" | "migrationPending" | "identityMismatch";
+}
+
+/**
+ * A profile account is measured only while Claude Code keeps its token
+ * fresh. Otherwise nobody is using it, so its last reading still holds;
+ * windows that reset since are shown at 0%.
+ */
+export type UsageFreshness =
+  | { kind: "live" }
+  | { kind: "lastKnown"; ageSeconds: number }
+  | { kind: "reset"; ageSeconds: number };
 
 /** A distinct credential store — native Windows, a WSL distro, or a profile dir. */
 export interface Environment {
@@ -378,6 +406,13 @@ export interface Settings {
    * Trimmed by the backend; empty commits as null.
    */
   claudeBinaryPath: string | null;
+  /**
+   * Whether meters read as utilisation ("used") or what remains ("left").
+   * Display only: quota state and its colour always follow utilisation, so
+   * flipping this can never make a nearly-full account look calm. Optional
+   * because a pre-0.3 backend does not send it.
+   */
+  displayMode?: "used" | "left";
 }
 
 export interface SettingsSnapshot {
@@ -427,6 +462,33 @@ export interface DataLocations {
  * `src-tauri/src/commands.rs::claude_binary_status`. Read-only — set the
  * override via `Settings.claudeBinaryPath` instead.
  */
+/**
+ * Whether a new terminal gets this app's `claude` command (the shim that
+ * starts Claude Code on the account picked for new sessions).
+ */
+export type CliHealth =
+  | { state: "notInstalled" }
+  | { state: "installed" }
+  /** Installed, but another `claude` earlier on PATH wins. */
+  | { state: "shadowed"; by: string };
+
+/** A per-account `claude-<slug>` command. */
+export interface CliLauncher {
+  slug: string;
+  accountNumber: number;
+  command: string;
+}
+
+export interface CliStatus {
+  health: CliHealth;
+  /** False in development builds, which do not ship the shim. */
+  shimAvailable: boolean;
+  binDir: string;
+  /** Full path of the `claude` copy, for editor settings that want one. */
+  commandPath: string;
+  launchers: CliLauncher[];
+}
+
 export interface ClaudeBinaryStatus {
   /** Whether a usable binary was found. */
   found: boolean;

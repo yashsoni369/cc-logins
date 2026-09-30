@@ -21,6 +21,9 @@ edition = "2021"
 # `std::panic::PanicHookInfo` — stabilised, renamed from `PanicInfo`, in 1.81.)
 rust-version = "1.85"
 license = "MIT"
+# Two binaries: the app, and the `claude` shim in src/bin/cc-logins-shim.rs.
+# `cargo run` and `tauri dev` must start the app.
+default-run = "cc-logins"
 
 # Portions of the credential, path and usage logic are ported from
 # claude-swap (MIT) — https://github.com/realiti4/claude-swap
@@ -85,6 +88,12 @@ windows-sys = { version = "0.61", features = [
   "Win32_Storage_FileSystem",
   "Win32_System_IO",
   "Win32_Security_Cryptography",
+  # The shim: keeps Ctrl+C from killing it while Claude Code runs as its child.
+  "Win32_System_Console",
+  # "Install the claude command": the per-user Path registry value, and the
+  # WM_SETTINGCHANGE broadcast that tells Explorer it changed.
+  "Win32_System_Registry",
+  "Win32_UI_WindowsAndMessaging",
 ] }
 
 [dev-dependencies]

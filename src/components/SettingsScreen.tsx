@@ -1,69 +1,41 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import AboutSection from "./AboutSection";
 import { Loading } from "./Loading";
 import Toggle from "./Toggle";
+import RulePreview from "./settings/RulePreview";
+import Segmented, { type SegOption } from "./ui/Segmented";
 import type { UseUpdateResult } from "../lib/useUpdate";
 import { claudeBinaryStatus, IpcError } from "../lib/api";
-import type { ClockFormat } from "../lib/time";
+import ClaudeCommandSection from "./settings/ClaudeCommandSection";
+import { ensureNotificationPermission, useAutostart } from "../lib/notifications";
+import { useNow, type ClockFormat } from "../lib/time";
+import { useBurnSamples } from "../lib/useBurnSamples";
 import type { UseSettingsResult } from "../lib/useSettings";
 import type { Theme } from "../lib/useTheme";
-import type { ClaudeBinaryStatus, Settings } from "../types";
+import type { ClaudeBinaryStatus, Settings, Snapshot } from "../types";
 
 /** `undefined` while still fetching; `null` once known unavailable (no backend). */
 type Loadable<T> = T | null | undefined;
-
-interface SegOption<T extends string> {
-  id: T;
-  label: string;
-}
-
-/** A `.seg` segmented control, made operable the same way. */
-function Segmented<T extends string>({
-  options,
-  value,
-  onChange,
-  ariaLabel,
-}: {
-  options: Array<SegOption<T>>;
-  value: T;
-  onChange: (v: T) => void;
-  ariaLabel: string;
-}) {
-  return (
-    <div className="seg" role="radiogroup" aria-label={ariaLabel}>
-      {options.map((opt) => (
-        <span
-          key={opt.id}
-          role="radio"
-          aria-checked={opt.id === value}
-          tabIndex={0}
-          className={opt.id === value ? "on" : undefined}
-          onClick={() => onChange(opt.id)}
-          onKeyDown={(e) => {
-            if (e.key === "Enter" || e.key === " ") {
-              e.preventDefault();
-              onChange(opt.id);
-            }
-          }}
-        >
-          {opt.label}
-        </span>
-      ))}
-    </div>
-  );
-}
 
 /** Discretised view of `graceSeconds` — the real field is continuous, this control picks among three common values. */
 type GracePeriod = "off" | "60s" | "5m";
 
 const GRACE_SECONDS: Record<GracePeriod, number> = { off: 0, "60s": 60, "5m": 300 };
 
-/** Nearest `GracePeriod` bucket for an arbitrary `graceSeconds` value, so a value set outside this UI (or by a future screen) still displays sensibly. */
-function graceBucket(seconds: number): GracePeriod {
-  const options: GracePeriod[] = ["off", "60s", "5m"];
-  return options.reduce((best, id) =>
-    Math.abs(GRACE_SECONDS[id] - seconds) < Math.abs(GRACE_SECONDS[best] - seconds) ? id : best,
-  );
+/** Discretised `cooldownSeconds`: how long after a switch before auto-switch may move again. */
+type Cooldown = "5m" | "15m" | "1h";
+
+const COOLDOWN_SECONDS: Record<Cooldown, number> = { "5m": 300, "15m": 900, "1h": 3600 };
+
+/** Discretised `historyRetentionDays`: how long detailed readings are kept before being summarised by day. */
+type Retention = "7" | "14" | "30" | "90";
+
+/**
+ * Nearest option for a value set outside this UI (or by a future screen), so
+ * it still displays sensibly.
+ */
+function nearest<T extends string>(ids: T[], value: number, toNumber: (id: T) => number): T {
+  return ids.reduce((best, id) => (Math.abs(toNumber(id) - value) < Math.abs(toNumber(best) - value) ? id : best));
 }
 
 const THRESHOLD_MIN = 50;
@@ -84,6 +56,19 @@ const GRACE_OPTIONS: Array<SegOption<GracePeriod>> = [
   { id: "5m", label: "5m" },
 ];
 
+const COOLDOWN_OPTIONS: Array<SegOption<Cooldown>> = [
+  { id: "5m", label: "5 min" },
+  { id: "15m", label: "15 min" },
+  { id: "1h", label: "1 hour" },
+];
+
+const RETENTION_OPTIONS: Array<SegOption<Retention>> = [
+  { id: "7", label: "7 days" },
+  { id: "14", label: "14 days" },
+  { id: "30", label: "30 days" },
+  { id: "90", label: "90 days" },
+];
+
 const THEME_OPTIONS: Array<SegOption<Theme>> = [
   { id: "day", label: "Day" },
   { id: "night", label: "Night" },
@@ -96,6 +81,13 @@ const CLOCK_FORMAT_OPTIONS: Array<SegOption<ClockFormat>> = [
   { id: "24h", label: "24-hour" },
 ];
 
+const DISPLAY_OPTIONS: Array<SegOption<"used" | "left">> = [
+  { id: "used", label: "Used" },
+  { id: "left", label: "Left" },
+];
+
+type AlertKey = "notifyOnSwitch" | "notifyOnExhausted" | "notifyOnExpiry";
+
 interface SettingsScreenProps {
   runtime: UseSettingsResult;
   /** Update lifecycle, owned by `useUpdate()` in `App.tsx` so the background scheduler and this screen show the same answer. */
@@ -105,13 +97,14 @@ interface SettingsScreenProps {
   onThemeChange: (theme: Theme) => void;
   /** Set when the most recent theme save failed. The visual change happens regardless — see `useTheme.ts`. */
   themeError: string | null;
+  /** Live accounts, for the auto-switch preview. Null before the first snapshot. */
+  snapshot?: Snapshot | null;
 }
 
 /**
  * Everything auto-switch does, visible and adjustable — a background process
- * that moves credentials has to be legible. The credential-storage control
- * at the bottom is the one open product decision, surfaced as a real control
- * rather than hidden in a config file.
+ * that moves credentials has to be legible — followed by alerts, startup,
+ * display, data and the rarely-touched advanced settings.
  *
  * Uses the window's shared settings owner and persists named-field patches.
  * The threshold slider is debounced so a drag sends one write, not one per
@@ -126,9 +119,11 @@ export default function SettingsScreen({
   onThemeChange,
   themeError,
   update: updater,
+  snapshot = null,
 }: SettingsScreenProps) {
   const { settings, live, loading, update } = runtime;
   const [saveError, setSaveError] = useState<string | null>(null);
+  const [alertNote, setAlertNote] = useState<string | null>(null);
 
   // Local draft for the slider only, so dragging feels instant even though
   // the backend write is debounced. Cleared once the backend echoes back.
@@ -139,6 +134,12 @@ export default function SettingsScreen({
   // draft above because this field commits on blur/Enter, not a timer.
   const [binaryDraft, setBinaryDraft] = useState<string | null>(null);
   const [binaryStatus, setBinaryStatus] = useState<Loadable<ClaudeBinaryStatus>>(undefined);
+
+  const now = useNow();
+  const accounts = useMemo(() => snapshot?.environments.flatMap((e) => e.accounts) ?? [], [snapshot]);
+  const { activeSamples } = useBurnSamples(accounts, snapshot);
+  const persistStartAtLogin = useCallback((enabled: boolean) => update({ startAtLogin: enabled }), [update]);
+  const autostart = useAutostart(persistStartAtLogin);
 
   const commitTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const mounted = useRef(true);
@@ -195,6 +196,27 @@ export default function SettingsScreen({
     [commit],
   );
 
+  /**
+   * Turning an alert on is the moment to ask the OS for permission — never at
+   * launch. If it is refused the preference is still saved, so it takes
+   * effect once allowed, and the refusal is said plainly.
+   */
+  const commitAlert = useCallback(
+    (key: AlertKey, value: boolean) => {
+      commitField(key, value);
+      if (!value) return;
+      void ensureNotificationPermission().then((granted) => {
+        if (!mounted.current) return;
+        setAlertNote(
+          granted || !live
+            ? null
+            : "Notifications are blocked for CC Logins in your system settings, so alerts won't appear until they're allowed.",
+        );
+      });
+    },
+    [commitField, live],
+  );
+
   const commitThreshold = useCallback(
     (value: number) => {
       setDraftThreshold(value);
@@ -241,10 +263,12 @@ export default function SettingsScreen({
 
   const threshold = draftThreshold ?? settings.threshold;
   const fillPct = ((threshold - THRESHOLD_MIN) / (THRESHOLD_MAX - THRESHOLD_MIN)) * 100;
-  const grace = graceBucket(settings.graceSeconds);
+  const grace = nearest<GracePeriod>(["off", "60s", "5m"], settings.graceSeconds, (id) => GRACE_SECONDS[id]);
+  const cooldown = nearest<Cooldown>(["5m", "15m", "1h"], settings.cooldownSeconds, (id) => COOLDOWN_SECONDS[id]);
+  const retention = nearest<Retention>(["7", "14", "30", "90"], settings.historyRetentionDays, Number);
 
   return (
-    <div className="pane">
+    <div className="pane settings">
       <div className="pane-head">
         <h3>Settings</h3>
         {!live && <span className="sub">Sample settings — not running in the desktop app, so nothing here persists.</span>}
@@ -256,198 +280,330 @@ export default function SettingsScreen({
         </div>
       )}
 
-      {/* Two columns once the window is wide enough. Each control keeps its
-          natural size — a full-width toggle reads worse than a compact one —
-          so the space is used by laying rows side by side instead. */}
-      <div className="fields">
-        <div className="field">
-          <div className="k">
-            Theme
-            <i>Day, night, or match the system.</i>
-          </div>
-          <div className="v">
-            <Segmented ariaLabel="Theme" value={theme} onChange={onThemeChange} options={THEME_OPTIONS} />
-          </div>
-        </div>
-
-        <div className="field">
-          <div className="k">
-            Time format
-            <i>How reset and measurement times are shown.</i>
-          </div>
-          <div className="v">
-            <Segmented
-              ariaLabel="Time format"
-              value={settings.clockFormat}
-              onChange={(v) => commitField("clockFormat", v)}
-              options={CLOCK_FORMAT_OPTIONS}
-            />
-          </div>
-        </div>
-
-        <div className="field">
-          <div className="k">
-            Usage checks
-            <i>
-              Anthropic limits how often usage can be read — roughly 30 checks an hour per account — so the cadence
-              is fixed rather than configurable: about every 5 minutes, tightening automatically as an account nears
-              its limit and backing off after a rate limit. Press Refresh on the Accounts screen for a reading right
-              now.
-            </i>
-          </div>
-          <div className="v">
-            <span className="muted">Every 5 min, adaptive</span>
-          </div>
-        </div>
-
-        <div className="field">
-          <div className="k">
-            Auto-switch
-            <i>Move to another account before a limit lands.</i>
-          </div>
-          <div className="v">
-            <Toggle
-              checked={settings.autoSwitchEnabled}
-              onChange={(v) => commitField("autoSwitchEnabled", v)}
-              label={settings.autoSwitchEnabled ? "Enabled" : "Disabled"}
-            />
-          </div>
-        </div>
-
-        <div className="field">
-          <div className="k">
-            Threshold
-            <i>Utilisation that triggers a switch.</i>
-          </div>
-          <div className="v">
-            <div className="slider">
-              <input
-                type="range"
-                className="slider-input"
-                min={THRESHOLD_MIN}
-                max={THRESHOLD_MAX}
-                step={1}
-                value={threshold}
-                onChange={(e) => commitThreshold(Number(e.target.value))}
-                style={{
-                  background: `linear-gradient(to right, var(--muted) ${fillPct}%, var(--raised) ${fillPct}%)`,
-                }}
-                aria-label="Auto-switch threshold"
+      <section className="settings-group" aria-labelledby="set-auto">
+        <h2 id="set-auto">Auto-switch</h2>
+        <RulePreview settings={settings} threshold={threshold} accounts={accounts} activeSamples={activeSamples} now={now} />
+        <div className="fields">
+          <div className="field">
+            <div className="k">
+              Auto-switch
+              <i>Move to another account before a limit lands.</i>
+            </div>
+            <div className="v">
+              <Toggle
+                checked={settings.autoSwitchEnabled}
+                onChange={(v) => commitField("autoSwitchEnabled", v)}
+                label={settings.autoSwitchEnabled ? "Enabled" : "Disabled"}
               />
-              <span className="num" style={{ fontSize: 13 }}>
-                {threshold}%
+            </div>
+          </div>
+
+          <div className="field">
+            <div className="k">
+              Threshold
+              <i>Utilisation that triggers a switch.</i>
+            </div>
+            <div className="v">
+              <div className="slider">
+                <input
+                  type="range"
+                  className="slider-input"
+                  min={THRESHOLD_MIN}
+                  max={THRESHOLD_MAX}
+                  step={1}
+                  value={threshold}
+                  onChange={(e) => commitThreshold(Number(e.target.value))}
+                  style={{
+                    background: `linear-gradient(to right, var(--muted) ${fillPct}%, var(--raised) ${fillPct}%)`,
+                  }}
+                  aria-label="Auto-switch threshold"
+                />
+                <span className="num" style={{ fontSize: 13 }}>
+                  {threshold}%
+                </span>
+              </div>
+            </div>
+          </div>
+
+          <div className="field">
+            <div className="k">
+              Strategy
+              <i>How the next account is chosen.</i>
+            </div>
+            <div className="v">
+              <Segmented
+                ariaLabel="Auto-switch strategy"
+                value={settings.strategy}
+                onChange={(v) => commitField("strategy", v)}
+                options={STRATEGY_OPTIONS}
+              />
+            </div>
+          </div>
+
+          <div className="field">
+            <div className="k">
+              Grace period
+              <i>Time to intervene before switching.</i>
+            </div>
+            <div className="v">
+              <Segmented
+                ariaLabel="Grace period"
+                value={grace}
+                onChange={(id) => commitField("graceSeconds", GRACE_SECONDS[id])}
+                options={GRACE_OPTIONS}
+              />
+            </div>
+          </div>
+
+          <div className="field">
+            <div className="k">
+              Don&apos;t switch again for
+              <i>After a switch, wait this long before moving again.</i>
+            </div>
+            <div className="v">
+              <Segmented
+                ariaLabel="Switch cooldown"
+                value={cooldown}
+                onChange={(id) => commitField("cooldownSeconds", COOLDOWN_SECONDS[id])}
+                options={COOLDOWN_OPTIONS}
+              />
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <section className="settings-group" aria-labelledby="set-alerts">
+        <h2 id="set-alerts">Notifications</h2>
+        {alertNote && (
+          <div className="banner caution" role="status">
+            <span>{alertNote}</span>
+          </div>
+        )}
+        <div className="fields">
+          <div className="field">
+            <div className="k">
+              When auto-switch changes account
+              <i>Manual switches aren&apos;t announced — you just made them.</i>
+            </div>
+            <div className="v">
+              <Toggle
+                checked={settings.notifyOnSwitch}
+                ariaLabel="Notify when auto-switch changes account"
+                onChange={(v) => commitAlert("notifyOnSwitch", v)}
+              />
+            </div>
+          </div>
+          <div className="field">
+            <div className="k">
+              When every account is at its limit
+              <i>With the earliest reset time.</i>
+            </div>
+            <div className="v">
+              <Toggle
+                checked={settings.notifyOnExhausted}
+                ariaLabel="Notify when every account is at its limit"
+                onChange={(v) => commitAlert("notifyOnExhausted", v)}
+              />
+            </div>
+          </div>
+          <div className="field">
+            <div className="k">
+              When an account needs a fresh sign-in
+              <i>Its Claude Code folder is signed out.</i>
+            </div>
+            <div className="v">
+              <Toggle
+                checked={settings.notifyOnExpiry}
+                ariaLabel="Notify when an account needs a fresh sign-in"
+                onChange={(v) => commitAlert("notifyOnExpiry", v)}
+              />
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <section className="settings-group" aria-labelledby="set-startup">
+        <h2 id="set-startup">Startup</h2>
+        <div className="fields">
+          <div className="field">
+            <div className="k">
+              Open at login
+              <i>Start CC Logins in the tray when you sign in to this computer.</i>
+            </div>
+            <div className="v">
+              <Toggle
+                checked={autostart.enabled ?? settings.startAtLogin}
+                ariaLabel="Open at login"
+                pending={autostart.pending}
+                disabled={!live}
+                onChange={(v) => void autostart.set(v)}
+              />
+              {autostart.error && <span className="field-error">{autostart.error}</span>}
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <section className="settings-group" aria-labelledby="set-display">
+        <h2 id="set-display">Display</h2>
+        <div className="fields">
+          <div className="field">
+            <div className="k">
+              Show quota as
+              <i>What is used or what is left. Colours always follow how full an account is.</i>
+            </div>
+            <div className="v">
+              <Segmented
+                ariaLabel="Show quota as"
+                value={settings.displayMode ?? "used"}
+                onChange={(v) => commitField("displayMode", v)}
+                options={DISPLAY_OPTIONS}
+              />
+            </div>
+          </div>
+
+          <div className="field">
+            <div className="k">
+              Theme
+              <i>Day, night, or match the system.</i>
+            </div>
+            <div className="v">
+              <Segmented ariaLabel="Theme" value={theme} onChange={onThemeChange} options={THEME_OPTIONS} />
+            </div>
+          </div>
+
+          <div className="field">
+            <div className="k">
+              Time format
+              <i>How reset and measurement times are shown.</i>
+            </div>
+            <div className="v">
+              <Segmented
+                ariaLabel="Time format"
+                value={settings.clockFormat}
+                onChange={(v) => commitField("clockFormat", v)}
+                options={CLOCK_FORMAT_OPTIONS}
+              />
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <section className="settings-group" aria-labelledby="set-data">
+        <h2 id="set-data">Privacy &amp; data</h2>
+        <div className="fields">
+          <div className="field">
+            <div className="k">
+              Keep detailed readings for
+              <i>Older days are kept as daily summaries, so long-range history stays.</i>
+            </div>
+            <div className="v">
+              <Segmented
+                ariaLabel="Keep detailed readings for"
+                value={retention}
+                onChange={(id) => commitField("historyRetentionDays", Number(id))}
+                options={RETENTION_OPTIONS}
+              />
+            </div>
+          </div>
+
+          <div className="field">
+            <div className="k">
+              Usage checks
+              <i>
+                Anthropic allows roughly 30 usage reads an hour per account, so checks run about every 5 minutes —
+                sooner as an account nears its limit, backing off after a rate limit. Refresh on Home reads now.
+              </i>
+            </div>
+            <div className="v">
+              <span className="muted">Every ~5 min, adaptive</span>
+            </div>
+          </div>
+
+          <div className="field">
+            <div className="k">
+              Account folders
+              <i>Where each account's Claude Code login lives.</i>
+            </div>
+            <div className="v">
+              <span style={{ fontSize: 12, color: "var(--muted)" }}>
+                Each account signs in once, through Claude Code itself, into its own folder under ~/.cc-logins/profiles
+                (the account signed in to your usual ~/.claude stays there). This app keeps no copy of any login and never
+                refreshes one; picking an account only changes which folder new sessions use.
+              </span>
+            </div>
+          </div>
+
+          <div className="field">
+            <div className="k">
+              Check for updates automatically
+              <i>Asks GitHub once a day. The only request this app makes outside Anthropic.</i>
+            </div>
+            <div className="v">
+              <Toggle
+                checked={settings.autoCheckUpdates}
+                onChange={(v) => commitField("autoCheckUpdates", v)}
+                label={settings.autoCheckUpdates ? "Enabled" : "Disabled"}
+              />
+              <span style={{ fontSize: 12, color: "var(--muted)" }}>
+                Only the current version is sent, and nothing is installed without you asking.
+                Turning this off leaves the manual check below working.
               </span>
             </div>
           </div>
         </div>
+      </section>
 
-        <div className="field">
-          <div className="k">
-            Strategy
-            <i>How the next account is chosen.</i>
-          </div>
-          <div className="v">
-            <Segmented
-              ariaLabel="Auto-switch strategy"
-              value={settings.strategy}
-              onChange={(v) => commitField("strategy", v)}
-              options={STRATEGY_OPTIONS}
-            />
+      <ClaudeCommandSection />
+
+      <section className="settings-group" aria-labelledby="set-advanced">
+        <h2 id="set-advanced">Advanced</h2>
+        <div className="fields">
+          <div className="field">
+            <div className="k">
+              Claude binary
+              <i>
+                Full path to the claude command, for installs the app can&apos;t find on its own. Apps
+                opened from the Dock don&apos;t see PATH changes made in your shell. Leave empty to
+                detect automatically.
+              </i>
+            </div>
+            <div className="v">
+              <input
+                type="text"
+                className="input"
+                autoComplete="off"
+                spellCheck={false}
+                aria-label="Claude binary path"
+                aria-describedby="claude-binary-status"
+                placeholder="Detected automatically"
+                value={binaryDraft ?? (settings.claudeBinaryPath ?? "")}
+                onChange={(e) => setBinaryDraft(e.target.value)}
+                onBlur={commitBinaryPath}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter") {
+                    e.preventDefault();
+                    commitBinaryPath();
+                  } else if (e.key === "Escape") {
+                    e.preventDefault();
+                    setBinaryDraft(null);
+                  }
+                }}
+              />
+              <span id="claude-binary-status" role="status">
+                {binaryStatus?.found && (
+                  <span style={{ fontSize: 12, color: "var(--muted)" }}>
+                    Found: {binaryStatus.path} ({binaryStatus.source})
+                  </span>
+                )}
+                {binaryStatus && !binaryStatus.found && (
+                  <span style={{ fontSize: 12, color: "var(--danger)" }}>{binaryStatus.message}</span>
+                )}
+              </span>
+            </div>
           </div>
         </div>
-
-        <div className="field">
-          <div className="k">
-            Grace period
-            <i>Time to intervene before switching.</i>
-          </div>
-          <div className="v">
-            <Segmented
-              ariaLabel="Grace period"
-              value={grace}
-              onChange={(id) => commitField("graceSeconds", GRACE_SECONDS[id])}
-              options={GRACE_OPTIONS}
-            />
-          </div>
-        </div>
-
-        <div className="field">
-          <div className="k">
-            Account store
-            <i>Where your saved logins are kept.</i>
-          </div>
-          <div className="v">
-            <span style={{ fontSize: 12, color: "var(--muted)" }}>
-              This app keeps your accounts in its own folder, separate from any other
-              tool&apos;s, so a fault on either side can only affect its own store.
-              Switching still installs the chosen login into Claude Code&apos;s official
-              location, which is the only thing anything else here touches.
-            </span>
-          </div>
-        </div>
-
-        <div className="field">
-          <div className="k">
-            Check for updates automatically
-            <i>Asks GitHub once a day. The only request this app makes outside Anthropic.</i>
-          </div>
-          <div className="v">
-            <Toggle
-              checked={settings.autoCheckUpdates}
-              onChange={(v) => commitField("autoCheckUpdates", v)}
-              label={settings.autoCheckUpdates ? "Enabled" : "Disabled"}
-            />
-            <span style={{ fontSize: 12, color: "var(--muted)" }}>
-              Only the current version is sent, and nothing is installed without you asking.
-              Turning this off leaves the manual check below working.
-            </span>
-          </div>
-        </div>
-
-        <div className="field">
-          <div className="k">
-            Claude binary
-            <i>
-              Full path to the claude command, for installs the app can&apos;t find on its own. Apps
-              opened from the Dock don&apos;t see PATH changes made in your shell. Leave empty to
-              detect automatically.
-            </i>
-          </div>
-          <div className="v">
-            <input
-              type="text"
-              className="input"
-              autoComplete="off"
-              spellCheck={false}
-              aria-label="Claude binary path"
-              aria-describedby="claude-binary-status"
-              placeholder="Detected automatically"
-              value={binaryDraft ?? (settings.claudeBinaryPath ?? "")}
-              onChange={(e) => setBinaryDraft(e.target.value)}
-              onBlur={commitBinaryPath}
-              onKeyDown={(e) => {
-                if (e.key === "Enter") {
-                  e.preventDefault();
-                  commitBinaryPath();
-                } else if (e.key === "Escape") {
-                  e.preventDefault();
-                  setBinaryDraft(null);
-                }
-              }}
-            />
-            <span id="claude-binary-status" role="status">
-              {binaryStatus?.found && (
-                <span style={{ fontSize: 12, color: "var(--muted)" }}>
-                  Found: {binaryStatus.path} ({binaryStatus.source})
-                </span>
-              )}
-              {binaryStatus && !binaryStatus.found && (
-                <span style={{ fontSize: 12, color: "var(--danger)" }}>{binaryStatus.message}</span>
-              )}
-            </span>
-          </div>
-        </div>
-      </div>
+      </section>
 
       <AboutSection update={updater} binaryStatus={binaryStatus} />
     </div>

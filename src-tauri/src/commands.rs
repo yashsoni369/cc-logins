@@ -13,7 +13,7 @@
 //! this file. No polling path may ever call a mutating command.
 
 use serde::{Deserialize, Serialize};
-use tauri::Emitter;
+use tauri::{Emitter, Manager};
 
 use crate::login::{self, LoginError};
 use crate::model::{Account, Environment, Snapshot};
@@ -64,6 +64,13 @@ pub enum IpcError {
     /// Refused to disable the currently-active account — auto-switch would
     /// have nowhere valid to land.
     CannotDisableActive(String),
+    /// Refused to remove the currently-active account — Claude Code would be
+    /// left running on a login nothing manages. Switch away first.
+    CannotRemoveActive(String),
+    /// The request itself is invalid (an alias that is too long, an order
+    /// that is not a permutation of the accounts, an environment that is not
+    /// WSL). `detail` is a sentence fit to show the user.
+    InvalidInput(String),
     /// The server proved this account's refresh-token lineage is dead.
     ReloginRequired(String),
     /// An interrupted switch could not be recovered automatically.
@@ -115,20 +122,12 @@ impl From<SwitchError> for IpcError {
                 crate::switch_transaction::TransactionError::RollbackIncomplete { .. },
             ) => IpcError::RecoveryRequired(e.to_string()),
             SwitchError::TargetGenerationChanged(_) => IpcError::Busy(e.to_string()),
-            SwitchError::Refresh(crate::oauth_refresh::RefreshCoordinatorError::Lease(_)) => {
-                IpcError::Busy(e.to_string())
-            }
-            SwitchError::Refresh(
-                crate::oauth_refresh::RefreshCoordinatorError::ReloginRequired,
-            ) => IpcError::ReloginRequired(e.to_string()),
-            SwitchError::Refresh(
-                crate::oauth_refresh::RefreshCoordinatorError::RefreshFailed(_)
-                | crate::oauth_refresh::RefreshCoordinatorError::Usage(_),
-            ) => IpcError::Unreachable(e.to_string()),
             // Credential-store problems: the store itself is unreadable,
             // missing, empty, or otherwise not trustworthy — as distinct
             // from a business-rule refusal below, where the store is fine
             // and the requested mutation just isn't valid right now.
+            // `RemovedWithLeftovers` belongs here too: the account is already
+            // out of the registry, and what failed is deleting its files.
             SwitchError::Credential(_)
             | SwitchError::Transaction(
                 crate::switch_transaction::TransactionError::Credential(_)
@@ -143,17 +142,15 @@ impl From<SwitchError> for IpcError {
             | SwitchError::Stash(_)
             | SwitchError::NoLiveCredential
             | SwitchError::InvalidCredential(_)
-            | SwitchError::Refresh(
-                crate::oauth_refresh::RefreshCoordinatorError::Missing
-                | crate::oauth_refresh::RefreshCoordinatorError::PersistenceFailed(_)
-                | crate::oauth_refresh::RefreshCoordinatorError::InvalidCredential,
-            ) => IpcError::Credential(e.to_string()),
+            | SwitchError::RemovedWithLeftovers(..) => IpcError::Credential(e.to_string()),
             // Business-rule refusals: the requested mutation is invalid
             // given the current state, not an I/O or credential-store
             // failure. Each gets its own structural kind so the UI can
             // branch without reading the message.
             SwitchError::AlreadyRegistered(_) => IpcError::AlreadyRegistered(e.to_string()),
             SwitchError::CannotDisableActive(_) => IpcError::CannotDisableActive(e.to_string()),
+            SwitchError::CannotRemoveActive(_) => IpcError::CannotRemoveActive(e.to_string()),
+            SwitchError::InvalidInput(_) => IpcError::InvalidInput(e.to_string()),
             // Malformed user input (an obviously-bad pasted token) and
             // everything else genuinely uncategorized fall to `Internal` —
             // the UI still gets the full, specific message via `e.to_string()`.
@@ -395,11 +392,17 @@ fn refuse_if_recovery_required() -> IpcResult<()> {
 /// keep showing the pre-switch state until the poller's next tick, which on
 /// the adaptive cadence can be minutes away.
 #[tauri::command]
-pub async fn switch_account(
-    state: tauri::State<'_, AppState>,
-    app: tauri::AppHandle,
+pub async fn switch_account(app: tauri::AppHandle, account_number: u32) -> IpcResult<Snapshot> {
+    switch_account_for(&app, account_number).await
+}
+
+/// Body of [`switch_account`], shared with the tray menu's account rows so
+/// both paths take exactly the same guards and publish the same way.
+pub async fn switch_account_for(
+    app: &tauri::AppHandle,
     account_number: u32,
 ) -> IpcResult<Snapshot> {
+    let state = app.state::<AppState>();
     refuse_if_recovery_required()?;
     let accounts = switcher::read_accounts()?;
     let target = accounts
@@ -407,21 +410,21 @@ pub async fn switch_account(
         .find(|a| a.number == account_number)
         .ok_or_else(|| IpcError::Internal(format!("no account in slot {account_number}")))?;
 
-    // Show the switch in flight before mutating anything, so a slow swap
-    // doesn't leave the tray sitting on the outgoing account's stale number.
-    crate::poller::publish_switching(&app);
+    // A profile account is never swapped in: new sessions are pointed at its
+    // folder and running sessions keep theirs. Nothing is written but the
+    // registry and shim.json.
+    if target.profile.is_some() {
+        off_runtime(move || crate::profile_registry::select(account_number)).await??;
+        let snap = snapshot_uncached(&state).await?;
+        crate::poller::publish_snapshot(app, &snap);
+        return Ok(snap);
+    }
 
-    switcher::switch_to(target).await?;
-
-    // Bypass the cache: it holds the pre-switch state by definition, and
-    // showing the user the state from before their own action is a lie.
-    let snap = snapshot_uncached(&state).await?;
-
-    // The credential change already succeeded above; publish_snapshot never
-    // fails the caller, so a tray/emit hiccup here can't misreport this
-    // switch as failed.
-    crate::poller::publish_snapshot(&app, &snap);
-    Ok(snap)
+    // A v0.3 account is never swapped into Claude Code again. It moves by
+    // signing in once into its own folder.
+    Err(IpcError::InvalidInput(
+        "Sign in to this account once to move it to its own folder, then use it.".to_string(),
+    ))
 }
 
 /// Register the currently active Claude Code login as a new managed slot.
@@ -439,7 +442,8 @@ pub async fn add_current_account(
     alias: Option<String>,
 ) -> IpcResult<Snapshot> {
     refuse_if_recovery_required()?;
-    switcher::add_current_account(alias.as_deref())?;
+    let setting = claude_binary_setting(&state);
+    off_runtime(move || adopt_default_login(setting, alias)).await??;
     let snap = snapshot_uncached(&state).await?;
     crate::poller::publish_snapshot(&app, &snap);
     Ok(snap)
@@ -483,13 +487,30 @@ pub async fn interactive_login(
         .claude_binary_path
         .clone()
         .map(std::path::PathBuf::from);
-    let outcome = login::interactive_login(setting).await?;
+    let dir = off_runtime(new_profile_dir).await??;
+    let signed_in = match login::sign_in_to_profile(setting, dir.clone()).await {
+        Ok(signed_in) => signed_in,
+        Err(error) => {
+            discard_new_profile_dir(&dir);
+            return Err(error.into());
+        }
+    };
     refuse_if_recovery_required()?;
-    switcher::add_oauth_credential(
-        &outcome.credentials,
-        outcome.email.as_deref(),
-        alias.as_deref(),
-    )?;
+    let identity = signed_in.identity;
+    let new = crate::profile_registry::NewProfile {
+        email: identity.email,
+        account_uuid: identity.account_uuid,
+        organization_uuid: identity.organization_uuid,
+        organization_name: identity.organization_name,
+        config_dir: Some(dir.clone()),
+        alias,
+    };
+    if let Err(error) = off_runtime(move || crate::profile_registry::register(&new)).await? {
+        // Already registered elsewhere: this folder is a duplicate login.
+        discard_new_profile_dir(&dir);
+        return Err(error.into());
+    }
+    off_runtime(refresh_claude_command).await?;
     let snap = snapshot_uncached(&state).await?;
     crate::poller::publish_snapshot(&app, &snap);
     Ok(snap)
@@ -513,38 +534,63 @@ pub async fn relogin_account(
         .claude_binary_path
         .clone()
         .map(std::path::PathBuf::from);
-    let outcome = login::interactive_login(setting).await?;
-    refuse_if_recovery_required()?;
-    switcher::replace_oauth_credential(
-        account_number,
-        &outcome.credentials,
-        outcome.uuid.as_deref(),
-        outcome.email.as_deref(),
-        outcome.organization_uuid.as_deref(),
-    )?;
-    let snap = snapshot_uncached(&state).await?;
-    crate::poller::publish_snapshot(&app, &snap);
-    Ok(snap)
-}
-
-/// Register a setup-token or managed API key as a new slot.
-///
-/// Useful without any prior Claude Code login on this machine. The token kind
-/// (managed API key vs OAuth setup-token) is auto-detected; an omitted
-/// `email` gets a synthesized `setup-token-{slot}@token.local` /
-/// `api-key-{slot}@token.local` address, matching the CLI's own convention.
-/// An obviously malformed token is rejected before the credential lock is
-/// even taken.
-#[tauri::command]
-pub async fn add_token(
-    state: tauri::State<'_, AppState>,
-    app: tauri::AppHandle,
-    token: String,
-    email: Option<String>,
-    alias: Option<String>,
-) -> IpcResult<Snapshot> {
-    refuse_if_recovery_required()?;
-    switcher::add_token(&token, email.as_deref(), alias.as_deref())?;
+    let target = switcher::read_accounts()?
+        .into_iter()
+        .find(|a| a.number == account_number)
+        .ok_or_else(|| IpcError::Internal(format!("no account in slot {account_number}")))?;
+    if let Some(profile) = target.profile.clone() {
+        let Some(dir) = profile.config_dir else {
+            return Err(IpcError::InvalidInput(
+                "This account uses Claude Code's own folder. Run claude and sign in with /login."
+                    .to_string(),
+            ));
+        };
+        let signed_in = login::sign_in_to_profile(setting, dir.clone()).await?;
+        if !switcher::folder_matches(&target, &signed_in.identity) {
+            return Err(IpcError::InvalidInput(format!(
+                "That signed in as a different account. Sign in again as {}.",
+                crate::model::mask_email(&target.email)
+            )));
+        }
+        let identity = signed_in.identity;
+        let new = crate::profile_registry::NewProfile {
+            email: identity.email,
+            account_uuid: identity.account_uuid,
+            organization_uuid: identity.organization_uuid,
+            organization_name: identity.organization_name,
+            config_dir: Some(dir),
+            alias: None,
+        };
+        off_runtime(move || crate::profile_registry::register(&new)).await??;
+        off_runtime(refresh_claude_command).await?;
+        let snap = snapshot_uncached(&state).await?;
+        crate::poller::publish_snapshot(&app, &snap);
+        return Ok(snap);
+    }
+    // A v0.3 account: sign in once into its own folder. Its stored copy is
+    // deleted only after the new login is verified as this same account.
+    let dir = off_runtime(new_profile_dir).await??;
+    let signed_in = match login::sign_in_to_profile(setting, dir.clone()).await {
+        Ok(signed_in) => signed_in,
+        Err(error) => {
+            discard_new_profile_dir(&dir);
+            return Err(error.into());
+        }
+    };
+    if !switcher::folder_matches(&target, &signed_in.identity) {
+        discard_new_profile_dir(&dir);
+        return Err(IpcError::InvalidInput(format!(
+            "That signed in as a different account. Sign in as {} to move this one.",
+            crate::model::mask_email(&target.email)
+        )));
+    }
+    let new = crate::migration::new_profile(&signed_in.identity, Some(dir));
+    off_runtime(move || crate::profile_registry::register(&new)).await??;
+    off_runtime(|| {
+        clean_up_moved_vault_copies();
+        refresh_claude_command();
+    })
+    .await?;
     let snap = snapshot_uncached(&state).await?;
     crate::poller::publish_snapshot(&app, &snap);
     Ok(snap)
@@ -568,6 +614,136 @@ pub async fn set_account_enabled(
     let snap = snapshot_uncached(&state).await?;
     crate::poller::publish_snapshot(&app, &snap);
     Ok(snap)
+}
+
+/// Run blocking work (a registry mutation may wait up to
+/// [`crate::locking::DEFAULT_TIMEOUT`] on the vault lock; waking WSL boots a
+/// VM) off the async runtime's worker threads.
+async fn off_runtime<T, F>(work: F) -> IpcResult<T>
+where
+    F: FnOnce() -> T + Send + 'static,
+    T: Send + 'static,
+{
+    tokio::task::spawn_blocking(work)
+        .await
+        .map_err(|error| IpcError::Internal(format!("background task failed: {error}")))
+}
+
+/// Set (or, with `None`/blank, clear) an account's display alias.
+///
+/// Trimmed; longer than [`switcher::MAX_ALIAS_CHARS`] characters is
+/// [`IpcError::InvalidInput`].
+#[tauri::command]
+pub async fn set_account_alias(
+    state: tauri::State<'_, AppState>,
+    app: tauri::AppHandle,
+    account_number: u32,
+    alias: Option<String>,
+) -> IpcResult<Snapshot> {
+    refuse_if_recovery_required()?;
+    let task = move || switcher::set_account_alias(account_number, alias.as_deref());
+    off_runtime(task).await??;
+    let snap = snapshot_uncached(&state).await?;
+    crate::poller::publish_snapshot(&app, &snap);
+    Ok(snap)
+}
+
+/// Stop managing an account and delete its stored credential and config.
+///
+/// Refuses the active account ([`IpcError::CannotRemoveActive`]). The
+/// registry is rewritten before any file is deleted; if a file then cannot be
+/// deleted the account is still gone, the fresh state is published anyway,
+/// and the error ([`IpcError::Credential`]) says the files remain.
+#[tauri::command]
+pub async fn remove_account(
+    state: tauri::State<'_, AppState>,
+    app: tauri::AppHandle,
+    account_number: u32,
+) -> IpcResult<Snapshot> {
+    refuse_if_recovery_required()?;
+    let task = move || {
+        let result = switcher::remove_account(account_number);
+        refresh_claude_command();
+        result
+    };
+    if let Err(error) = off_runtime(task).await? {
+        if matches!(error, SwitchError::RemovedWithLeftovers(..)) {
+            // The registry did change: show that before reporting the rest.
+            if let Ok(snap) = snapshot_uncached(&state).await {
+                crate::poller::publish_snapshot(&app, &snap);
+            }
+        }
+        return Err(error.into());
+    }
+    let snap = snapshot_uncached(&state).await?;
+    crate::poller::publish_snapshot(&app, &snap);
+    Ok(snap)
+}
+
+/// Replace the rotation order. `order` must list every account number
+/// exactly once ([`IpcError::InvalidInput`] otherwise). Both the account list
+/// and the "next available" strategy follow it.
+#[tauri::command]
+pub async fn reorder_accounts(
+    state: tauri::State<'_, AppState>,
+    app: tauri::AppHandle,
+    order: Vec<u32>,
+) -> IpcResult<Snapshot> {
+    refuse_if_recovery_required()?;
+    let task = move || switcher::reorder_accounts(&order);
+    off_runtime(task).await??;
+    let snap = snapshot_uncached(&state).await?;
+    crate::poller::publish_snapshot(&app, &snap);
+    Ok(snap)
+}
+
+/// Start a sleeping WSL distro and re-read whether it holds Claude Code
+/// credentials, then return a fresh snapshot.
+///
+/// **User-initiated only** — this boots a Linux VM, which no polling path is
+/// ever allowed to do (see [`crate::wsl::wake_and_read`]). `env_id` is the
+/// `wsl:{name}` id from the snapshot; anything else, a distro that is not
+/// detected, or any platform other than Windows is [`IpcError::InvalidInput`].
+#[tauri::command]
+pub async fn wake_environment(
+    state: tauri::State<'_, AppState>,
+    app: tauri::AppHandle,
+    env_id: String,
+) -> IpcResult<Snapshot> {
+    if !cfg!(target_os = "windows") {
+        return Err(IpcError::InvalidInput(
+            "WSL is only available on Windows".to_string(),
+        ));
+    }
+    let Some(name) = env_id.strip_prefix("wsl:").map(str::to_string) else {
+        return Err(IpcError::InvalidInput(format!(
+            "{env_id} is not a WSL environment"
+        )));
+    };
+    let found = off_runtime(move || wake_distro(&name)).await??;
+    log::info!("woke {env_id}; Claude Code credentials found: {found}");
+    let snap = snapshot_uncached(&state).await?;
+    crate::poller::publish_snapshot(&app, &snap);
+    Ok(snap)
+}
+
+fn is_wsl_named(env: &Environment, name: &str) -> bool {
+    env.kind == crate::model::EnvKind::Wsl && env.id.strip_prefix("wsl:") == Some(name)
+}
+
+/// Blocking body of [`wake_environment`]: confirm `name` is a detected
+/// distro, then wake it.
+fn wake_distro(name: &str) -> IpcResult<bool> {
+    let environments = crate::wsl::detect_environments();
+    if !environments.iter().any(|env| is_wsl_named(env, name)) {
+        return Err(IpcError::InvalidInput(format!(
+            "no WSL distro named {name} was found"
+        )));
+    }
+    crate::wsl::wake_and_read(name).map_err(|error| match &error {
+        crate::wsl::WslError::Unsupported => IpcError::InvalidInput(error.to_string()),
+        crate::wsl::WslError::Spawn { .. } => IpcError::Internal(error.to_string()),
+    })
 }
 
 // ─── application state ───────────────────────────────────────────────────────
@@ -733,11 +909,11 @@ pub fn history_samples(
     let Some(h) = state.history.as_ref() else {
         return Ok(Vec::new());
     };
-    // Clamped to the raw retention window: asking for more would silently
-    // return only what survived pruning, which reads as a gap in usage.
-    let hours = hours
-        .unwrap_or(24)
-        .clamp(1, crate::history::DEFAULT_RAW_RETENTION_DAYS * 24);
+    // Clamped to the raw retention window the poller prunes to: asking for
+    // more would silently return only what survived pruning, which reads as
+    // a gap in usage.
+    let retention_days = state.settings.snapshot().settings.history_retention_days;
+    let hours = hours.unwrap_or(24).clamp(1, retention_days * 24);
     let until = chrono::Utc::now();
     let since = until - chrono::Duration::hours(hours);
     h.series(&account_key, since, until)
@@ -840,6 +1016,306 @@ fn claude_binary_status_from(
     }
 }
 
+// ─── the claude command ──────────────────────────────────────────────────────
+// Installing the `claude` shim on PATH. Explicit and reversible; nothing here
+// reads or writes a Claude credential.
+
+/// One `claude-<slug>` launcher, for the settings list.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CliLauncher {
+    pub slug: String,
+    pub account_number: u32,
+    pub command: String,
+}
+
+/// Whether the `claude` command is installed, and where.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CliStatus {
+    pub health: crate::cli_install::CliHealth,
+    /// This build ships the shim. False in development builds, where the
+    /// install button explains instead of failing.
+    pub shim_available: bool,
+    pub bin_dir: String,
+    /// Full path of the `claude` copy, for editor settings that need one.
+    pub command_path: String,
+    pub launchers: Vec<CliLauncher>,
+}
+
+fn cli_status_now(launchers: Vec<CliLauncher>) -> CliStatus {
+    let bin_dir = crate::paths::cc_logins_bin_dir();
+    let command = bin_dir.join(crate::cli_install::exe_name(crate::shim_core::SHIM_STEM));
+    CliStatus {
+        health: crate::cli_install::health(&bin_dir),
+        shim_available: crate::cli_install::bundled_shim().is_some(),
+        bin_dir: bin_dir.display().to_string(),
+        command_path: command.display().to_string(),
+        launchers,
+    }
+}
+
+fn claude_binary_setting(state: &AppState) -> Option<std::path::PathBuf> {
+    state
+        .settings
+        .snapshot()
+        .settings
+        .claude_binary_path
+        .clone()
+        .map(std::path::PathBuf::from)
+}
+
+/// Register the login already signed in to Claude Code's default folder as
+/// the default profile, after `claude auth status` confirms it. Nothing is
+/// copied: the login stays where Claude Code keeps it. A v0.3 record for the
+/// same account is upgraded in place and its stored copy deleted.
+pub(crate) fn adopt_default_login(
+    claude_setting: Option<std::path::PathBuf>,
+    alias: Option<String>,
+) -> IpcResult<u32> {
+    let global = crate::paths::default_global_config_path();
+    let identity = crate::auth_status::read_folder_identity(&global).ok_or_else(|| {
+        IpcError::InvalidInput(
+            "Claude Code isn't signed in on this computer. Add the account with Sign in instead."
+                .to_string(),
+        )
+    })?;
+    let claude = crate::claude_cli::resolve(claude_setting)
+        .map_err(|not_found| IpcError::PrerequisiteMissing(not_found.to_string()))?;
+    let status = crate::auth_status::check(&claude.path, None)
+        .map_err(|error| IpcError::Internal(error.to_string()))?;
+    let confirmed = status.is_claude_account()
+        && status
+            .email
+            .as_deref()
+            .is_some_and(|email| email.eq_ignore_ascii_case(&identity.email));
+    if !confirmed {
+        return Err(IpcError::InvalidInput(
+            "Claude Code's default login couldn't be confirmed. Run claude once, then try again."
+                .to_string(),
+        ));
+    }
+    let mut new = crate::migration::new_profile(&identity, None);
+    new.alias = alias;
+    let slot = crate::profile_registry::register(&new)?;
+    clean_up_moved_vault_copies();
+    refresh_claude_command();
+    Ok(slot)
+}
+
+/// Delete the v0.3 stored copies of accounts that have moved to a folder
+/// (flagged `legacyVault` when their record was upgraded). A failure keeps
+/// the flag, so the next start tries again.
+pub(crate) fn clean_up_moved_vault_copies() {
+    let data = switcher::read_sequence_data().unwrap_or_default();
+    for (number, email) in crate::migration::vault_cleanup_due(&data) {
+        match switcher::delete_vault_copy(number, &email) {
+            Ok(()) => {
+                let cleared = crate::profile_registry::edit(|data| {
+                    crate::migration::set_legacy_vault(data, number, false);
+                    Ok(())
+                });
+                if let Err(error) = cleared {
+                    log::warn!("vault copy of account {number} deleted; flag not cleared: {error}");
+                }
+            }
+            Err(error) => log::warn!("vault copy of account {number} not deleted yet: {error}"),
+        }
+    }
+}
+
+/// Startup: finish what migration can do without the user. Adopts the
+/// default login when a v0.3 record matches it, then retries any pending
+/// vault deletions. Never runs while an interrupted v0.3 switch is still
+/// being recovered, since that touches the same files.
+pub(crate) fn startup_migration(claude_setting: Option<std::path::PathBuf>) {
+    if crate::switch_transaction::recovery_requirement().is_some() {
+        return;
+    }
+    let data = switcher::read_sequence_data().unwrap_or_default();
+    let global = crate::paths::default_global_config_path();
+    let candidate = crate::auth_status::read_folder_identity(&global)
+        .and_then(|identity| crate::migration::default_adoption_candidate(&data, &identity));
+    if candidate.is_some() {
+        match adopt_default_login(claude_setting, None) {
+            Ok(slot) => log::info!("account {slot} now uses Claude Code's default folder"),
+            Err(error) => log::info!("default login not adopted yet: {error:?}"),
+        }
+    } else {
+        clean_up_moved_vault_copies();
+    }
+}
+
+/// Launchers of every ready profile account.
+fn current_launchers() -> Vec<CliLauncher> {
+    let data = switcher::read_sequence_data().unwrap_or_default();
+    crate::profile_registry::launchers(&data)
+        .into_iter()
+        .map(|(slug, account_number)| CliLauncher {
+            command: format!("{}-{slug}", crate::shim_core::SHIM_STEM),
+            slug,
+            account_number,
+        })
+        .collect()
+}
+
+/// Keep an installed `claude` command in step with this build and with the
+/// accounts: refresh `shim.json` and the shim copies (one per launcher).
+/// Never installs anything the user has not installed.
+pub(crate) fn refresh_claude_command() {
+    let data = switcher::read_sequence_data().unwrap_or_default();
+    if crate::profile_registry::selected_number(&data).is_some() {
+        if let Err(error) = crate::profile_registry::sync_shim(&data) {
+            log::warn!("shim.json not updated: {error}");
+        }
+    }
+    resync_shared_files(&data);
+    let bin_dir = crate::paths::cc_logins_bin_dir();
+    let installed = bin_dir
+        .join(crate::cli_install::exe_name(crate::shim_core::SHIM_STEM))
+        .exists();
+    let Some(shim) = crate::cli_install::bundled_shim() else {
+        return;
+    };
+    if !installed {
+        return;
+    }
+    let slugs: Vec<String> = crate::profile_registry::launchers(&data)
+        .into_iter()
+        .map(|(slug, _)| slug)
+        .collect();
+    match crate::cli_install::materialize(&bin_dir, &shim, &slugs) {
+        Ok(changed) if !changed.written.is_empty() || !changed.removed.is_empty() => {
+            log::info!(
+                "claude command copies refreshed: {} written, {} removed",
+                changed.written.len(),
+                changed.removed.len()
+            )
+        }
+        Ok(_) => {}
+        Err(error) => log::warn!("claude command refresh skipped: {error}"),
+    }
+}
+
+/// Bring every profile's shared files (settings, CLAUDE.md, keybindings) up
+/// to date with the default folder.
+fn resync_shared_files(data: &serde_json::Map<String, serde_json::Value>) {
+    let default_dir = crate::sys_env::default_claude_config_dir();
+    let dirs = data
+        .get("accounts")
+        .and_then(serde_json::Value::as_object)
+        .into_iter()
+        .flat_map(|accounts| accounts.values())
+        .filter_map(serde_json::Value::as_object)
+        .filter_map(crate::profile_registry::profile_of)
+        .filter_map(|profile| profile.config_dir);
+    for dir in dirs {
+        match crate::sharing::resync(std::path::Path::new(&dir), &default_dir) {
+            Ok(conflicts) if !conflicts.is_empty() => log::warn!(
+                "{} shared file(s) changed in both places; the profile's copies were saved beside them",
+                conflicts.len()
+            ),
+            Ok(_) => {}
+            Err(error) => log::warn!("shared file resync skipped: {error}"),
+        }
+    }
+}
+
+/// Create the folder a new account signs in to:
+/// `~/.cc-logins/profiles/p<slot>-<suffix>`, seeded from the default profile.
+fn new_profile_dir() -> IpcResult<String> {
+    let data = switcher::read_sequence_data().unwrap_or_default();
+    let slot = switcher::next_free_slot(&data);
+    let name = crate::profiles::profile_dir_name(slot, &crate::profiles::random_suffix());
+    let dir = crate::paths::profiles_root().join(name);
+    let text = crate::profiles::normalize_profile_path(&crate::sys_env::home_dir(), &dir)
+        .map_err(|error| IpcError::InvalidInput(error.to_string()))?;
+    std::fs::create_dir_all(&text).map_err(io_internal)?;
+    let path = std::path::Path::new(&text);
+    crate::profiles::seed_profile(path).map_err(io_internal)?;
+    // Settings, CLAUDE.md, agents and friends come along. A failure here
+    // costs convenience, not the account, so it never blocks a sign-in.
+    if let Err(error) =
+        crate::sharing::share_into(path, &crate::sys_env::default_claude_config_dir())
+    {
+        log::warn!("could not share settings into the new profile: {error}");
+    }
+    Ok(text)
+}
+
+/// Remove a folder created for a sign-in that did not produce a new account.
+/// Only ever a folder this app just created under its own profiles root.
+fn discard_new_profile_dir(dir: &str) {
+    let path = std::path::Path::new(dir);
+    if !path.starts_with(crate::paths::profiles_root()) {
+        return;
+    }
+    // Links first, so the recursive delete below can never reach through one.
+    if let Err(error) = crate::sharing::unshare(path) {
+        log::warn!("could not unlink shared folders: {error}");
+        return;
+    }
+    if let Err(error) = std::fs::remove_dir_all(path) {
+        log::warn!("could not remove unused profile folder: {error}");
+    }
+}
+
+fn io_internal(error: std::io::Error) -> IpcError {
+    IpcError::Internal(error.to_string())
+}
+
+/// Report whether new terminals get this app's `claude`. Runs the user's
+/// login shell on macOS and Linux, so it is off the async runtime.
+#[tauri::command]
+pub async fn cli_status() -> IpcResult<CliStatus> {
+    off_runtime(|| cli_status_now(current_launchers())).await
+}
+
+/// Copy the shim into `~/.cc-logins/bin` and put that first on `PATH`.
+#[tauri::command]
+pub async fn install_cli(state: tauri::State<'_, AppState>) -> IpcResult<CliStatus> {
+    let claude_binary = state
+        .settings
+        .snapshot()
+        .settings
+        .claude_binary_path
+        .clone()
+        .map(std::path::PathBuf::from);
+    off_runtime(move || install_cli_blocking(claude_binary)).await?
+}
+
+fn install_cli_blocking(claude_binary: Option<std::path::PathBuf>) -> IpcResult<CliStatus> {
+    let shim = crate::cli_install::bundled_shim().ok_or_else(|| {
+        IpcError::PrerequisiteMissing(
+            "This build doesn't include the claude command. Install CC Logins from a              release to use it."
+                .to_string(),
+        )
+    })?;
+    let bin_dir = crate::paths::cc_logins_bin_dir();
+    // The shim reads this before anything else; write it first so the very
+    // first `claude` after install already finds the configured binary.
+    crate::profiles::update_shim_config(|config| config.claude_binary = claude_binary)
+        .map_err(io_internal)?;
+    let launchers = current_launchers();
+    let slugs: Vec<String> = launchers.iter().map(|l| l.slug.clone()).collect();
+    crate::cli_install::materialize(&bin_dir, &shim, &slugs).map_err(io_internal)?;
+    crate::cli_install::install_path(&bin_dir).map_err(io_internal)?;
+    Ok(cli_status_now(launchers))
+}
+
+/// Take the `claude` command off `PATH` and remove the copies. Profile
+/// folders and their history are untouched.
+#[tauri::command]
+pub async fn uninstall_cli() -> IpcResult<CliStatus> {
+    off_runtime(|| {
+        let bin_dir = crate::paths::cc_logins_bin_dir();
+        crate::cli_install::uninstall_path(&bin_dir).map_err(io_internal)?;
+        crate::cli_install::clear_bin_dir(&bin_dir).map_err(io_internal)?;
+        Ok(cli_status_now(current_launchers()))
+    })
+    .await?
+}
+
 // ─── settings ────────────────────────────────────────────────────────────────
 
 const SETTINGS_UPDATED_EVENT: &str = "settings://updated";
@@ -873,9 +1349,15 @@ pub fn update_settings(
     state: tauri::State<'_, AppState>,
     input: UpdateSettingsInput,
 ) -> IpcResult<crate::settings::SettingsSnapshot> {
-    update_settings_at(&state, input, chrono::Utc::now(), |snapshot| {
+    let updated = update_settings_at(&state, input, chrono::Utc::now(), |snapshot| {
         app.emit(SETTINGS_UPDATED_EVENT, snapshot)
-    })
+    })?;
+    // The tray menu's percentages follow the used/left display setting; the
+    // last snapshot, of any age, is enough to relabel them.
+    if let Some(snapshot) = state.cached_snapshot(std::time::Duration::MAX) {
+        crate::tray_menu::schedule_update(&app, &snapshot);
+    }
+    Ok(updated)
 }
 
 #[tauri::command]
@@ -1373,27 +1855,46 @@ mod tests {
     }
 
     #[test]
+    fn switch_cannot_remove_active_maps_to_its_own_kind() {
+        let mapped: IpcError = SwitchError::CannotRemoveActive("1".to_string()).into();
+        assert!(
+            matches!(mapped, IpcError::CannotRemoveActive(_)),
+            "got {mapped:?}"
+        );
+
+        let json = serde_json::to_string(&mapped).unwrap();
+        assert!(json.contains("cannotRemoveActive"), "got {json}");
+    }
+
+    #[test]
+    fn switch_invalid_input_maps_to_its_own_kind_with_the_sentence_as_detail() {
+        let mapped: IpcError = SwitchError::InvalidInput("too long".to_string()).into();
+        assert_eq!(
+            serde_json::to_value(mapped).unwrap(),
+            serde_json::json!({ "kind": "invalidInput", "detail": "too long" })
+        );
+    }
+
+    #[test]
+    fn a_removal_that_left_files_behind_is_a_credential_error() {
+        let mapped: IpcError =
+            SwitchError::RemovedWithLeftovers("2".to_string(), "disk busy".to_string()).into();
+        match mapped {
+            IpcError::Credential(detail) => {
+                assert!(detail.contains("was removed"), "got {detail}");
+                assert!(detail.contains("disk busy"), "got {detail}");
+            }
+            other => panic!("expected Credential, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn switch_locking_maps_to_busy() {
         let underlying = crate::locking::LockingError::Timeout {
             path: std::path::PathBuf::from("/tmp/lock"),
         };
         let mapped: IpcError = SwitchError::Locking(underlying).into();
         assert!(matches!(mapped, IpcError::Busy(_)), "got {mapped:?}");
-    }
-
-    #[test]
-    fn manual_relogin_required_is_a_structured_ipc_error() {
-        let mapped: IpcError =
-            SwitchError::Refresh(crate::oauth_refresh::RefreshCoordinatorError::ReloginRequired)
-                .into();
-        assert!(matches!(mapped, IpcError::ReloginRequired(_)));
-        assert_eq!(
-            serde_json::to_value(mapped).unwrap(),
-            serde_json::json!({
-                "kind": "reloginRequired",
-                "detail": "account requires re-login"
-            })
-        );
     }
 
     #[test]

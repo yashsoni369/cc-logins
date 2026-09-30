@@ -10,14 +10,12 @@ use std::time::Duration;
 
 use serde_json::{Map, Value};
 
-use crate::credentials::{
-    merge_shared_credential_fields, shared_credential_fields, ActiveCredentialState,
-    CredentialStore, StoreHost,
-};
-use crate::switch_journal::{
-    sha256, ArtifactRecord, JournalPhase, JournalStore, JournalTarget, OutgoingGeneration,
-    SwitchJournal,
-};
+#[cfg(test)]
+use crate::credentials::{merge_shared_credential_fields, shared_credential_fields, StoreHost};
+use crate::credentials::{ActiveCredentialState, CredentialStore};
+use crate::switch_journal::{sha256, ArtifactRecord, JournalPhase, JournalStore, SwitchJournal};
+#[cfg(test)]
+use crate::switch_journal::{JournalTarget, OutgoingGeneration};
 
 #[derive(Debug, thiserror::Error)]
 pub enum LiveStateLockError {
@@ -44,6 +42,11 @@ pub struct ActiveRefreshLocks {
     _vault: crate::locking::FileLock,
 }
 
+// Since v0.4 the app never performs a switch. The forward path below is kept
+// only for tests: the recovery tests use it to create genuinely interrupted
+// journals, and recovery itself stays until v0.5 to finish a switch that a
+// v0.3 build left half done.
+#[cfg(test)]
 #[derive(Debug, Clone)]
 pub(crate) enum OutgoingDestination {
     Managed {
@@ -51,9 +54,12 @@ pub(crate) enum OutgoingDestination {
         email: String,
         config_backup_path: std::path::PathBuf,
     },
+    // The forward path still handles it; no remaining test builds one.
+    #[allow(dead_code)]
     Unclaimed,
 }
 
+#[cfg(test)]
 #[derive(Debug, Clone)]
 pub(crate) struct SwitchPlan {
     pub target: JournalTarget,
@@ -179,6 +185,7 @@ pub fn recovery_requirement() -> Option<String> {
     TEST_RECOVERY_STATE.with(|state| state.borrow().clone())
 }
 
+#[cfg(test)]
 fn transaction_id() -> String {
     use std::sync::atomic::{AtomicU64, Ordering};
     static NEXT: AtomicU64 = AtomicU64::new(0);
@@ -190,6 +197,7 @@ fn transaction_id() -> String {
     )
 }
 
+#[cfg(test)]
 fn file_artifact(
     recovery: &mut crate::recovery_store::RecoveryStore,
     transaction_id: &str,
@@ -210,6 +218,7 @@ fn file_artifact(
     })
 }
 
+#[cfg(test)]
 fn active_artifact(
     recovery: &mut crate::recovery_store::RecoveryStore,
     transaction_id: &str,
@@ -227,6 +236,7 @@ fn active_artifact(
     })
 }
 
+#[cfg(test)]
 fn stage_name(stage: &crate::durable_fs::StagedFile) -> Option<std::path::PathBuf> {
     stage.path().file_name().map(std::path::PathBuf::from)
 }
@@ -239,6 +249,7 @@ fn remove_stage(path: &std::path::Path) {
     }
 }
 
+#[cfg(test)]
 /// Execute a prepared, network-free switch while the caller holds
 /// [`LiveStateLocks`]. Before-images are protected and journaled before any
 /// live or vault mutation. Any pre-commit failure attempts a complete exact

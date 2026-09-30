@@ -9,9 +9,43 @@ At `0.x` the public contract is the on-disk shape — the account vault layout, 
 settings file, and the usage-history database schema — plus the supported OS matrix.
 A breaking change to any of those bumps the minor version, since major is pinned at 0.
 
-## [Unreleased]
+## [Unreleased] — 0.4.0
 
-Nothing yet.
+The app no longer stores, copies or refreshes any Claude login.
+
+### Changed
+
+- Each account now has its own Claude Code folder under `~/.cc-logins/profiles/` and signs in
+  once there through the official `claude auth login`. The account signed in to `~/.claude` is
+  used as it is.
+- Picking an account (by hand, from the tray, or by auto-switch) now changes which account **new**
+  Claude Code sessions start with. Sessions already running keep their account. A session that
+  hits its limit continues on the selected account after `/exit` and a new `claude`.
+- Usage is read with the access token Claude Code keeps fresh, in place, for one request. An
+  account nobody is using shows its last reading, marked `idle`; windows that have reset since are
+  shown at 0%, marked `reset since`.
+- Settings, `CLAUDE.md`, keybindings, agents, commands, skills, output styles and hooks are shared
+  across accounts. Session history and plugins are per account, so `claude --continue` only finds
+  the same account's conversations.
+
+### Added
+
+- **Settings → Claude command**: installs a `claude` launcher first on your `PATH` so new
+  terminals start the selected account, plus a `claude-<name>` command per account for running
+  accounts side by side. Shows the VS Code `claudeCode.claudeProcessWrapper` line to copy.
+
+### Removed
+
+- Switching by rewriting Claude Code's credential files, the app's own encrypted copies of each
+  login, token refresh, and **Paste a setup token**.
+
+### Migration
+
+- On first start the account signed in to `~/.claude` becomes the default account once
+  `claude auth status` confirms it. Every other account shows **Move**: sign in to it once, and its
+  old stored copy is deleted only after the sign-in is verified as the same account.
+- A switch left interrupted by an earlier version is still finished or rolled back first.
+- Downgrading to 0.3 after moving an account means re-adding that account there.
 
 ## [0.2.5] - 2026-08-29
 

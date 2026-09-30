@@ -13,7 +13,8 @@ web
 Developers who hold more than one Claude subscription and run Claude Code all day. They are mid-task
 when they touch this — a build is running, a thought is half-finished — so the interaction budget is
 a glance and one click. The job to be done is *never lose flow to a rate limit*: know how much
-headroom is left before it bites, and move to another account without leaving the keyboard.
+headroom is left before it bites, and start the next session on another account without leaving the
+keyboard.
 
 Secondary context worth designing for: the same person on a second machine, and on Windows the same
 person split across a native Windows install and a WSL distro, where Claude Code keeps two entirely
@@ -21,18 +22,23 @@ separate logins.
 
 ## Product Purpose
 
-An always-present tray application that shows which Claude account is active, how much 5-hour and
-7-day quota each account has left, and switches between them — manually in one click, or
+An always-present tray application that shows how much 5-hour and 7-day quota each Claude account
+has left, and picks which account new Claude Code sessions start with — manually in one click, or
 automatically before a limit lands. It also keeps a local history of usage so burn rate is visible
 over days and weeks, which no existing tool offers.
+
+Each account signs in once, through Claude Code's own `claude auth login`, into its own Claude Code
+folder (`CLAUDE_CONFIG_DIR`), the setup Anthropic documents for running accounts side by side. A
+small `claude` launcher starts new sessions on the selected account; running sessions keep theirs.
 
 Success is that the user stops thinking about accounts. They never hit a limit unexpectedly, and
 they never open a terminal to find out where they stand.
 
 ## Positioning
 
-The only account switcher that never touches your tokens except to hand them to the official Claude
-Code binary — no relay, no proxy, no cloud sync, no export button.
+The account switcher that never holds your login. Each account stays signed in where Claude Code
+keeps it; the app reads a current token only to measure quota, never stores, copies or refreshes
+one, and has no relay, no proxy, no cloud sync and no export button.
 
 ## Brand Personality
 

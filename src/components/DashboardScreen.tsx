@@ -1,11 +1,9 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import AccountRow, { type AccountDetail } from "./dashboard/AccountRow";
-import CapacityBand from "./dashboard/CapacityBand";
 import Insights from "./dashboard/Insights";
 import LoadBalance from "./dashboard/LoadBalance";
 import RangePicker from "./dashboard/RangePicker";
-import ResetStagger from "./dashboard/ResetStagger";
 import RotationChart from "./dashboard/RotationChart";
 import { Loading } from "./Loading";
 import { historySamples, historySeries } from "../lib/api";
@@ -16,14 +14,9 @@ import {
   loadBalanceGrid,
   type RangeKey,
 } from "../lib/dashboard";
-import { pooledRunway } from "../lib/runway";
 import { useNow } from "../lib/time";
 import { stableKey, type Account, type DayStat, type Sample, type Snapshot } from "../types";
 
-/** Trailing window the pooled burn estimate is measured over. Independent of
- *  the display range: a runway projected from a month of averages would smooth
- *  away the last hour, which is the only hour that predicts the next one. */
-const BURN_HOURS = 24;
 /** Intraday window an opened account charts. Wider than one 5-hour cycle. */
 const DETAIL_HOURS = 72;
 /** Daily-rollup range an opened account charts. */
@@ -48,6 +41,8 @@ interface DashboardScreenProps {
   settingsThreshold: number;
   /** True when the most recent background refresh failed; meters dim rather than blank. */
   degraded: boolean;
+  /** Opens one account in place on arrival — Home's "View history". `nonce` makes a repeat request count. */
+  focus?: { accountNumber: number; nonce: number } | null;
 }
 
 /** Settle every promise independently: one account's unreadable history must
@@ -69,19 +64,18 @@ async function gather<T>(
 }
 
 /**
- * The app's home screen: pooled capacity, how the rotation is behaving, and
- * any account opened in place beneath its own row.
+ * History: what your own recorded usage says, utilisation over time, and any
+ * account opened in place beneath its own row. "Now" lives on Home.
  *
  * Live usage percentages come from the snapshot `App` already owns — they are
  * the authoritative reading, and refetching them here would let this screen
  * and the Accounts screen disagree. Only recorded *history* is fetched here.
  */
-export default function DashboardScreen({ snapshot, settingsThreshold, degraded }: DashboardScreenProps) {
+export default function DashboardScreen({ snapshot, settingsThreshold, degraded, focus = null }: DashboardScreenProps) {
   const [range, setRange] = useState<RangeKey>("7d");
   const [expanded, setExpanded] = useState<Set<number>>(new Set());
   const [keyByNumber, setKeyByNumber] = useState<Map<number, string>>(new Map());
 
-  const [burnByKey, setBurnByKey] = useState<Map<string, Sample[]>>(new Map());
   const [rangeSamples, setRangeSamples] = useState<Map<string, Sample[]>>(new Map());
   const [rangeDaily, setRangeDaily] = useState<Map<string, DayStat[]>>(new Map());
   // Distinguishes "still reading" from "nothing recorded". Without it the
@@ -117,20 +111,6 @@ export default function DashboardScreen({ snapshot, settingsThreshold, degraded 
   const keys = useMemo(() => [...keyByNumber.values()], [keyByNumber]);
 
   // The burn estimate's own fixed window, refetched only as accounts change.
-  useEffect(() => {
-    if (keys.length === 0) return;
-    let cancelled = false;
-    void gather(keys, (key) => historySamples(key, BURN_HOURS)).then((map) => {
-      if (!cancelled) setBurnByKey(map);
-    });
-    return () => {
-      cancelled = true;
-    };
-  }, [keys]);
-
-  // Whatever the selected range needs. Samples for short ranges; daily rollups
-  // for long ones, which are the only source that outlives pruning. Daily is
-  // fetched either way because the load-balance grid always wants it.
   useEffect(() => {
     if (keys.length === 0) return;
     let cancelled = false;
@@ -199,11 +179,6 @@ export default function DashboardScreen({ snapshot, settingsThreshold, degraded 
     });
   }, [accounts]);
 
-  const runway = useMemo(
-    () => pooledRunway(accounts, burnByKey, keyFor, now),
-    [accounts, burnByKey, keyFor, now],
-  );
-
   const series = useMemo(
     () => buildFleetSeries(accounts, keyFor, rangeSamples, rangeDaily, spec, 240, now),
     [accounts, keyFor, rangeSamples, rangeDaily, spec, now],
@@ -241,11 +216,27 @@ export default function DashboardScreen({ snapshot, settingsThreshold, degraded 
     [keyByNumber, loadDetail],
   );
 
+  // Arriving from Home's "View history": open that account in place once its
+  // history key has resolved. The key resolves asynchronously, so this is a
+  // genuine synchronisation with an external result, not derived state.
+  const handledFocus = useRef<number | null>(null);
+  useEffect(() => {
+    if (!focus || handledFocus.current === focus.nonce) return;
+    const key = keyByNumber.get(focus.accountNumber);
+    if (!key) return;
+    handledFocus.current = focus.nonce;
+    setExpanded((prev) => new Set(prev).add(focus.accountNumber));
+    void loadDetail(key);
+    requestAnimationFrame(() =>
+      document.getElementById(`history-row-${focus.accountNumber}`)?.scrollIntoView({ block: "start" }),
+    );
+  }, [focus, keyByNumber, loadDetail]);
+
   if (accounts.length === 0) {
     return (
       <div className="pane">
         <div className="pane-head">
-          <h3>Dashboard</h3>
+          <h3>History</h3>
         </div>
         <div className="empty">
           <h3>No accounts yet</h3>
@@ -258,16 +249,16 @@ export default function DashboardScreen({ snapshot, settingsThreshold, degraded 
   return (
     <div className="pane dash">
       <div className="pane-head">
-        <h3>Dashboard</h3>
+        <h3>History</h3>
         <RangePicker value={range} onChange={setRange} />
       </div>
 
-      <CapacityBand accounts={accounts} runway={runway} degraded={degraded} now={now} />
+      <Insights items={insights} />
 
       <section className="band">
         <div className="band-head">
-          <h2>Rotation</h2>
-          <span className="sub">binding utilisation · {spec.phrase}</span>
+          <h2>Utilisation history</h2>
+          <span className="sub">limiting window · {spec.phrase}</span>
           <span className="spacer" />
           <span className="sub">hover a line to isolate it</span>
         </div>
@@ -276,20 +267,6 @@ export default function DashboardScreen({ snapshot, settingsThreshold, degraded 
         ) : (
           <RotationChart series={series} spec={spec} threshold={settingsThreshold} />
         )}
-      </section>
-
-      {/*
-        Its own band, not stacked under the rotation chart. That chart's axis
-        runs backwards through recorded history and this one runs forwards to
-        the next reset; flush against each other and sharing a width, they read
-        as one continuous timeline running the wrong way.
-      */}
-      <section className="band">
-        <div className="band-head">
-          <h2>Next resets</h2>
-          <span className="sub">when each account's 5-hour window clears</span>
-        </div>
-        <ResetStagger accounts={accounts} now={now} />
       </section>
 
       <section className="band">
@@ -301,27 +278,26 @@ export default function DashboardScreen({ snapshot, settingsThreshold, degraded 
           {accounts.map((account) => {
             const key = keyFor(account);
             return (
-              <AccountRow
-                key={account.number}
-                account={account}
-                detail={key ? detailByKey.get(key) : undefined}
-                series={series.find((s) => s.number === account.number)}
-                expanded={expanded.has(account.number)}
-                onToggle={() => toggle(account.number)}
-                threshold={settingsThreshold}
-                rangeDays={DETAIL_DAYS}
-                peers={accounts.filter((a) => a.number !== account.number)}
-                degraded={degraded}
-                now={now}
-              />
+              <div key={account.number} id={`history-row-${account.number}`} className="history-row">
+                <AccountRow
+                  account={account}
+                  detail={key ? detailByKey.get(key) : undefined}
+                  series={series.find((s) => s.number === account.number)}
+                  expanded={expanded.has(account.number)}
+                  onToggle={() => toggle(account.number)}
+                  threshold={settingsThreshold}
+                  rangeDays={DETAIL_DAYS}
+                  peers={accounts.filter((a) => a.number !== account.number)}
+                  degraded={degraded}
+                  now={now}
+                />
+              </div>
             );
           })}
         </div>
       </section>
 
       <LoadBalance rows={loadRows} />
-
-      <Insights items={insights} />
     </div>
   );
 }

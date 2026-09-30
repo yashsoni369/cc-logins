@@ -1,0 +1,134 @@
+name: Bundle check
+
+# Proves every installer carries the `claude` shim (src-tauri/src/bin/
+# cc-logins-shim.rs) next to the app. Tauri bundles each Cargo binary of the
+# package, but that is an implementation detail of tauri-cli rather than a
+# documented promise, and the app cannot offer "Install the claude command"
+# from an installer that lacks the shim. So this builds real bundles — the
+# same targets release.yml ships, unsigned and without updater artifacts —
+# and fails if the shim is missing from any of them.
+#
+# Runs only when something that decides bundle contents changes; a release
+# build takes long enough that it should not ride along on every PR.
+on:
+  pull_request:
+    paths:
+      - 'src-tauri/src/bin/**'
+      - 'src-tauri/Cargo.toml'
+      - 'src-tauri/tauri.conf.json'
+      - 'scripts/bundle-shim.mjs'
+      - '.github/workflows/bundle-check.yml'
+  workflow_dispatch:
+
+concurrency:
+  group: bundle-check-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  bundle:
+    name: Bundle (${{ matrix.platform }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: windows-latest
+            args: '--bundles nsis'
+            out: src-tauri/target/release/bundle
+          - platform: macos-latest
+            args: '--target universal-apple-darwin --bundles app'
+            out: src-tauri/target/universal-apple-darwin/release/bundle
+          - platform: ubuntu-22.04
+            args: '--bundles deb,appimage'
+            out: src-tauri/target/release/bundle
+    runs-on: ${{ matrix.platform }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install Linux system dependencies
+        if: matrix.platform == 'ubuntu-22.04'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev \
+            libayatana-appindicator3-dev \
+            librsvg2-dev \
+            libssl-dev \
+            libxdo-dev \
+            build-essential \
+            curl \
+            wget \
+            file
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.platform == 'macos-latest' && 'aarch64-apple-darwin,x86_64-apple-darwin' || '' }}
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      - uses: pnpm/action-setup@v6
+        with:
+          version: 10.14.0
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - run: pnpm install --frozen-lockfile
+
+      # No updater artifacts: they need the release signing key, which this
+      # check neither has nor needs.
+      - name: Build bundles
+        shell: bash
+        env:
+          ARGS: ${{ matrix.args }}
+        run: |
+          # shellcheck disable=SC2086 # ARGS is a deliberate word list
+          pnpm tauri build $ARGS --config '{"bundle":{"createUpdaterArtifacts":false}}'
+
+      - name: Shim is in the Windows installer
+        if: matrix.platform == 'windows-latest'
+        shell: bash
+        env:
+          OUT: ${{ matrix.out }}
+        run: |
+          for f in "$OUT"/nsis/*.exe; do installer=$f; done
+          echo "installer: $installer"
+          7z l "$installer" > listing.txt
+          grep -i 'cc-logins-shim.exe' listing.txt || { cat listing.txt; exit 1; }
+
+      - name: Shim is in the macOS app, with both architectures
+        if: matrix.platform == 'macos-latest'
+        shell: bash
+        env:
+          OUT: ${{ matrix.out }}
+        run: |
+          for f in "$OUT"/macos/*.app; do app=$f; done
+          macos_dir="$app/Contents/MacOS"
+          ls -l "$macos_dir"
+          shim="$macos_dir/cc-logins-shim"
+          test -x "$shim"
+          archs=$(lipo -archs "$shim")
+          echo "archs: $archs"
+          case "$archs" in *arm64*) ;; *) exit 1 ;; esac
+          case "$archs" in *x86_64*) ;; *) exit 1 ;; esac
+
+      - name: Shim is in the deb and the AppImage
+        if: matrix.platform == 'ubuntu-22.04'
+        shell: bash
+        env:
+          OUT: ${{ matrix.out }}
+        run: |
+          for f in "$OUT"/deb/*.deb; do deb=$f; done
+          dpkg -c "$deb" | tee deb.txt
+          grep -q 'usr/bin/cc-logins-shim$' deb.txt
+          for f in "$OUT"/appimage/*.AppImage; do appimage=$f; done
+          chmod +x "$appimage"
+          (cd "$RUNNER_TEMP" && "$GITHUB_WORKSPACE/$appimage" --appimage-extract > /dev/null)
+          ls -l "$RUNNER_TEMP"/squashfs-root/usr/bin
+          test -x "$RUNNER_TEMP"/squashfs-root/usr/bin/cc-logins-shim

@@ -80,7 +80,7 @@ export function NetworkUnreachableState() {
   );
 }
 
-/** A saved login was rejected. The account is held out of rotation until fixed. */
+/** An account's folder is signed out. It is held out of rotation until fixed. */
 export function LoginExpiredState() {
   return (
     <div className="realm">
@@ -97,7 +97,7 @@ export function LoginExpiredState() {
       </div>
       <div className="realm-body">
         <p style={{ margin: "10px 0", fontSize: 12, color: "var(--muted)" }}>
-          Its saved login was rejected. It is held out of rotation until you sign in again.
+          Its Claude Code folder is signed out. It is held out of rotation until you sign in again.
         </p>
       </div>
       <div className="realm-foot">
