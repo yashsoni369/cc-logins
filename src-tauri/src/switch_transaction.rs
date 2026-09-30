@@ -10,14 +10,12 @@ use std::time::Duration;
 
 use serde_json::{Map, Value};
 
-use crate::credentials::{
-    merge_shared_credential_fields, shared_credential_fields, ActiveCredentialState,
-    CredentialStore, StoreHost,
-};
-use crate::switch_journal::{
-    sha256, ArtifactRecord, JournalPhase, JournalStore, JournalTarget, OutgoingGeneration,
-    SwitchJournal,
-};
+#[cfg(test)]
+use crate::credentials::{merge_shared_credential_fields, shared_credential_fields, StoreHost};
+use crate::credentials::{ActiveCredentialState, CredentialStore};
+use crate::switch_journal::{sha256, ArtifactRecord, JournalPhase, JournalStore, SwitchJournal};
+#[cfg(test)]
+use crate::switch_journal::{JournalTarget, OutgoingGeneration};
 
 #[derive(Debug, thiserror::Error)]
 pub enum LiveStateLockError {
@@ -56,6 +54,8 @@ pub(crate) enum OutgoingDestination {
         email: String,
         config_backup_path: std::path::PathBuf,
     },
+    // The forward path still handles it; no remaining test builds one.
+    #[allow(dead_code)]
     Unclaimed,
 }
 
