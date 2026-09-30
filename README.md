@@ -9,6 +9,8 @@
 by [Yash Soni](https://github.com/yashsoni369), founder of
 [Apex36 Technologies](https://apex36tech.com/?utm_source=cc-logins)
 
+<sub>Independent project. Not affiliated with or endorsed by Anthropic.</sub>
+
 [![Release](https://img.shields.io/github/v/release/yashsoni369/cc-logins?style=flat-square&label=release)](https://github.com/yashsoni369/cc-logins/releases/latest)
 [![CI](https://img.shields.io/github/actions/workflow/status/yashsoni369/cc-logins/ci.yml?branch=main&style=flat-square&label=CI)](https://github.com/yashsoni369/cc-logins/actions/workflows/ci.yml)
 [![License](https://img.shields.io/github/license/yashsoni369/cc-logins?style=flat-square)](LICENSE)
@@ -35,7 +37,9 @@ with your credentials.
 This app reads `~/.claude/.credentials.json` — the same file Claude Code itself uses — refreshes
 OAuth tokens when they're near expiry, polls Anthropic's usage endpoint to compute quota, and
 writes that same credentials file when you switch accounts, so the *official* Claude Code binary
-picks up the new identity on its next request.
+picks up the new identity on its next request. To be able to switch back, it keeps a copy of each
+account's credentials in its own folder on your machine: encrypted with DPAPI on Windows, in the
+Keychain on macOS, and as an unencrypted `0600` file on Linux (see [SECURITY.md](SECURITY.md)).
 
 What it does **not** do:
 
@@ -51,13 +55,31 @@ What it does **not** do:
   updates automatically** turns it off — the manual check in About keeps working either way.
   Nothing installs without you asking.
 
-This distinction matters because Anthropic's terms treat it as the line between what's allowed and
-what isn't. They accept per-profile switching between real, individually-authenticated accounts
-using the official client — refresh a token, hand it to the real binary, done. They ban relay
-servers that pool tokens and impersonate the official client to multiple users or sessions at
-once. Running several accounts you legitimately hold is not itself a violation; evading rate
-limits through token sharing or relaying is. This app only ever does the former: it moves
-credentials on your own machine, into the same binary you'd otherwise run by hand.
+### Is this allowed?
+
+What Anthropic has said, in its own words:
+
+- Holding more than one account is fine. In February 2026 Anthropic's Thariq Shihipar wrote that
+  "it's not against terms of service to have multiple MAX accounts", and that enforcement targets
+  token resale ([post](https://x.com/trq212/status/2024230184287949207)).
+- Anthropic documents running accounts side by side: `CLAUDE_CONFIG_DIR` is "useful for running
+  multiple accounts side by side" ([env vars](https://code.claude.com/docs/en/env-vars),
+  [authentication](https://code.claude.com/docs/en/authentication)).
+- The [legal and compliance page](https://code.claude.com/docs/en/legal-and-compliance) also says
+  that "developers may not collect, store, or intermediate Claude.ai credentials or session
+  tokens — sign-in to a Claude account must complete through Anthropic's own flow."
+
+Where this app stands against that last line: sign-in always completes through Anthropic's own
+flow, in the unmodified `claude auth login`. But to switch accounts, the app keeps its own local,
+encrypted copy of each account's credentials, as described above. Whether a copy that never
+leaves your machine counts as "storing" under that clause is not something this project can settle
+for you. A mode that uses one Claude Code config folder per account instead of copies, the setup
+Anthropic's docs describe, is being built.
+
+This is a tool for people who legitimately hold separate subscriptions (work and personal, say)
+and want to see where each one stands. It is not a way to get more usage than your plans allow.
+Automatic switching is off until you turn it on. None of this is legal advice; read Anthropic's
+terms yourself if you're deciding whether multi-account use fits your situation.
 
 ### The one request it makes with your token
 
