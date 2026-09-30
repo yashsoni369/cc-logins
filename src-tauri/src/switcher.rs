@@ -232,18 +232,6 @@ pub(crate) fn write_sequence_data(data: &Map<String, Value>) -> Result<(), Switc
     Ok(())
 }
 
-fn read_account_config(account_num: &str, email: &str) -> Option<String> {
-    read_account_config_at(&paths::backup_root(), account_num, email)
-}
-
-/// Same as [`read_account_config`], parameterized on the store root (see
-/// [`account_config_path_at`]).
-fn read_account_config_at(root: &Path, account_num: &str, email: &str) -> Option<String> {
-    std::fs::read_to_string(account_config_path_at(root, account_num, email))
-        .ok()
-        .filter(|s| !s.is_empty())
-}
-
 /// Slot number of the live login, or `None` when there is none or it is
 /// unmanaged. Mirrors `_get_current_account` + `_find_account_slot`:
 /// identity is read from `~/.claude.json`'s `oauthAccount` block (never from
