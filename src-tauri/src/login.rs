@@ -128,28 +128,6 @@ const UNKNOWN_LINUX_TERMINAL: LinuxTerminal = LinuxTerminal {
 // Public types
 // ---------------------------------------------------------------------------
 
-/// A completed interactive login.
-#[derive(Debug, Clone)]
-pub struct LoginOutcome {
-    /// The full `.credentials.json` contents captured from the isolated temp
-    /// config dir — a JSON object with a `claudeAiOauth` key, the same shape
-    /// Claude Code itself writes and the same shape [`crate::credentials::CredentialStore`]
-    /// expects for a stored account.
-    pub credentials: String,
-    /// Stable account UUID from the resolved profile. Replacement flows use
-    /// this to prove an isolated login belongs to the selected existing slot.
-    pub uuid: Option<String>,
-    /// Best-effort identity resolved via [`crate::oauth::fetch_oauth_profile`].
-    /// `None` if the profile lookup failed or was unreachable — the login
-    /// itself still succeeded; the caller should fall back to a placeholder
-    /// label rather than treat this as an error.
-    pub email: Option<String>,
-    /// Best-effort organization UUID from the same profile lookup. This is an
-    /// identifier, not a human-readable org name — [`crate::oauth::TokenAccount`]
-    /// (what `fetch_oauth_profile` resolves) does not carry a display name.
-    pub organization_uuid: Option<String>,
-}
-
 /// Failure modes for [`interactive_login`]. The UI is expected to branch on
 /// these — see each variant's doc for the intended user-facing meaning.
 #[derive(Debug, Error)]
@@ -642,78 +620,6 @@ pub fn sweep_stale_login_dirs(min_age: std::time::Duration) -> usize {
         }
     }
     removed
-}
-
-pub async fn interactive_login(
-    claude_binary_setting: Option<PathBuf>,
-) -> Result<LoginOutcome, LoginError> {
-    let resolved =
-        claude_cli::resolve(claude_binary_setting).map_err(LoginError::ClaudeNotInstalled)?;
-    log::info!(
-        "using claude binary from {}: {}",
-        resolved.source.label(),
-        resolved.path.display()
-    );
-    let claude_path = resolved.path;
-
-    // Distinctive prefix on purpose: `TempDir::new()` produces a generic
-    // `.tmpXXXXXX` name, indistinguishable from every other program's scratch
-    // directory — which makes the startup sweep below impossible to do safely.
-    // See `sweep_stale_login_dirs`.
-    let temp_dir = tempfile::Builder::new().prefix(TEMP_DIR_PREFIX).tempdir()?;
-    let temp_path = temp_dir.path().to_path_buf();
-    log::info!(
-        "interactive login: isolated config dir {} (real ~/.claude untouched)",
-        temp_path.display()
-    );
-
-    let plan = build_launch_plan(&claude_path, &temp_path)?;
-
-    let blocking_claude_path = claude_path.clone();
-    let blocking_temp_path = temp_path.clone();
-    let poll_result = tokio::task::spawn_blocking(move || {
-        run_login_blocking(&blocking_claude_path, &blocking_temp_path, plan)
-    })
-    .await;
-
-    let credentials = match poll_result {
-        Ok(Ok(creds)) => creds,
-        Ok(Err(e)) => {
-            log::info!(
-                "interactive login did not complete: {}",
-                login_outcome_kind(&e)
-            );
-            return Err(e);
-            // `temp_dir` drops here, deleting the temp config dir.
-        }
-        Err(_join_err) => {
-            log::warn!("interactive login worker task did not finish cleanly");
-            return Err(LoginError::Io(io::Error::other(
-                "login worker task did not finish cleanly",
-            )));
-            // `temp_dir` drops here too.
-        }
-    };
-
-    // Best-effort identity resolution — never fatal to a successful login.
-    let access_token = crate::oauth::extract_access_token(&credentials);
-    let identity = match access_token {
-        Some(token) => crate::oauth::fetch_oauth_profile(&token).await,
-        None => None,
-    };
-
-    log::info!("interactive login succeeded");
-
-    Ok(LoginOutcome {
-        credentials,
-        uuid: identity
-            .as_ref()
-            .map(|i| i.uuid.clone())
-            .filter(|uuid| !uuid.is_empty()),
-        email: identity.as_ref().and_then(|i| i.email.clone()),
-        organization_uuid: identity.as_ref().and_then(|i| i.organization_uuid.clone()),
-    })
-    // `temp_dir` drops here on the success path too.
 }
 
 // ---------------------------------------------------------------------------

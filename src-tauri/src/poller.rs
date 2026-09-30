@@ -1394,13 +1394,13 @@ async fn perform_switch(app: &AppHandle, snapshot: &Snapshot, from: u32, to: u32
         return false;
     };
 
-    // A profile account is selected for new sessions (registry + shim.json);
-    // only a v0.3 account is still swapped into ~/.claude.
-    let result = if target.profile.is_some() {
-        tokio::task::spawn_blocking(move || crate::profile_registry::select(to)).await
-    } else {
-        tokio::spawn(async move { switcher::switch_to(&target).await }).await
-    };
+    // Auto-switch selects an account for new sessions (registry + shim.json).
+    // A v0.3 account is never swapped into Claude Code again.
+    if target.profile.is_none() {
+        log::warn!("poller: account {to} has not moved to its own folder; not selecting it");
+        return false;
+    }
+    let result = tokio::task::spawn_blocking(move || crate::profile_registry::select(to)).await;
     match result {
         Ok(Ok(())) => {
             let _ = app.emit(

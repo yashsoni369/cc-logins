@@ -435,21 +435,11 @@ pub async fn switch_account_for(
         return Ok(snap);
     }
 
-    // Show the switch in flight before mutating anything, so a slow swap
-    // doesn't leave the tray sitting on the outgoing account's stale number.
-    crate::poller::publish_switching(app);
-
-    switcher::switch_to(target).await?;
-
-    // Bypass the cache: it holds the pre-switch state by definition, and
-    // showing the user the state from before their own action is a lie.
-    let snap = snapshot_uncached(&state).await?;
-
-    // The credential change already succeeded above; publish_snapshot never
-    // fails the caller, so a tray/emit hiccup here can't misreport this
-    // switch as failed.
-    crate::poller::publish_snapshot(app, &snap);
-    Ok(snap)
+    // A v0.3 account is never swapped into Claude Code again. It moves by
+    // signing in once into its own folder.
+    Err(IpcError::InvalidInput(
+        "Sign in to this account once to move it to its own folder, then use it.".to_string(),
+    ))
 }
 
 /// Register the currently active Claude Code login as a new managed slot.
@@ -594,65 +584,28 @@ pub async fn relogin_account(
     }
     // A v0.3 account: sign in once into its own folder. Its stored copy is
     // deleted only after the new login is verified as this same account.
-    if target.profile.is_none() {
-        let dir = off_runtime(new_profile_dir).await??;
-        let signed_in = match login::sign_in_to_profile(setting, dir.clone()).await {
-            Ok(signed_in) => signed_in,
-            Err(error) => {
-                discard_new_profile_dir(&dir);
-                return Err(error.into());
-            }
-        };
-        if !switcher::folder_matches(&target, &signed_in.identity) {
+    let dir = off_runtime(new_profile_dir).await??;
+    let signed_in = match login::sign_in_to_profile(setting, dir.clone()).await {
+        Ok(signed_in) => signed_in,
+        Err(error) => {
             discard_new_profile_dir(&dir);
-            return Err(IpcError::InvalidInput(format!(
-                "That signed in as a different account. Sign in as {} to move this one.",
-                crate::model::mask_email(&target.email)
-            )));
+            return Err(error.into());
         }
-        let new = crate::migration::new_profile(&signed_in.identity, Some(dir));
-        off_runtime(move || crate::profile_registry::register(&new)).await??;
-        off_runtime(|| {
-            clean_up_moved_vault_copies();
-            refresh_claude_command();
-        })
-        .await?;
-        let snap = snapshot_uncached(&state).await?;
-        crate::poller::publish_snapshot(&app, &snap);
-        return Ok(snap);
+    };
+    if !switcher::folder_matches(&target, &signed_in.identity) {
+        discard_new_profile_dir(&dir);
+        return Err(IpcError::InvalidInput(format!(
+            "That signed in as a different account. Sign in as {} to move this one.",
+            crate::model::mask_email(&target.email)
+        )));
     }
-    let outcome = login::interactive_login(setting).await?;
-    refuse_if_recovery_required()?;
-    switcher::replace_oauth_credential(
-        account_number,
-        &outcome.credentials,
-        outcome.uuid.as_deref(),
-        outcome.email.as_deref(),
-        outcome.organization_uuid.as_deref(),
-    )?;
-    let snap = snapshot_uncached(&state).await?;
-    crate::poller::publish_snapshot(&app, &snap);
-    Ok(snap)
-}
-
-/// Register a setup-token or managed API key as a new slot.
-///
-/// Useful without any prior Claude Code login on this machine. The token kind
-/// (managed API key vs OAuth setup-token) is auto-detected; an omitted
-/// `email` gets a synthesized `setup-token-{slot}@token.local` /
-/// `api-key-{slot}@token.local` address, matching the CLI's own convention.
-/// An obviously malformed token is rejected before the credential lock is
-/// even taken.
-#[tauri::command]
-pub async fn add_token(
-    state: tauri::State<'_, AppState>,
-    app: tauri::AppHandle,
-    token: String,
-    email: Option<String>,
-    alias: Option<String>,
-) -> IpcResult<Snapshot> {
-    refuse_if_recovery_required()?;
-    switcher::add_token(&token, email.as_deref(), alias.as_deref())?;
+    let new = crate::migration::new_profile(&signed_in.identity, Some(dir));
+    off_runtime(move || crate::profile_registry::register(&new)).await??;
+    off_runtime(|| {
+        clean_up_moved_vault_copies();
+        refresh_claude_command();
+    })
+    .await?;
     let snap = snapshot_uncached(&state).await?;
     crate::poller::publish_snapshot(&app, &snap);
     Ok(snap)

@@ -20,7 +20,6 @@ import { useUpdate } from "./lib/useUpdate";
 import { formatCountdown, useNow } from "./lib/time";
 import {
   addCurrentAccount,
-  addToken,
   hasBackend,
   interactiveLogin,
   IpcError,
@@ -166,15 +165,6 @@ export function describeInteractiveLoginError(err: unknown): string | null {
   return err instanceof Error ? err.message : "Couldn't sign in to a new account.";
 }
 
-/** Message for a failed "Add token". */
-function describeAddTokenError(err: unknown): string {
-  if (err instanceof IpcError) {
-    if (err.isBusy) return BUSY_MESSAGE;
-    return err.detail ?? err.message;
-  }
-  return err instanceof Error ? err.message : "Couldn't add this token.";
-}
-
 /** Message for a failed enable/disable — worded specifically when the backend refused to disable the active account. */
 function describeEnableError(err: unknown, enabled: boolean): string {
   if (err instanceof IpcError) {
@@ -265,8 +255,6 @@ function AppContent() {
   const [interactiveLoginError, setInteractiveLoginError] = useState<string | null>(null);
   const [pendingReloginAccount, setPendingReloginAccount] = useState<number | null>(null);
   const [reloginError, setReloginError] = useState<SwitchError | null>(null);
-  const [pendingAddToken, setPendingAddToken] = useState(false);
-  const [addTokenError, setAddTokenError] = useState<string | null>(null);
   const [pendingEnableAccount, setPendingEnableAccount] = useState<number | null>(null);
   const [enableError, setEnableError] = useState<EnableError | null>(null);
   const [pendingEdit, setPendingEdit] = useState(false);
@@ -276,7 +264,6 @@ function AppContent() {
 
   // UI state other surfaces (the palette) can drive, so it lives here.
   const [drawer, setDrawer] = useState<DrawerState | null>(null);
-  const [showToken, setShowToken] = useState(false);
   const [paletteOpen, setPaletteOpen] = useState(false);
   const [historyFocus, setHistoryFocus] = useState<{ accountNumber: number; nonce: number } | null>(null);
 
@@ -303,7 +290,6 @@ function AppContent() {
     recoveryBlocked ||
     pendingAccount !== null ||
     pendingAddAccount ||
-    pendingAddToken ||
     pendingInteractiveLogin ||
     pendingReloginAccount !== null ||
     pendingEnableAccount !== null ||
@@ -392,21 +378,6 @@ function AppContent() {
         if (message !== null) setReloginError({ accountNumber, message });
       })
       .finally(() => setPendingReloginAccount(null));
-  }, []);
-
-  // The ONLY call site for `addToken`, reached from the token form's submit.
-  const handleAddToken = useCallback(async (token: string, email?: string, alias?: string) => {
-    setPendingAddToken(true);
-    setAddTokenError(null);
-    try {
-      const result = await addToken(token, email, alias);
-      setSnapshotOverride(result);
-    } catch (err) {
-      setAddTokenError(describeAddTokenError(err));
-      throw err; // lets the form know not to close itself
-    } finally {
-      setPendingAddToken(false);
-    }
   }, []);
 
   // The ONLY call site for `setAccountEnabled`.
@@ -537,17 +508,8 @@ function AppContent() {
       list.push({ id: "auto-off", group: "Actions", label: "Turn auto-switch off", run: () => setAutoSwitch(false) });
     }
     if (!mutationInFlight) {
-      list.push({ id: "add-current", group: "Actions", label: "Add the account Claude Code is signed into", run: handleAddAccount });
+      list.push({ id: "add-current", group: "Actions", label: "Use the account Claude Code is signed into", run: handleAddAccount });
       list.push({ id: "add-signin", group: "Actions", label: "Sign in to another account", run: handleInteractiveLogin });
-      list.push({
-        id: "add-token",
-        group: "Actions",
-        label: "Paste a setup token",
-        run: () => {
-          setScreen("home");
-          setShowToken(true);
-        },
-      });
     }
     list.push({ id: "theme-day", group: "Actions", label: "Theme: Day", run: () => theme.setTheme("day") });
     list.push({ id: "theme-night", group: "Actions", label: "Theme: Night", run: () => theme.setTheme("night") });
@@ -696,17 +658,12 @@ function AppContent() {
                   loginPresent={loginPresent}
                   drawer={drawer}
                   onDrawerChange={setDrawer}
-                  showToken={showToken}
-                  onShowTokenChange={setShowToken}
                   onSwitch={(n) => handleSwitch(n)}
                   pendingAccount={pendingAccount}
                   switchError={switchError}
                   onAddAccount={handleAddAccount}
                   pendingAddAccount={pendingAddAccount}
                   addAccountError={addAccountError}
-                  onAddToken={handleAddToken}
-                  pendingAddToken={pendingAddToken}
-                  addTokenError={addTokenError}
                   onInteractiveLogin={handleInteractiveLogin}
                   pendingInteractiveLogin={pendingInteractiveLogin}
                   interactiveLoginError={interactiveLoginError}

@@ -378,24 +378,6 @@ export async function reloginAccount(accountNumber: number): Promise<Snapshot> {
 }
 
 /**
- * Registers an account from a pasted setup-token or API key rather than a
- * live Claude Code session. The token only ever passes through here on its
- * way to the backend — callers must not log, echo, or hold onto it.
- *
- * Throws rather than falling back when there is no backend, exactly like
- * `switchAccount`.
- */
-export async function addToken(token: string, email?: string, alias?: string): Promise<Snapshot> {
-  if (!hasBackend()) {
-    throw new IpcError(
-      "internal",
-      "Not running in the desktop app, so a token cannot be added.",
-    );
-  }
-  return call<Snapshot>("add_token", { token, email, alias });
-}
-
-/**
  * Holds an account out of (or back into) auto-rotation. Disabling the
  * currently-active account is refused by the backend — callers should
  * surface that refusal specifically rather than as a generic failure.

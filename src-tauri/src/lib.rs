@@ -328,7 +328,6 @@ pub fn run() {
             commands::add_current_account,
             commands::interactive_login,
             commands::relogin_account,
-            commands::add_token,
             commands::set_account_enabled,
             commands::set_account_alias,
             commands::remove_account,

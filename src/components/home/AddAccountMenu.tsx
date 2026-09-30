@@ -1,4 +1,3 @@
-import AddTokenDialog from "../AddTokenDialog";
 import { SignInWait } from "../SignInWait";
 import MenuButton, { type MenuItem } from "../ui/MenuButton";
 
@@ -10,7 +9,6 @@ interface AddAccountMenuProps {
   loginPresent: boolean | undefined;
   onAddCurrent: () => void;
   onSignIn: () => void;
-  onPasteToken: () => void;
   /** Label while a route is in flight, e.g. "Adding…". */
   busyLabel: string | null;
   /** All mutations share one credential lock, so every route disables together. */
@@ -22,16 +20,16 @@ interface AddAccountMenuProps {
  * explaining their difference. The route this machine can already satisfy —
  * adding the login Claude Code is signed into — is listed first and marked.
  */
-export default function AddAccountMenu({ loginPresent, onAddCurrent, onSignIn, onPasteToken, busyLabel, disabled }: AddAccountMenuProps) {
+export default function AddAccountMenu({ loginPresent, onAddCurrent, onSignIn, busyLabel, disabled }: AddAccountMenuProps) {
   const current: MenuItem = {
     id: "current",
     label: (
       <>
         {loginPresent === true && <span className="menu-found">Detected on this machine</span>}
-        Add the account Claude Code is signed into
+        Use the account Claude Code is signed into
       </>
     ),
-    description: "Registers the login Claude Code uses now. No new sign-in.",
+    description: "It keeps using Claude Code's own folder. Nothing is copied.",
     onSelect: onAddCurrent,
   };
   const signIn: MenuItem = {
@@ -39,22 +37,12 @@ export default function AddAccountMenu({ loginPresent, onAddCurrent, onSignIn, o
     label: "Sign in to another account",
     description: (
       <>
-        Opens the official <code>claude auth login</code> in a terminal. Your current login stays as it is.
+        Opens the official <code>claude auth login</code> in a terminal, into a new folder for that account.
       </>
     ),
     onSelect: onSignIn,
   };
-  const token: MenuItem = {
-    id: "token",
-    label: "Paste a setup token",
-    description: (
-      <>
-        For headless machines. Made with <code>claude setup-token</code>.
-      </>
-    ),
-    onSelect: onPasteToken,
-  };
-  const items = loginPresent !== false ? [current, signIn, token] : [signIn, current, token];
+  const items = loginPresent !== false ? [current, signIn] : [signIn, current];
 
   return (
     <MenuButton buttonClassName="btn primary" items={items} disabled={disabled} menuClassName="menu-wide">
@@ -66,27 +54,17 @@ export default function AddAccountMenu({ loginPresent, onAddCurrent, onSignIn, o
   );
 }
 
-/** What adding an account has to say: the sign-in wait, errors, and the token form. */
+/** What adding an account has to say: the sign-in wait and errors. */
 export function AddAccountPanel({
   pendingSignIn,
   signInError,
   addCurrentError,
-  showToken,
-  onCloseToken,
-  onAddToken,
-  pendingAddToken,
-  addTokenError,
 }: {
   pendingSignIn: boolean;
   signInError: string | null;
   addCurrentError: string | null;
-  showToken: boolean;
-  onCloseToken: () => void;
-  onAddToken: (token: string, email?: string, alias?: string) => Promise<void>;
-  pendingAddToken: boolean;
-  addTokenError: string | null;
 }) {
-  if (!pendingSignIn && !signInError && !addCurrentError && !showToken) return null;
+  if (!pendingSignIn && !signInError && !addCurrentError) return null;
   return (
     <div className="add-panel">
       {pendingSignIn && <SignInWait />}
@@ -99,17 +77,6 @@ export function AddAccountPanel({
         <div className="banner danger" role="alert">
           <span>{addCurrentError}</span>
         </div>
-      )}
-      {showToken && (
-        <AddTokenDialog
-          pending={pendingAddToken}
-          error={addTokenError}
-          onCancel={onCloseToken}
-          onSubmit={async (value, email, alias) => {
-            await onAddToken(value, email, alias);
-            onCloseToken();
-          }}
-        />
       )}
     </div>
   );

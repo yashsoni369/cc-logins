@@ -26,9 +26,6 @@ export interface HomeScreenProps {
   /** Which account's drawer is open. Owned by App so the command palette can open it too. */
   drawer: DrawerState | null;
   onDrawerChange: (drawer: DrawerState | null) => void;
-  /** Whether the setup-token form is showing. Owned by App for the same reason. */
-  showToken: boolean;
-  onShowTokenChange: (show: boolean) => void;
 
   onSwitch: (accountNumber: number) => void;
   pendingAccount: number | null;
@@ -36,9 +33,6 @@ export interface HomeScreenProps {
   onAddAccount: () => void;
   pendingAddAccount: boolean;
   addAccountError: string | null;
-  onAddToken: (token: string, email?: string, alias?: string) => Promise<void>;
-  pendingAddToken: boolean;
-  addTokenError: string | null;
   onInteractiveLogin: () => void;
   pendingInteractiveLogin: boolean;
   interactiveLoginError: string | null;
@@ -77,7 +71,7 @@ function measuredLabel(accounts: Account[]): string {
  * read here, to project forward.
  */
 export default function HomeScreen(props: HomeScreenProps) {
-  const { snapshot, settings, now, degraded, drawer, onDrawerChange: setDrawer, showToken, onShowTokenChange: setShowToken } = props;
+  const { snapshot, settings, now, degraded, drawer, onDrawerChange: setDrawer } = props;
   const accounts = useMemo(() => snapshot.environments.flatMap((e) => e.accounts), [snapshot]);
   const { keyFor, burnByKey, activeSamples } = useBurnSamples(accounts, snapshot);
 
@@ -106,9 +100,7 @@ export default function HomeScreen(props: HomeScreenProps) {
     ? "Adding…"
     : props.pendingInteractiveLogin
       ? "Waiting for sign-in…"
-      : props.pendingAddToken
-        ? "Adding…"
-        : null;
+      : null;
 
   return (
     <div className="pane home">
@@ -121,7 +113,6 @@ export default function HomeScreen(props: HomeScreenProps) {
           loginPresent={props.loginPresent}
           onAddCurrent={props.onAddAccount}
           onSignIn={props.onInteractiveLogin}
-          onPasteToken={() => setShowToken(true)}
           busyLabel={busyLabel}
           disabled={props.mutationInFlight}
         />
@@ -131,11 +122,6 @@ export default function HomeScreen(props: HomeScreenProps) {
         pendingSignIn={props.pendingInteractiveLogin}
         signInError={props.interactiveLoginError}
         addCurrentError={props.addAccountError}
-        showToken={showToken}
-        onCloseToken={() => setShowToken(false)}
-        onAddToken={props.onAddToken}
-        pendingAddToken={props.pendingAddToken}
-        addTokenError={props.addTokenError}
       />
 
       <CoverageKpis
