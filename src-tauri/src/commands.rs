@@ -425,6 +425,16 @@ pub async fn switch_account_for(
         .find(|a| a.number == account_number)
         .ok_or_else(|| IpcError::Internal(format!("no account in slot {account_number}")))?;
 
+    // A profile account is never swapped in: new sessions are pointed at its
+    // folder and running sessions keep theirs. Nothing is written but the
+    // registry and shim.json.
+    if target.profile.is_some() {
+        off_runtime(move || crate::profile_registry::select(account_number)).await??;
+        let snap = snapshot_uncached(&state).await?;
+        crate::poller::publish_snapshot(app, &snap);
+        return Ok(snap);
+    }
+
     // Show the switch in flight before mutating anything, so a slow swap
     // doesn't leave the tray sitting on the outgoing account's stale number.
     crate::poller::publish_switching(app);
@@ -501,13 +511,30 @@ pub async fn interactive_login(
         .claude_binary_path
         .clone()
         .map(std::path::PathBuf::from);
-    let outcome = login::interactive_login(setting).await?;
+    let dir = off_runtime(new_profile_dir).await??;
+    let signed_in = match login::sign_in_to_profile(setting, dir.clone()).await {
+        Ok(signed_in) => signed_in,
+        Err(error) => {
+            discard_new_profile_dir(&dir);
+            return Err(error.into());
+        }
+    };
     refuse_if_recovery_required()?;
-    switcher::add_oauth_credential(
-        &outcome.credentials,
-        outcome.email.as_deref(),
-        alias.as_deref(),
-    )?;
+    let identity = signed_in.identity;
+    let new = crate::profile_registry::NewProfile {
+        email: identity.email,
+        account_uuid: identity.account_uuid,
+        organization_uuid: identity.organization_uuid,
+        organization_name: identity.organization_name,
+        config_dir: Some(dir.clone()),
+        alias,
+    };
+    if let Err(error) = off_runtime(move || crate::profile_registry::register(&new)).await? {
+        // Already registered elsewhere: this folder is a duplicate login.
+        discard_new_profile_dir(&dir);
+        return Err(error.into());
+    }
+    off_runtime(refresh_claude_command).await?;
     let snap = snapshot_uncached(&state).await?;
     crate::poller::publish_snapshot(&app, &snap);
     Ok(snap)
@@ -531,6 +558,39 @@ pub async fn relogin_account(
         .claude_binary_path
         .clone()
         .map(std::path::PathBuf::from);
+    let target = switcher::read_accounts()?
+        .into_iter()
+        .find(|a| a.number == account_number)
+        .ok_or_else(|| IpcError::Internal(format!("no account in slot {account_number}")))?;
+    if let Some(profile) = target.profile.clone() {
+        let Some(dir) = profile.config_dir else {
+            return Err(IpcError::InvalidInput(
+                "This account uses Claude Code's own folder. Run claude and sign in with /login."
+                    .to_string(),
+            ));
+        };
+        let signed_in = login::sign_in_to_profile(setting, dir.clone()).await?;
+        if !switcher::folder_matches(&target, &signed_in.identity) {
+            return Err(IpcError::InvalidInput(format!(
+                "That signed in as a different account. Sign in again as {}.",
+                crate::model::mask_email(&target.email)
+            )));
+        }
+        let identity = signed_in.identity;
+        let new = crate::profile_registry::NewProfile {
+            email: identity.email,
+            account_uuid: identity.account_uuid,
+            organization_uuid: identity.organization_uuid,
+            organization_name: identity.organization_name,
+            config_dir: Some(dir),
+            alias: None,
+        };
+        off_runtime(move || crate::profile_registry::register(&new)).await??;
+        off_runtime(refresh_claude_command).await?;
+        let snap = snapshot_uncached(&state).await?;
+        crate::poller::publish_snapshot(&app, &snap);
+        return Ok(snap);
+    }
     let outcome = login::interactive_login(setting).await?;
     refuse_if_recovery_required()?;
     switcher::replace_oauth_credential(
@@ -1023,6 +1083,82 @@ fn cli_status_now(launchers: Vec<CliLauncher>) -> CliStatus {
     }
 }
 
+/// Launchers of every ready profile account.
+fn current_launchers() -> Vec<CliLauncher> {
+    let data = switcher::read_sequence_data().unwrap_or_default();
+    crate::profile_registry::launchers(&data)
+        .into_iter()
+        .map(|(slug, account_number)| CliLauncher {
+            command: format!("{}-{slug}", crate::shim_core::SHIM_STEM),
+            slug,
+            account_number,
+        })
+        .collect()
+}
+
+/// Keep an installed `claude` command in step with this build and with the
+/// accounts: refresh `shim.json` and the shim copies (one per launcher).
+/// Never installs anything the user has not installed.
+pub(crate) fn refresh_claude_command() {
+    let data = switcher::read_sequence_data().unwrap_or_default();
+    if crate::profile_registry::selected_number(&data).is_some() {
+        if let Err(error) = crate::profile_registry::sync_shim(&data) {
+            log::warn!("shim.json not updated: {error}");
+        }
+    }
+    let bin_dir = crate::paths::cc_logins_bin_dir();
+    let installed = bin_dir
+        .join(crate::cli_install::exe_name(crate::shim_core::SHIM_STEM))
+        .exists();
+    let Some(shim) = crate::cli_install::bundled_shim() else {
+        return;
+    };
+    if !installed {
+        return;
+    }
+    let slugs: Vec<String> = crate::profile_registry::launchers(&data)
+        .into_iter()
+        .map(|(slug, _)| slug)
+        .collect();
+    match crate::cli_install::materialize(&bin_dir, &shim, &slugs) {
+        Ok(changed) if !changed.written.is_empty() || !changed.removed.is_empty() => {
+            log::info!(
+                "claude command copies refreshed: {} written, {} removed",
+                changed.written.len(),
+                changed.removed.len()
+            )
+        }
+        Ok(_) => {}
+        Err(error) => log::warn!("claude command refresh skipped: {error}"),
+    }
+}
+
+/// Create the folder a new account signs in to:
+/// `~/.cc-logins/profiles/p<slot>-<suffix>`, seeded from the default profile.
+fn new_profile_dir() -> IpcResult<String> {
+    let data = switcher::read_sequence_data().unwrap_or_default();
+    let slot = switcher::next_free_slot(&data);
+    let name = crate::profiles::profile_dir_name(slot, &crate::profiles::random_suffix());
+    let dir = crate::paths::profiles_root().join(name);
+    let text = crate::profiles::normalize_profile_path(&crate::sys_env::home_dir(), &dir)
+        .map_err(|error| IpcError::InvalidInput(error.to_string()))?;
+    std::fs::create_dir_all(&text).map_err(io_internal)?;
+    crate::profiles::seed_profile(std::path::Path::new(&text)).map_err(io_internal)?;
+    Ok(text)
+}
+
+/// Remove a folder created for a sign-in that did not produce a new account.
+/// Only ever a folder this app just created under its own profiles root.
+fn discard_new_profile_dir(dir: &str) {
+    let path = std::path::Path::new(dir);
+    if !path.starts_with(crate::paths::profiles_root()) {
+        return;
+    }
+    if let Err(error) = std::fs::remove_dir_all(path) {
+        log::warn!("could not remove unused profile folder: {error}");
+    }
+}
+
 fn io_internal(error: std::io::Error) -> IpcError {
     IpcError::Internal(error.to_string())
 }
@@ -1031,7 +1167,7 @@ fn io_internal(error: std::io::Error) -> IpcError {
 /// login shell on macOS and Linux, so it is off the async runtime.
 #[tauri::command]
 pub async fn cli_status() -> IpcResult<CliStatus> {
-    off_runtime(|| cli_status_now(Vec::new())).await
+    off_runtime(|| cli_status_now(current_launchers())).await
 }
 
 /// Copy the shim into `~/.cc-logins/bin` and put that first on `PATH`.
@@ -1059,9 +1195,11 @@ fn install_cli_blocking(claude_binary: Option<std::path::PathBuf>) -> IpcResult<
     // first `claude` after install already finds the configured binary.
     crate::profiles::update_shim_config(|config| config.claude_binary = claude_binary)
         .map_err(io_internal)?;
-    crate::cli_install::materialize(&bin_dir, &shim, &[]).map_err(io_internal)?;
+    let launchers = current_launchers();
+    let slugs: Vec<String> = launchers.iter().map(|l| l.slug.clone()).collect();
+    crate::cli_install::materialize(&bin_dir, &shim, &slugs).map_err(io_internal)?;
     crate::cli_install::install_path(&bin_dir).map_err(io_internal)?;
-    Ok(cli_status_now(Vec::new()))
+    Ok(cli_status_now(launchers))
 }
 
 /// Take the `claude` command off `PATH` and remove the copies. Profile
@@ -1072,7 +1210,7 @@ pub async fn uninstall_cli() -> IpcResult<CliStatus> {
         let bin_dir = crate::paths::cc_logins_bin_dir();
         crate::cli_install::uninstall_path(&bin_dir).map_err(io_internal)?;
         crate::cli_install::clear_bin_dir(&bin_dir).map_err(io_internal)?;
-        Ok(cli_status_now(Vec::new()))
+        Ok(cli_status_now(current_launchers()))
     })
     .await?
 }

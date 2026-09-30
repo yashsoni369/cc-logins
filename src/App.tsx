@@ -12,6 +12,7 @@ import { DisplayModeProvider } from "./lib/displayMode";
 import { predictTarget } from "./lib/coverage";
 import { useQuotaNotifications } from "./lib/notifications";
 import { useSnapshot } from "./lib/useSnapshot";
+import { pickedMessage } from "./lib/sessionCopy";
 import { useTheme } from "./lib/useTheme";
 import { useSettings } from "./lib/useSettings";
 import { useDaemonStatus } from "./lib/useDaemonStatus";
@@ -326,7 +327,7 @@ function AppContent() {
           void refresh();
           if (options?.undoable !== false && previous && target) {
             toast.show({
-              message: `Switched to ${displayName(target)}`,
+              message: pickedMessage(target, displayName(target)),
               action: {
                 label: `Back to ${displayName(previous)}`,
                 run: () => switchRef.current(previous.number, { undoable: false }),

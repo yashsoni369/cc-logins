@@ -13,6 +13,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 
 import { hasBackend } from "@/lib/api";
+import { autoPickedNotice } from "@/lib/sessionCopy";
 import { formatClock, type ClockFormat } from "@/lib/time";
 import { displayName, type Account, type DaemonPhase, type Settings, type Snapshot } from "@/types";
 
@@ -68,10 +69,7 @@ export function quotaNotices(
     next.activeNumber !== prev.activeNumber &&
     (prev.phaseKind === "warning" || prev.phaseKind === "switching")
   ) {
-    out.push({
-      title: `Switched to ${nameOf(next.activeNumber)}`,
-      body: `${nameOf(prev.activeNumber)} was near its limit. Claude Code uses the new account on its next request.`,
-    });
+    out.push(autoPickedNotice(byNumber.get(next.activeNumber), nameOf(next.activeNumber), nameOf(prev.activeNumber)));
   }
 
   if (settings.notifyOnExhausted && next.phaseKind === "exhausted" && prev.phaseKind !== "exhausted") {

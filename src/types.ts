@@ -108,7 +108,10 @@ export interface Account {
   organizationName?: string;
   organizationUuid?: string;
   isOrganization?: boolean;
-  /** True for the one account whose credentials are currently live. */
+  /**
+   * The current account: for a profile account, the one new sessions start
+   * with; for a v0.3 account, the one whose credentials are live.
+   */
   active: boolean;
   usageStatus: UsageStatus;
   usage?: Usage;
@@ -116,7 +119,32 @@ export interface Account {
   usageFetchedAt?: string;
   /** Age of the measurement. Drives the staleness badge. */
   usageAgeSeconds?: number;
+  /**
+   * Present once the account has its own Claude Code folder (v0.4). Absent
+   * for an account still held the v0.3 way.
+   */
+  profile?: AccountProfile;
+  /** How current `usage` is, for profile accounts. */
+  usageFreshness?: UsageFreshness;
 }
+
+export interface AccountProfile {
+  /** Uses Claude Code's own default folder. */
+  isDefault: boolean;
+  /** Slug of its `claude-<slug>` command. */
+  launcher?: string;
+  state: "ready" | "loginRequired" | "migrationPending" | "identityMismatch";
+}
+
+/**
+ * A profile account is measured only while Claude Code keeps its token
+ * fresh. Otherwise nobody is using it, so its last reading still holds;
+ * windows that reset since are shown at 0%.
+ */
+export type UsageFreshness =
+  | { kind: "live" }
+  | { kind: "lastKnown"; ageSeconds: number }
+  | { kind: "reset"; ageSeconds: number };
 
 /** A distinct credential store — native Windows, a WSL distro, or a profile dir. */
 export interface Environment {

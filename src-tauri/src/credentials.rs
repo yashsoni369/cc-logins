@@ -1022,6 +1022,15 @@ fn restore_keychain_entry(
     .map_err(|error| CredentialError::Restore(error.to_string()))
 }
 
+/// Read one of Claude Code's own Keychain items by service name. Read-only:
+/// v0.4 reads a profile's current access token in place for one usage
+/// request and never writes Claude Code's items.
+#[cfg(target_os = "macos")]
+pub(crate) fn read_claude_keychain_item(service: &str) -> Result<Option<String>, String> {
+    let account = macos_keychain::keychain_account_name();
+    macos_keychain::get_password(service, &account).map_err(|error| error.to_string())
+}
+
 #[cfg(target_os = "macos")]
 pub(crate) fn recovery_keychain_get(account: &str) -> Result<Option<String>, String> {
     macos_keychain::get_password("cc-logins-switch-recovery", account)

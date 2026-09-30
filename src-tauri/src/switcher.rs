@@ -130,7 +130,7 @@ fn credentials_dir() -> PathBuf {
 /// this app; no other process has a reason to touch this specific file. See
 /// `crate::switch_transaction` for how this relates to the live-state locks
 /// this module sometimes also takes.
-fn vault_lock_path() -> PathBuf {
+pub(crate) fn vault_lock_path() -> PathBuf {
     paths::backup_root().join(".lock")
 }
 
@@ -291,7 +291,7 @@ fn atomic_write(target: &Path, contents: &[u8]) -> std::io::Result<()> {
 // sequence.json access.
 // ---------------------------------------------------------------------------
 
-fn read_sequence_data() -> Option<Map<String, Value>> {
+pub(crate) fn read_sequence_data() -> Option<Map<String, Value>> {
     read_sequence_data_at(&paths::backup_root())
 }
 
@@ -305,7 +305,7 @@ fn read_sequence_data_at(root: &Path) -> Option<Map<String, Value>> {
     }
 }
 
-fn write_sequence_data(data: &Map<String, Value>) -> Result<(), SwitchError> {
+pub(crate) fn write_sequence_data(data: &Map<String, Value>) -> Result<(), SwitchError> {
     let body = serde_json::to_string_pretty(&Value::Object(data.clone()))?;
     atomic_write(&accounts_file(), body.as_bytes())?;
     Ok(())
@@ -402,7 +402,12 @@ fn accounts_from_sequence(data: &Map<String, Value>) -> Vec<Account> {
         }
     };
 
-    let active_num = current_account_number(data);
+    // Once any account is selected for new sessions, that selection is what
+    // "active" means. Before that (a v0.3 registry), it is the live login.
+    let active_num = match crate::profile_registry::selected_number(data) {
+        Some(selected) => Some(selected.to_string()),
+        None => current_account_number(data),
+    };
 
     let mut out = Vec::with_capacity(order.len());
     for num_str in order {
@@ -469,6 +474,8 @@ fn accounts_from_sequence(data: &Map<String, Value>) -> Vec<Account> {
             usage: None,
             usage_fetched_at: None,
             usage_age_seconds: None,
+            profile: crate::profile_registry::profile_of(record),
+            usage_freshness: None,
         });
     }
     out
@@ -1155,9 +1162,16 @@ async fn read_snapshot_inner() -> Result<SnapshotFetch, SwitchError> {
     // this future non-`Send`, which Tauri rejects outright for async commands.
     let mut pending: Vec<(Account, Option<credentials::ActiveCredentials>, String)> =
         Vec::with_capacity(accounts.len());
+    let mut profile_reads: HashMap<u32, ProfileRead> = HashMap::new();
     {
         let mut store = CredentialStore::new(GuiStoreHost);
         for account in accounts {
+            // Profile accounts are read in place, never through the vault.
+            if let Some(profile) = &account.profile {
+                profile_reads.insert(account.number, read_profile(&account, profile));
+                pending.push((account, None, String::new()));
+                continue;
+            }
             let (creds, backup) = if account.active {
                 (
                     Some(store.read_active_credentials()),
@@ -1173,6 +1187,11 @@ async fn read_snapshot_inner() -> Result<SnapshotFetch, SwitchError> {
     // Phase 2 — network work, with no credential store held.
     let mut measured = Vec::with_capacity(pending.len());
     for (mut account, creds, backup) in pending {
+        if let Some(read) = profile_reads.remove(&account.number) {
+            measure_profile(&mut account, read, &mut cache, &mut rate_limited).await;
+            measured.push(account);
+            continue;
+        }
         let num = account.number.to_string();
 
         let result = if account.active {
@@ -1301,6 +1320,140 @@ async fn read_snapshot_inner() -> Result<SnapshotFetch, SwitchError> {
         snapshot: Snapshot::new(vec![environment]),
         rate_limited,
     })
+}
+
+/// What phase 1 learned about a profile account, without any network.
+enum ProfileRead {
+    /// The folder is signed in as this account; here is its store.
+    Signed(crate::usage_reader::Access),
+    /// The folder has no login.
+    SignedOut,
+    /// The folder is signed in as someone else.
+    Mismatch,
+}
+
+/// Read a profile's folder: who it is signed in as (from `.claude.json`,
+/// cheap), then its access token in place. Never writes or refreshes.
+fn read_profile(account: &Account, profile: &crate::model::AccountProfile) -> ProfileRead {
+    if profile.state == crate::model::ProfileState::MigrationPending {
+        return ProfileRead::SignedOut;
+    }
+    let config_dir = profile.config_dir.as_deref();
+    let global = crate::auth_status::global_config_for(config_dir);
+    let Some(identity) = crate::auth_status::read_folder_identity(&global) else {
+        return ProfileRead::SignedOut;
+    };
+    if !folder_matches(account, &identity) {
+        return ProfileRead::Mismatch;
+    }
+    ProfileRead::Signed(crate::usage_reader::read_access(config_dir))
+}
+
+/// Whether a folder's signed-in identity is this account: account UUID when
+/// both are known, else email plus organization.
+pub(crate) fn folder_matches(
+    account: &Account,
+    identity: &crate::auth_status::FolderIdentity,
+) -> bool {
+    if let (Some(a), Some(b)) = (account.uuid.as_deref(), identity.account_uuid.as_deref()) {
+        return a == b;
+    }
+    let account_org = account
+        .organization_uuid
+        .as_deref()
+        .filter(|s| !s.is_empty());
+    let folder_org = identity
+        .organization_uuid
+        .as_deref()
+        .filter(|s| !s.is_empty());
+    account
+        .email
+        .trim()
+        .eq_ignore_ascii_case(identity.email.trim())
+        && account_org == folder_org
+}
+
+/// Measure a profile account: one usage request when Claude Code holds a
+/// current token for it, otherwise its last reading projected onto now.
+async fn measure_profile(
+    account: &mut Account,
+    read: ProfileRead,
+    cache: &mut crate::usage_cache::UsageCache,
+    rate_limited: &mut bool,
+) {
+    let key = account.stable_key();
+    let token = match read {
+        ProfileRead::Signed(crate::usage_reader::Access::Token(token)) => token,
+        ProfileRead::Mismatch => {
+            if let Some(profile) = account.profile.as_mut() {
+                profile.state = crate::model::ProfileState::IdentityMismatch;
+            }
+            set_status(account, UsageStatus::Error);
+            return;
+        }
+        ProfileRead::SignedOut => {
+            if let Some(profile) = account.profile.as_mut() {
+                if profile.state == crate::model::ProfileState::Ready {
+                    profile.state = crate::model::ProfileState::LoginRequired;
+                }
+            }
+            serve_projected(account, cache, &key);
+            set_status(account, UsageStatus::ReloginRequired);
+            return;
+        }
+        ProfileRead::Signed(_) => {
+            // Expired, missing or unreadable: nobody is using this account
+            // right now, so its last reading still holds.
+            serve_projected(account, cache, &key);
+            return;
+        }
+    };
+
+    match oauth::read_usage_once(&token).await {
+        Ok(Some(result)) => {
+            let now = chrono::Utc::now();
+            let usage = to_model_usage(&result);
+            cache.record_success(&key, &usage, now);
+            account.usage = Some(usage);
+            account.usage_fetched_at = Some(now.to_rfc3339());
+            account.usage_age_seconds = Some(0.0);
+            account.usage_freshness = Some(crate::usage_projection::UsageFreshness::Live);
+            set_status(account, UsageStatus::Ok);
+        }
+        Ok(None) => serve_projected(account, cache, &key),
+        Err(error) => {
+            if error == oauth::UsageError::Http(429) {
+                *rate_limited = true;
+                cache.record_failure(&key, crate::usage_cache::RATE_LIMITED);
+            }
+            // A 401 means the token was renewed or revoked since it was read.
+            // Claude Code owns renewal; show the last reading meanwhile.
+            serve_projected(account, cache, &key);
+        }
+    }
+}
+
+/// Set a usage status unless the user has held the account out of rotation.
+fn set_status(account: &mut Account, status: UsageStatus) {
+    if account.usage_status != UsageStatus::Disabled {
+        account.usage_status = status;
+    }
+}
+
+/// Show the last good reading, with windows that have reset since shown at
+/// zero. Status `Stale`, freshness says how old.
+fn serve_projected(account: &mut Account, cache: &crate::usage_cache::UsageCache, key: &str) {
+    let Some((usage, fetched_at)) = cache.last_good(key) else {
+        return;
+    };
+    let now = chrono::Utc::now();
+    let (projected, freshness) = crate::usage_projection::project(&usage, fetched_at, now);
+    account.usage = Some(projected);
+    account.usage_fetched_at = Some(fetched_at.to_rfc3339());
+    account.usage_age_seconds =
+        Some(now.signed_duration_since(fetched_at).num_seconds().max(0) as f64);
+    account.usage_freshness = Some(freshness);
+    set_status(account, UsageStatus::Stale);
 }
 
 fn to_usage_window(w: &oauth::Window) -> UsageWindow {
@@ -1754,13 +1907,13 @@ fn switch_to_with_timeout(target: &Account, timeout: Duration) -> Result<(), Swi
 /// Ensure `data["accounts"]` is an object, replacing anything else (missing,
 /// wrong type, corrupt) with an empty one so callers can always
 /// `and_then(Value::as_object_mut)` without a fallible step of their own.
-fn ensure_accounts_object(data: &mut Map<String, Value>) {
+pub(crate) fn ensure_accounts_object(data: &mut Map<String, Value>) {
     if !matches!(data.get("accounts"), Some(Value::Object(_))) {
         data.insert("accounts".to_string(), Value::Object(Map::new()));
     }
 }
 
-fn refuse_pending_recovery() -> Result<(), SwitchError> {
+pub(crate) fn refuse_pending_recovery() -> Result<(), SwitchError> {
     if crate::switch_transaction::recovery_requirement().is_some() {
         Err(crate::switch_transaction::TransactionError::RecoveryRequired.into())
     } else {
@@ -1776,7 +1929,7 @@ fn refuse_pending_recovery() -> Result<(), SwitchError> {
 /// visible resource in the GUI's account list than in the CLI. Recycling is
 /// why [`remove_account`] and [`sweep_orphaned_slot_files`] must leave no
 /// backup behind for a freed number.
-fn next_free_slot(data: &Map<String, Value>) -> u32 {
+pub(crate) fn next_free_slot(data: &Map<String, Value>) -> u32 {
     let used: std::collections::HashSet<u32> = data
         .get("accounts")
         .and_then(Value::as_object)
@@ -1796,7 +1949,7 @@ fn next_free_slot(data: &Map<String, Value>) -> u32 {
 
 /// Append `slot` to `data["sequence"]` (creating the array if absent),
 /// skipping it if already present.
-fn add_to_sequence(data: &mut Map<String, Value>, slot: u32) {
+pub(crate) fn add_to_sequence(data: &mut Map<String, Value>, slot: u32) {
     match data.get_mut("sequence").and_then(Value::as_array_mut) {
         Some(arr) => {
             if !arr.iter().any(|v| v.as_u64() == Some(u64::from(slot))) {

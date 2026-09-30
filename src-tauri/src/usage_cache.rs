@@ -151,6 +151,18 @@ impl UsageCache {
         (age_s < horizon_s).then(|| (row.last_good.clone(), age_s as f64))
     }
 
+    /// The last good reading and when it was taken, however old. For v0.4
+    /// profiles, whose idle readings stay true until a window resets:
+    /// callers project it with [`crate::usage_projection::project`] instead
+    /// of applying [`Self::serve`]'s trust horizon.
+    pub fn last_good(&self, key: &str) -> Option<(Usage, DateTime<Utc>)> {
+        let row = self.rows.get(key)?;
+        let fetched_at = DateTime::parse_from_rfc3339(&row.fetched_at)
+            .ok()?
+            .with_timezone(&Utc);
+        Some((row.last_good.clone(), fetched_at))
+    }
+
     pub fn save(&self) {
         let Some(path) = &self.path else { return };
         let body = Persisted {

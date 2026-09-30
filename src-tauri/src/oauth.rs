@@ -1214,6 +1214,20 @@ fn log_usage_failure(context: &str, kind: &UsageError, retry_after_s: Option<f64
 /// refreshes — callers that need refresh-then-retry semantics use
 /// [`try_fetch_usage_for_account`] instead. Errors are logged and folded to
 /// `None`, matching the Python source's `fetch_usage`.
+/// One usage read with a token Claude Code itself keeps fresh (v0.4
+/// profiles). Never refreshes, never retries: a 401 is reported as-is and
+/// the caller shows the last reading until Claude Code renews the token.
+pub async fn read_usage_once(access_token: &str) -> Result<Option<UsageResult>, UsageError> {
+    match request_usage_data(access_token).await {
+        Ok(data) => normalize_usage_response(&data).map_err(|e| UsageError::Other(e.to_string())),
+        Err(err) => {
+            let (kind, retry_after_s) = classify_usage_fetch_error(&err);
+            log_usage_failure("(profile)", &kind, retry_after_s);
+            Err(kind)
+        }
+    }
+}
+
 pub async fn fetch_usage(access_token: &str) -> Option<UsageResult> {
     match request_usage_data(access_token).await {
         Ok(data) => match normalize_usage_response(&data) {

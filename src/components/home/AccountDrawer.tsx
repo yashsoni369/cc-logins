@@ -7,6 +7,7 @@ import Dialog from "../ui/Dialog";
 import { useClockFormat } from "../../lib/clockFormat";
 import { weeklyPaceMark, type Projection } from "../../lib/coverage";
 import { formatClock, formatWhen } from "../../lib/time";
+import { currentLabel, useLongLabel } from "../../lib/sessionCopy";
 import { ageLabel, displayName, formatSpend, isEnterprise, maskEmail, type Account } from "../../types";
 
 export type DrawerIntent = "view" | "rename" | "remove";
@@ -160,7 +161,7 @@ function DrawerBody({
           <div className="adrawer-sub">
             {maskEmail(account.email)}
             {account.organizationName ? ` · ${account.organizationName}` : ""}
-            {account.active ? " · in use" : ""}
+            {account.active ? ` · ${currentLabel(account)}` : ""}
           </div>
         </div>
         <button type="button" className="btn ghost btn-icon" aria-label="Close" onClick={onClose}>
@@ -281,7 +282,7 @@ function DrawerBody({
               !account.active &&
               !heldOut && (
                 <button type="button" className="btn primary" disabled={mutationInFlight} onClick={() => onSwitch(account.number)}>
-                  Switch to {displayName(account)}
+                  {useLongLabel(account, displayName(account))}
                 </button>
               )
             )}

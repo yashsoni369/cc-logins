@@ -184,6 +184,41 @@ pub fn launcher_slug(base: &str, taken: &[String]) -> String {
         .expect("an unbounded counter always finds a free slug")
 }
 
+/// Top-level keys a new profile inherits from the default profile's
+/// `.claude.json`: the user's MCP servers and preferences, never anything
+/// tied to an account (`oauthAccount`, projects, trust decisions).
+const SEEDED_KEYS: &[&str] = &["mcpServers", "hasCompletedOnboarding", "theme"];
+
+/// The `.claude.json` a new profile starts with, from the default one.
+pub fn seed_from(source: Option<&serde_json::Value>) -> serde_json::Value {
+    let mut out = serde_json::Map::new();
+    if let Some(source) = source {
+        for key in SEEDED_KEYS {
+            if let Some(value) = source.get(*key) {
+                out.insert((*key).to_string(), value.clone());
+            }
+        }
+    }
+    serde_json::Value::Object(out)
+}
+
+/// Seed a new, empty profile folder so its first session looks like the
+/// user's usual Claude Code: same MCP servers, onboarding already done.
+/// Leaves an existing `.claude.json` alone.
+pub fn seed_profile(dir: &Path) -> std::io::Result<()> {
+    let target = crate::paths::global_config_path_in(dir);
+    if target.exists() {
+        return Ok(());
+    }
+    let source = std::fs::read_to_string(crate::paths::default_global_config_path())
+        .ok()
+        .and_then(|text| serde_json::from_str::<serde_json::Value>(&text).ok());
+    let bytes =
+        serde_json::to_vec_pretty(&seed_from(source.as_ref())).map_err(std::io::Error::other)?;
+    crate::durable_fs::stage_sibling(&target, &bytes, Some(0o600))?.commit()?;
+    Ok(())
+}
+
 /// Where the shim reads its configuration.
 pub fn shim_config_path() -> PathBuf {
     crate::paths::cc_logins_home().join(crate::shim_core::SHIM_CONFIG_FILE)
@@ -357,6 +392,22 @@ mod tests {
         assert_eq!(launcher_slug(&long, &[]).len(), MAX_SLUG_LEN);
         let taken = vec!["work".to_string(), "work-2".to_string()];
         assert_eq!(launcher_slug("work", &taken), "work-3");
+    }
+
+    #[test]
+    fn seed_copies_preferences_and_mcp_but_never_the_account() {
+        let source = serde_json::json!({
+            "mcpServers": {"fs": {"command": "npx"}},
+            "hasCompletedOnboarding": true,
+            "oauthAccount": {"emailAddress": "a@b.c"},
+            "projects": {"/x": {}},
+        });
+        let seeded = seed_from(Some(&source));
+        assert_eq!(seeded["mcpServers"]["fs"]["command"], "npx");
+        assert_eq!(seeded["hasCompletedOnboarding"], true);
+        assert!(seeded.get("oauthAccount").is_none());
+        assert!(seeded.get("projects").is_none());
+        assert_eq!(seed_from(None), serde_json::json!({}));
     }
 
     #[test]

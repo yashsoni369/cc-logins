@@ -7,6 +7,7 @@ import MenuButton from "../ui/MenuButton";
 import { useClockFormat } from "../../lib/clockFormat";
 import { weeklyPaceMark, type Projection } from "../../lib/coverage";
 import { formatClock, formatCountdown } from "../../lib/time";
+import { currentLabel, currentTitle, freshnessLabel, profileProblem, useLabel } from "../../lib/sessionCopy";
 import {
   ageLabel,
   bindingUtilisation,
@@ -100,7 +101,10 @@ export default function AccountsTable(props: AccountsTableProps) {
             // fallback — stale beats blank, as in `fresh_reset_strings`.
             const resets = formatCountdown(binding?.resetsAt, now) ?? binding?.countdown ?? binding?.clock ?? "—";
             const resetsTitle = formatClock(binding?.resetsAt, clockFormat, now) ?? undefined;
-            const age = ageLabel(account.usageAgeSeconds);
+            const age = account.usageFreshness
+              ? freshnessLabel(account, ageLabel)
+              : ageLabel(account.usageAgeSeconds);
+            const problem = profileProblem(account);
             const limit = limitLabel(account);
             const util = bindingUtilisation(account.usage);
             const pace = binding && binding === account.usage?.sevenDay ? weeklyPaceMark(account.usage, now) : null;
@@ -145,7 +149,12 @@ export default function AccountsTable(props: AccountsTableProps) {
                     <div style={{ minWidth: 0 }}>
                       <div className="alias" style={heldOut ? { color: "var(--faint)" } : undefined}>
                         {displayName(account)} <PlanBadge usage={account.usage} />{" "}
-                        {account.active && <span className="pill on">in use</span>}
+                        {account.active && (
+                          <span className="pill on" title={currentTitle(account)}>
+                            {currentLabel(account)}
+                          </span>
+                        )}
+                        {problem && <span className="pill danger">{problem}</span>}
                         {isBest && <span className="pill best">best next</span>}
                         {heldOut && <span className="pill">held out</span>}
                         {mismatch && <span className="pill danger">credential mismatch</span>}
@@ -221,7 +230,7 @@ export default function AccountsTable(props: AccountsTableProps) {
                         }}
                         onKeyDown={(e) => e.stopPropagation()}
                       >
-                        {props.pendingAccount === account.number ? "Switching…" : "Switch"}
+                        {useLabel(account, props.pendingAccount === account.number)}
                       </button>
                     ) : null}
                     <MenuButton

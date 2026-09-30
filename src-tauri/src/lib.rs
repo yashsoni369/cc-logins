@@ -8,6 +8,7 @@
 //! Portions of the credential, path and usage logic are ported from
 //! claude-swap (MIT) — https://github.com/realiti4/claude-swap
 
+pub mod auth_status;
 pub mod claude_cli;
 pub mod claude_locks;
 mod claude_resolve;
@@ -28,6 +29,7 @@ pub mod oauth_refresh;
 pub mod paths;
 pub mod poll_budget;
 pub mod poller;
+pub mod profile_registry;
 pub mod profiles;
 pub mod recovery_store;
 pub mod resilience;
@@ -42,6 +44,7 @@ pub mod tray;
 pub mod tray_menu;
 pub mod usage_cache;
 pub mod usage_projection;
+pub mod usage_reader;
 pub mod wsl;
 
 #[cfg(test)]
@@ -165,27 +168,6 @@ fn popover_position(
 /// that no registry slot references, so a recycled slot number never inherits
 /// another account's files. Best-effort and logged; never touches the live
 /// Claude Code login.
-/// Refresh the `claude` shim copies if the user installed the command.
-fn refresh_claude_command() {
-    let bin_dir = paths::cc_logins_bin_dir();
-    let installed = bin_dir
-        .join(cli_install::exe_name(shim_core::SHIM_STEM))
-        .exists();
-    let Some(shim) = cli_install::bundled_shim() else {
-        return;
-    };
-    if !installed {
-        return;
-    }
-    match cli_install::materialize(&bin_dir, &shim, &[]) {
-        Ok(changed) if !changed.written.is_empty() => {
-            log::info!("refreshed {} claude command copies", changed.written.len())
-        }
-        Ok(_) => {}
-        Err(error) => log::warn!("claude command refresh skipped: {error}"),
-    }
-}
-
 fn sweep_orphaned_backups() {
     match switcher::sweep_orphaned_slot_files() {
         Ok(0) => {}
@@ -404,7 +386,7 @@ pub fn run() {
 
             // Keep an installed `claude` command in step with this build, so
             // an app update also updates the shim. Never installs it.
-            tauri::async_runtime::spawn_blocking(refresh_claude_command);
+            tauri::async_runtime::spawn_blocking(commands::refresh_claude_command);
 
             // A hard process termination leaves Claude Code's proper-lockfile
             // directories behind. Claude Code deliberately protects a fresh

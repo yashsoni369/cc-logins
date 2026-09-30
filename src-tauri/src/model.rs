@@ -164,6 +164,71 @@ pub struct Account {
     /// integer type. Caught by the fixture test against a live capture.
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub usage_age_seconds: Option<f64>,
+    /// How this account runs in token-free mode: its own Claude Code folder,
+    /// signed in there through Claude Code itself. `None` for an account
+    /// still held the v0.3 way, as a vault copy, until it is moved over.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub profile: Option<AccountProfile>,
+    /// How current `usage` is. Set for profile accounts, which are read only
+    /// while Claude Code keeps their token fresh and otherwise show their
+    /// last reading projected onto now.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub usage_freshness: Option<crate::usage_projection::UsageFreshness>,
+}
+
+/// Where a profile account's Claude Code folder is, and whether it is usable.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AccountProfile {
+    /// The exact `CLAUDE_CONFIG_DIR` string, `None` for the default
+    /// `~/.claude`. Backend-only: the UI shows [`Self::is_default`] and the
+    /// launcher, never the path.
+    #[serde(skip)]
+    pub config_dir: Option<String>,
+    /// Uses Claude Code's default folder (`CLAUDE_CONFIG_DIR` unset).
+    pub is_default: bool,
+    /// Slug of this account's `claude-<slug>` command.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub launcher: Option<String>,
+    pub state: ProfileState,
+}
+
+/// Whether a profile account can start sessions.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum ProfileState {
+    /// Signed in; new sessions can use it.
+    #[default]
+    Ready,
+    /// The folder is signed out. Sign in again from the app.
+    LoginRequired,
+    /// A v0.3 account waiting to be signed in once into its own folder.
+    MigrationPending,
+    /// The folder is signed in as a different account than this slot.
+    IdentityMismatch,
+}
+
+impl ProfileState {
+    /// Stored in `sequence.json` as `profileState`.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            ProfileState::Ready => "ready",
+            ProfileState::LoginRequired => "loginRequired",
+            ProfileState::MigrationPending => "migrationPending",
+            ProfileState::IdentityMismatch => "identityMismatch",
+        }
+    }
+
+    /// Unknown or missing values read as `Ready`, so a newer app's state
+    /// never locks an older one out of an account.
+    pub fn parse(raw: Option<&str>) -> Self {
+        match raw {
+            Some("loginRequired") => ProfileState::LoginRequired,
+            Some("migrationPending") => ProfileState::MigrationPending,
+            Some("identityMismatch") => ProfileState::IdentityMismatch,
+            _ => ProfileState::Ready,
+        }
+    }
 }
 
 impl Account {

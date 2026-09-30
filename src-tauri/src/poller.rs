@@ -1385,7 +1385,13 @@ async fn perform_switch(app: &AppHandle, snapshot: &Snapshot, from: u32, to: u32
         return false;
     };
 
-    let result = tokio::spawn(async move { switcher::switch_to(&target).await }).await;
+    // A profile account is selected for new sessions (registry + shim.json);
+    // only a v0.3 account is still swapped into ~/.claude.
+    let result = if target.profile.is_some() {
+        tokio::task::spawn_blocking(move || crate::profile_registry::select(to)).await
+    } else {
+        tokio::spawn(async move { switcher::switch_to(&target).await }).await
+    };
     match result {
         Ok(Ok(())) => {
             let _ = app.emit(

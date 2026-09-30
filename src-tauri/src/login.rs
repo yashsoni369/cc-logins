@@ -716,6 +716,139 @@ pub async fn interactive_login(
     // `temp_dir` drops here on the success path too.
 }
 
+// ---------------------------------------------------------------------------
+// v0.4: signing in to a profile folder
+// ---------------------------------------------------------------------------
+
+/// Who a finished profile sign-in turned out to be. Carries no credential:
+/// the login stays in the folder, where Claude Code put it.
+#[derive(Debug, Clone)]
+pub struct ProfileSignIn {
+    pub identity: crate::auth_status::FolderIdentity,
+    pub subscription_type: Option<String>,
+}
+
+fn modified(path: &Path) -> Option<std::time::SystemTime> {
+    std::fs::metadata(path).and_then(|m| m.modified()).ok()
+}
+
+/// A completed sign-in in `config_dir`: `.claude.json` names an account and
+/// has been written since `baseline` (so an old login in the folder does not
+/// count), and `claude auth status` agrees.
+fn profile_signed_in(
+    claude_path: &Path,
+    config_dir: &str,
+    baseline: Option<std::time::SystemTime>,
+) -> Option<ProfileSignIn> {
+    let global = crate::paths::global_config_path_in(Path::new(config_dir));
+    let changed = match (baseline, modified(&global)) {
+        (Some(before), Some(now)) => now != before,
+        (None, Some(_)) => true,
+        (_, None) => false,
+    };
+    if !changed {
+        return None;
+    }
+    let identity = crate::auth_status::read_folder_identity(&global)?;
+    let status = crate::auth_status::check(claude_path, Some(config_dir)).ok()?;
+    if !status.is_claude_account() {
+        return None;
+    }
+    Some(ProfileSignIn {
+        identity,
+        subscription_type: status.subscription_type,
+    })
+}
+
+fn run_profile_login_blocking(
+    claude_path: &Path,
+    config_dir: &str,
+    plan: LaunchPlan,
+) -> Result<ProfileSignIn, LoginError> {
+    let global = crate::paths::global_config_path_in(Path::new(config_dir));
+    let baseline = modified(&global);
+    let (child, tracks_window_lifetime) = spawn_launch(&plan)?;
+    let mut window_child = if tracks_window_lifetime {
+        Some(child)
+    } else {
+        let mut child = child;
+        let _ = child.wait();
+        None
+    };
+
+    let started = Instant::now();
+    let deadline = started + LOGIN_TIMEOUT;
+    loop {
+        if let Some(done) = profile_signed_in(claude_path, config_dir, baseline) {
+            return Ok(done);
+        }
+        if let Some(child) = window_child.as_mut() {
+            match child.try_wait() {
+                Ok(Some(status)) if started.elapsed() < MIN_WINDOW_LIFETIME => {
+                    window_child = None;
+                    if !status.success() {
+                        return Err(LoginError::Io(io::Error::other(
+                            "terminal emulator exited immediately without opening a window",
+                        )));
+                    }
+                }
+                Ok(Some(_)) => {
+                    std::thread::sleep(Duration::from_millis(300));
+                    return profile_signed_in(claude_path, config_dir, baseline)
+                        .ok_or(LoginError::Cancelled);
+                }
+                Ok(None) => {}
+                Err(_) => window_child = None,
+            }
+        }
+        if Instant::now() >= deadline {
+            if let Some(mut child) = window_child.take() {
+                let _ = child.kill();
+                let _ = child.wait();
+            }
+            return Err(LoginError::TimedOut);
+        }
+        // `claude auth status` only runs once `.claude.json` has changed, so
+        // a slower poll than the credential-file loop costs nothing.
+        std::thread::sleep(POLL_INTERVAL * 2);
+    }
+}
+
+/// Sign in to Claude in `config_dir` through Claude Code's own
+/// `claude auth login`, in a visible terminal. The login lands in that folder
+/// and stays there: this app never reads it back as a credential, only asks
+/// who it belongs to.
+pub async fn sign_in_to_profile(
+    claude_binary_setting: Option<PathBuf>,
+    config_dir: String,
+) -> Result<ProfileSignIn, LoginError> {
+    let resolved =
+        claude_cli::resolve(claude_binary_setting).map_err(LoginError::ClaudeNotInstalled)?;
+    let claude_path = resolved.path;
+    std::fs::create_dir_all(&config_dir)?;
+    let plan = build_launch_plan(&claude_path, Path::new(&config_dir))?;
+    let result = tokio::task::spawn_blocking(move || {
+        run_profile_login_blocking(&claude_path, &config_dir, plan)
+    })
+    .await;
+    match result {
+        Ok(Ok(done)) => {
+            log::info!("profile sign-in succeeded");
+            Ok(done)
+        }
+        Ok(Err(error)) => {
+            log::info!(
+                "profile sign-in did not complete: {}",
+                login_outcome_kind(&error)
+            );
+            Err(error)
+        }
+        Err(_) => Err(LoginError::Io(io::Error::other(
+            "login worker task did not finish cleanly",
+        ))),
+    }
+}
+
 /// A short, content-free label for a [`LoginError`], for the one log line
 /// `interactive_login` emits on failure. Never includes file contents.
 fn login_outcome_kind(e: &LoginError) -> &'static str {
