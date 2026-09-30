@@ -1,8 +1,9 @@
 # Security policy
 
-CC Logins reads, refreshes, and writes Claude Code OAuth credentials. A bug here
-can expose an authentication token, so security reports are taken seriously and
-handled privately.
+CC Logins reads Claude Code's current access token for each account to measure
+quota. It never stores, copies, refreshes or writes one, but a bug in how it
+reads them could still expose a token, so security reports are taken seriously
+and handled privately.
 
 ## Reporting a vulnerability
 
@@ -35,18 +36,49 @@ backporting a fix to a version nobody is running would be theatre.
 ## What this app does with your tokens
 
 Stated here as well as in the README, because it defines what is and is not a
-vulnerability in this project:
+vulnerability in this project (v0.4 and later).
 
-- Credentials are read from and written to Claude Code's own credentials file,
-  and kept in this app's own vault under its app-data directory.
-- On Windows the stored copy is encrypted with DPAPI; on macOS it goes in the
-  Keychain; **on Linux it is a `0600` file and is not encrypted.** That last one
-  is a known gap, is recorded in the stored envelope's `scheme` field rather
-  than being papered over, and is not a bug report — though a way to close it
-  is very welcome.
-- Nothing is sent anywhere except Anthropic's own OAuth and usage endpoints.
-  There is no server, no telemetry, and no cloud sync. Any observed network
-  traffic to a third party **is** a vulnerability, and an urgent one.
+What it reads:
+
+- For each account, the current access token from that account's own Claude
+  Code folder: `<folder>/.credentials.json` on Windows and Linux, or on macOS
+  Claude Code's Keychain item for that folder (service
+  `Claude Code-credentials-<first 8 hex of sha256(folder path)>`, or the plain
+  `Claude Code-credentials` for the default `~/.claude`). Read-only.
+- The token is used for **one request** to Anthropic's usage endpoint and then
+  dropped. It is never logged, cached, written, or kept in memory past that
+  request. An expired token is left alone; the app never refreshes one.
+- Each folder's `.claude.json` `oauthAccount` block, to know which account is
+  signed in there, and the output of `claude auth status`. Neither contains a
+  token.
+
+What it writes:
+
+- Its own account list, settings, usage cache and history, in its app-data
+  directory.
+- `~/.cc-logins/shim.json` (which folder new sessions use) and the folders it
+  creates under `~/.cc-logins/profiles/`, seeded with your MCP servers and
+  preferences from `~/.claude.json` and linked or copied shared settings. The
+  login inside a folder is written by `claude auth login`, never by this app.
+- Only when you install the `claude` command: copies of its launcher in
+  `~/.cc-logins/bin/`, and either your per-user `Path` registry value (Windows)
+  or a marked block in your shell startup files (macOS, Linux; a backup is kept
+  the first time). Uninstall removes them.
+
+It never writes Claude Code's credentials. The one exception is inherited from
+versions before v0.4: if such a version left an account switch interrupted,
+v0.4 finishes or rolls back that one journaled switch before doing anything
+else. See [transaction recovery](docs/TRANSACTION_RECOVERY.md).
+
+Versions before v0.4 kept an encrypted copy of each login (DPAPI on Windows,
+Keychain on macOS, an unencrypted `0600` file on Linux). v0.4 deletes each copy
+once its account has signed in to its own folder and been verified as the same
+account.
+
+Nothing is sent anywhere except Anthropic's usage endpoint (and GitHub, to check
+for a newer release). There is no server, no telemetry, and no cloud sync. Any
+observed network traffic to a third party **is** a vulnerability, and an urgent
+one.
 
 ## Builds are unsigned
 

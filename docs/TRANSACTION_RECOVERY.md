@@ -81,3 +81,28 @@ outside this guarantee.
 For manual diagnostics, preserve `switch-journal.json`, the referenced `switch-recovery` directory,
 and the application log together. Do not edit or delete individual recovery artifacts: hashes and
 presence flags intentionally make partial manual changes fail closed.
+
+## v0.4 and later
+
+v0.4 no longer switches accounts by rewriting Claude Code's credentials, so it
+never starts a new transaction. The journal and recovery described above remain
+for one purpose: finishing or rolling back a switch that an earlier version left
+interrupted. Startup runs that recovery first, and nothing else that touches
+accounts (including migration) runs while it is pending.
+
+Migration from v0.3 then moves each account to its own Claude Code folder:
+
+- The account signed in to `~/.claude` is registered as the default profile once
+  `claude auth status` confirms it. Its record is upgraded in place.
+- Every other account is upgraded only after the user signs in to it once in a
+  new folder and the signed-in identity matches the record.
+- The same registry write that upgrades a record sets `legacyVault: true` on it.
+  The account's stored copy (credential backup and config backup) is deleted
+  afterwards and the flag cleared. If the deletion fails, the flag stays and the
+  deletion is retried at every start. A crash between the two steps leaves the
+  flag, so no copy is ever forgotten.
+- Nothing is deleted for an account whose new login has not been verified.
+
+Downgrading to v0.3 after an account has moved: v0.3 does not understand profile
+folders and the stored copy is gone, so re-add that account in v0.3. Accounts
+that have not moved yet keep working there unchanged.

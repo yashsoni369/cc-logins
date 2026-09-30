@@ -25,7 +25,7 @@ describe("FirstRunScreen", () => {
     render(<FirstRunScreen {...props} loginPresent />);
 
     expect(screen.getByText("Found your Claude Code login")).toBeInTheDocument();
-    const add = screen.getByRole("button", { name: /Add my current login/ });
+    const add = screen.getByRole("button", { name: /Use my current login/ });
     expect(add).toHaveClass("primary");
     expect(screen.getByRole("button", { name: /Sign in/ })).not.toHaveClass("primary");
   });
@@ -34,7 +34,7 @@ describe("FirstRunScreen", () => {
     const { container } = render(<FirstRunScreen {...props} loginPresent />);
     const steps = [...container.querySelectorAll(".step")];
     expect(within(steps[0] as HTMLElement).getByRole("button")).toHaveAccessibleName(
-      /Add my current login/,
+      /Use my current login/,
     );
   });
 
@@ -50,7 +50,7 @@ describe("FirstRunScreen", () => {
     // No confident claim either way...
     expect(screen.queryByText("Found your Claude Code login")).not.toBeInTheDocument();
     // ...but the one-click path is offered first and prominently.
-    const add = screen.getByRole("button", { name: /Add my current login/ });
+    const add = screen.getByRole("button", { name: /Use my current login/ });
     expect(add).toHaveClass("primary");
   });
 
@@ -64,7 +64,7 @@ describe("FirstRunScreen", () => {
   it("offers both routes in every state", () => {
     for (const loginPresent of [true, false, undefined]) {
       const { unmount } = render(<FirstRunScreen {...props} loginPresent={loginPresent} />);
-      expect(screen.getByRole("button", { name: /Add my current login/ })).toBeInTheDocument();
+      expect(screen.getByRole("button", { name: /Use my current login/ })).toBeInTheDocument();
       expect(screen.getByRole("button", { name: /Sign in/ })).toBeInTheDocument();
       unmount();
     }
