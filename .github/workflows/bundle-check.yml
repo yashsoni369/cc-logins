@@ -16,6 +16,7 @@ on:
       - 'src-tauri/src/bin/**'
       - 'src-tauri/Cargo.toml'
       - 'src-tauri/tauri.conf.json'
+      - 'scripts/bundle-shim.mjs'
       - '.github/workflows/bundle-check.yml'
   workflow_dispatch:
 
