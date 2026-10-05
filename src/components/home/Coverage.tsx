@@ -189,10 +189,10 @@ export function CoverageTimeline({ plan, now, autoSwitch, degraded }: { plan: Co
       </div>
       <div className="cov-legend">
         <span><i className="free" />usable</span>
-        <span><i className="inUse" />in use</span>
+        <span><i className="inUse" />current</span>
         <span><i className="limited" />at limit</span>
         <span><i className="reset" />reset</span>
-        <span className="cov-foot">Only the account in use is projected, from its last few hours. Others are shown as they stand now.</span>
+        <span className="cov-foot">Only the current account is projected, from its last few hours. Others are shown as they stand now.</span>
       </div>
     </section>
   );

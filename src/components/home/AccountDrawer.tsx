@@ -249,7 +249,7 @@ function DrawerBody({
               checked={!heldOut}
               ariaLabel="Available to auto-switch"
               disabled={mutationInFlight || (account.active && !heldOut)}
-              title={account.active && !heldOut ? "The account in use always stays available." : undefined}
+              title={account.active && !heldOut ? "The current account always stays available." : undefined}
               onChange={(next) => onSetEnabled(account.number, next)}
             />
           </dd>

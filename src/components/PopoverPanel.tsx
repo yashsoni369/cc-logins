@@ -3,7 +3,7 @@
  * action comes from the backend's revisioned `DaemonStatus` contract.
  */
 
-import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties } from "react";
 
 import { Loading } from "@/components/Loading";
 import { RefreshButton } from "@/components/RefreshButton";
@@ -18,6 +18,8 @@ import { formatClock, formatCountdown, useNow } from "@/lib/time";
 import { useDaemonStatus } from "@/lib/useDaemonStatus";
 import { useSettings } from "@/lib/useSettings";
 import { useSnapshot } from "@/lib/useSnapshot";
+import { useCliStatus } from "@/lib/useCliStatus";
+import { needsMove, useLabel } from "@/lib/sessionCopy";
 import { useTheme } from "@/lib/useTheme";
 import {
   bindingUtilisation,
@@ -39,6 +41,19 @@ function SampleDataBanner() {
 async function currentPopoverWindow() {
   const { getCurrentWindow } = await import("@tauri-apps/api/window");
   return getCurrentWindow();
+}
+
+/** Bring up the main window (and put the popover away) for actions that need it. */
+async function openMainWindow() {
+  if (!hasBackend()) return;
+  const [{ Window }, popover] = await Promise.all([import("@tauri-apps/api/window"), currentPopoverWindow()]);
+  const main = await Window.getByLabel("main");
+  if (main) {
+    await main.show();
+    await main.unminimize();
+    await main.setFocus();
+  }
+  await popover.hide();
 }
 
 function useDismissOnBlurOrEscape() {
@@ -66,31 +81,65 @@ function useDismissOnBlurOrEscape() {
   }, []);
 }
 
+/** Never shrink the popover below this, so a bad measurement can't leave an invisible sliver. */
+const MIN_POPOVER_HEIGHT = 120;
+
+/**
+ * Keep the popover window exactly as tall as its content.
+ *
+ * The popover lives hidden until a tray click shows it, and a hidden WebView2
+ * runs no animation frames. An earlier version deferred `setSize` to
+ * `requestAnimationFrame`, so content that changed while hidden never resized
+ * the window, and it opened as a 2-pixel sliver (found in a Windows smoke
+ * test). So: measure after every render (layout reads work while hidden),
+ * apply immediately, re-measure on focus, and clamp to a sane minimum.
+ */
 function useSizeToContent(ref: { current: HTMLDivElement | null }) {
-  useEffect(() => {
-    if (!hasBackend()) return;
-    const node = ref.current;
-    if (!node) return;
-    let frame = 0;
-    const apply = async (height: number) => {
+  const applied = useRef(0);
+
+  const apply = useCallback((height: number) => {
+    const next = Math.max(MIN_POPOVER_HEIGHT, Math.ceil(height));
+    if (next === applied.current) return;
+    applied.current = next;
+    void (async () => {
       const [win, { LogicalSize }] = await Promise.all([
         currentPopoverWindow(),
         import("@tauri-apps/api/window"),
       ]);
-      await win.setSize(new LogicalSize(364, Math.max(1, Math.ceil(height))));
-    };
-    const observer = new ResizeObserver((entries) => {
-      const height = entries[0]?.contentRect.height;
-      if (height == null) return;
-      cancelAnimationFrame(frame);
-      frame = requestAnimationFrame(() => void apply(height));
-    });
+      await win.setSize(new LogicalSize(364, next));
+    })();
+  }, []);
+
+  const measure = useCallback(() => {
+    const node = ref.current;
+    if (node) apply(node.getBoundingClientRect().height);
+  }, [ref, apply]);
+
+  // Every commit: data arriving while hidden still resizes the window.
+  useLayoutEffect(() => {
+    if (hasBackend()) measure();
+  });
+
+  useEffect(() => {
+    if (!hasBackend()) return;
+    const node = ref.current;
+    if (!node) return;
+    // Late layout changes (fonts, images) with no React render behind them.
+    const observer = new ResizeObserver(() => measure());
     observer.observe(node);
-    return () => {
-      cancelAnimationFrame(frame);
-      observer.disconnect();
+    // Shown again: measure fresh in case anything was missed while hidden.
+    const onShown = () => {
+      applied.current = 0;
+      measure();
     };
-  }, [ref]);
+    window.addEventListener("focus", onShown);
+    document.addEventListener("visibilitychange", onShown);
+    return () => {
+      observer.disconnect();
+      window.removeEventListener("focus", onShown);
+      document.removeEventListener("visibilitychange", onShown);
+    };
+  }, [ref, measure]);
 }
 
 /**
@@ -163,8 +212,17 @@ export default function PopoverPanel() {
   const warningTarget =
     phase?.kind === "warning" ? accounts.find((account) => account.number === phase.to) ?? null : null;
 
+  const cli = useCliStatus();
   const handleSwitch = useCallback(
     (accountNumber: number) => {
+      const target = accounts.find((account) => account.number === accountNumber);
+      // Moving an account, or installing the claude command it needs, happens
+      // in the main window: Move opens a sign-in terminal, and the install
+      // prompt explains what it changes.
+      if (target && (needsMove(target) || (target.profile && cli.missing))) {
+        void openMainWindow();
+        return;
+      }
       setPendingAccount(accountNumber);
       setSwitchError(null);
       switchAccount(accountNumber)
@@ -182,7 +240,7 @@ export default function PopoverPanel() {
         })
         .finally(() => setPendingAccount(null));
     },
-    [refresh],
+    [accounts, cli.missing, refresh],
   );
 
   const snooze = useCallback(() => {
@@ -386,7 +444,11 @@ export default function PopoverPanel() {
                 <UsageMeter pct={bindingUtilisation(account.usage)} />
               </div>
               <span className="rst">{reset}</span>
-              {!unavailable && <span className="pop-go" aria-hidden="true">Switch</span>}
+              {!unavailable && (
+                <span className="pop-go" aria-hidden="true">
+                  {needsMove(account) ? "Move" : useLabel(account, false)}
+                </span>
+              )}
             </button>
           );
         })}
@@ -407,7 +469,7 @@ export default function PopoverPanel() {
               disabled={recoveryBlocked || pendingAccount !== null || warningTarget.usageStatus === "reloginrequired"}
               onClick={() => handleSwitch(warningTarget.number)}
             >
-              Switch now
+              {warningTarget.profile ? "Use now" : "Switch now"}
             </button>
             <button type="button" className="btn ghost" onClick={snooze}>Hold 1h</button>
           </>

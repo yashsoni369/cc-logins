@@ -207,7 +207,7 @@ export default function AccountsTable(props: AccountsTableProps) {
                     ariaLabel={`${displayName(account)} available to auto-switch`}
                     title={
                       account.active && !heldOut
-                        ? "The account in use always stays available."
+                        ? "The current account always stays available."
                         : heldOut
                           ? "Held out: auto-switch never picks it."
                           : "Auto-switch may pick this account."

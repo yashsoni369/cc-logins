@@ -83,6 +83,7 @@ const fixture: Snapshot = {
           alias: "Active",
           active: true,
           usageStatus: "ok",
+          profile: { isDefault: true, launcher: "active", state: "ready" },
           usage: { sevenDay: { pct: 99 } },
         },
         {
@@ -91,6 +92,7 @@ const fixture: Snapshot = {
           alias: "Next",
           active: false,
           usageStatus: "ok",
+          profile: { isDefault: false, launcher: "next", state: "ready" },
           usage: { sevenDay: { pct: 10 } },
         },
       ],
@@ -175,6 +177,20 @@ describe("PopoverPanel authoritative daemon phases", () => {
     render(<PopoverPanel />);
     fireEvent.click(screen.getByRole("button", { name: /Next/i }));
     expect(mocks.switchAccount).toHaveBeenCalledWith(2);
+  });
+
+  it("never switches a v0.3 account directly; it moves in the main window", () => {
+    const saved = fixture.environments[0]!.accounts[1]!.profile;
+    delete fixture.environments[0]!.accounts[1]!.profile;
+    try {
+      render(<PopoverPanel />);
+      const row = screen.getByRole("button", { name: /Next/i });
+      expect(row).toHaveTextContent("Move");
+      fireEvent.click(row);
+      expect(mocks.switchAccount).not.toHaveBeenCalled();
+    } finally {
+      fixture.environments[0]!.accounts[1]!.profile = saved;
+    }
   });
 
   it("labels a dead credential distinctly and disables manual activation", () => {
