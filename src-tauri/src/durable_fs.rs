@@ -182,29 +182,58 @@ fn replace(staged: &Path, target: &Path) -> io::Result<()> {
 
     let staged_wide: Vec<u16> = staged.as_os_str().encode_wide().chain(Some(0)).collect();
     let target_wide: Vec<u16> = target.as_os_str().encode_wide().chain(Some(0)).collect();
-    let result = unsafe {
-        if target.exists() {
-            ReplaceFileW(
-                target_wide.as_ptr(),
-                staged_wide.as_ptr(),
-                std::ptr::null(),
-                0,
-                std::ptr::null_mut(),
-                std::ptr::null_mut(),
-            )
+    let attempt = || {
+        // SAFETY: both paths are NUL-terminated wide strings that outlive the
+        // call; the optional parameters are null, as the API allows.
+        let result = unsafe {
+            if target.exists() {
+                ReplaceFileW(
+                    target_wide.as_ptr(),
+                    staged_wide.as_ptr(),
+                    std::ptr::null(),
+                    0,
+                    std::ptr::null_mut(),
+                    std::ptr::null_mut(),
+                )
+            } else {
+                MoveFileExW(
+                    staged_wide.as_ptr(),
+                    target_wide.as_ptr(),
+                    MOVEFILE_WRITE_THROUGH,
+                )
+            }
+        };
+        if result == 0 {
+            Err(io::Error::last_os_error())
         } else {
-            MoveFileExW(
-                staged_wide.as_ptr(),
-                target_wide.as_ptr(),
-                MOVEFILE_WRITE_THROUGH,
-            )
+            Ok(())
         }
     };
-    if result == 0 {
-        Err(io::Error::last_os_error())
-    } else {
-        Ok(())
+
+    // Antivirus, the search indexer and backup tools open a freshly written
+    // file for a moment, and Windows then refuses to replace it (seen live:
+    // ERROR_UNABLE_TO_REMOVE_REPLACED on shim.json right after it was
+    // created). Those holds clear within milliseconds, so retry briefly
+    // before reporting a failure; anything else fails at once.
+    let mut delay = std::time::Duration::from_millis(15);
+    for _ in 0..8 {
+        match attempt() {
+            Err(error) if is_transient_replace_error(&error) => {
+                std::thread::sleep(delay);
+                delay = (delay * 2).min(std::time::Duration::from_millis(400));
+            }
+            result => return result,
+        }
     }
+    attempt()
+}
+
+/// Errors that mean "someone has the file open right now", not "this cannot
+/// work": access denied, sharing and lock violations, and
+/// ERROR_UNABLE_TO_REMOVE_REPLACED.
+#[cfg(windows)]
+fn is_transient_replace_error(error: &io::Error) -> bool {
+    matches!(error.raw_os_error(), Some(5 | 32 | 33 | 1175))
 }
 
 #[cfg(unix)]
