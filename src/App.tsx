@@ -13,6 +13,8 @@ import { predictTarget } from "./lib/coverage";
 import { useQuotaNotifications } from "./lib/notifications";
 import { useSnapshot } from "./lib/useSnapshot";
 import { pickedMessage } from "./lib/sessionCopy";
+import { useCliStatus } from "./lib/useCliStatus";
+import { ClaudeCommandBanner, ClaudeCommandDialog } from "./components/ClaudeCommandPrereq";
 import { useTheme } from "./lib/useTheme";
 import { useSettings } from "./lib/useSettings";
 import { useDaemonStatus } from "./lib/useDaemonStatus";
@@ -343,6 +345,35 @@ function AppContent() {
     switchRef.current = handleSwitch;
   }, [handleSwitch]);
 
+  // The `claude` command is a prerequisite for picking an account: picking
+  // only changes which folder new sessions use, and plain `claude` reaches
+  // that choice only through the command. A user pick therefore asks to
+  // install it first. Builds without the shim (development) skip this.
+  const cli = useCliStatus();
+  const [cliGateFor, setCliGateFor] = useState<number | null>(null);
+  const handlePick = useCallback(
+    (accountNumber: number) => {
+      const target = accountsNow.find((a) => a.number === accountNumber);
+      if (target?.profile && cli.missing) {
+        setCliGateFor(accountNumber);
+        return;
+      }
+      handleSwitch(accountNumber);
+    },
+    [accountsNow, cli.missing, handleSwitch],
+  );
+  const installAndPick = useCallback(async () => {
+    const accountNumber = cliGateFor;
+    if (accountNumber === null) return;
+    if (await cli.install()) {
+      setCliGateFor(null);
+      handleSwitch(accountNumber);
+    }
+  }, [cli, cliGateFor, handleSwitch]);
+  const cliGateAccount = cliGateFor === null ? null : (accountsNow.find((a) => a.number === cliGateFor) ?? null);
+  const showCliBanner =
+    accountsNow.some((a) => a.profile) && (cli.missing || cli.shadowedBy !== null);
+
   // The ONLY call site for `addCurrentAccount`.
   const handleAddAccount = useCallback(() => {
     setPendingAddAccount(true);
@@ -479,7 +510,7 @@ function AppContent() {
         label: displayName(account),
         meta: [pct === null ? null : `${Math.round(pct)}%`, reset ? `resets ${reset}` : null].filter(Boolean).join(" · "),
         keywords: [account.email, account.organizationName ?? ""],
-        run: () => handleSwitch(account.number),
+        run: () => handlePick(account.number),
       });
     }
     for (const item of NAV_ITEMS) {
@@ -515,7 +546,7 @@ function AppContent() {
     list.push({ id: "theme-night", group: "Actions", label: "Theme: Night", run: () => theme.setTheme("night") });
     list.push({ id: "theme-system", group: "Actions", label: "Theme: match system", run: () => theme.setTheme("system") });
     return list;
-  }, [accountsNow, mutationInFlight, now, handleSwitch, phaseKind, setAutoSwitch, settings, handleAddAccount, handleInteractiveLogin, theme]);
+  }, [accountsNow, mutationInFlight, now, handlePick, phaseKind, setAutoSwitch, settings, handleAddAccount, handleInteractiveLogin, theme]);
 
   // An unconfigured machine is a normal state, not an error — it routes to
   // the same first-run screen as "zero accounts found" below.
@@ -649,6 +680,23 @@ function AppContent() {
 
             <main className="main-content">
               {recoveryBlocked && <MainRecoveryBanner phase={daemonPhase} />}
+              {screen === "home" && showCliBanner && (
+                <ClaudeCommandBanner
+                  shadowedBy={cli.shadowedBy}
+                  installing={cli.installing}
+                  error={cliGateFor === null ? cli.error : null}
+                  onInstall={() => void cli.install()}
+                  onOpenSettings={() => setScreen("settings")}
+                />
+              )}
+              <ClaudeCommandDialog
+                open={cliGateAccount !== null}
+                accountName={cliGateAccount ? displayName(cliGateAccount) : ""}
+                installing={cli.installing}
+                error={cliGateFor === null ? null : cli.error}
+                onInstallAndUse={() => void installAndPick()}
+                onCancel={() => setCliGateFor(null)}
+              />
               {screen === "home" && (
                 <HomeScreen
                   snapshot={displaySnapshot}
@@ -658,7 +706,7 @@ function AppContent() {
                   loginPresent={loginPresent}
                   drawer={drawer}
                   onDrawerChange={setDrawer}
-                  onSwitch={(n) => handleSwitch(n)}
+                  onSwitch={(n) => handlePick(n)}
                   pendingAccount={pendingAccount}
                   switchError={switchError}
                   onAddAccount={handleAddAccount}

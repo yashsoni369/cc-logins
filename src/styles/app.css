@@ -3079,3 +3079,15 @@ table.home-accts tbody tr.acct-row:focus-visible {
 .field .v > .btn {
   align-self: flex-start;
 }
+
+/* The claude command prerequisite */
+.dlg-title {
+  font-size: 15px;
+  font-weight: 600;
+  margin: 0 0 8px;
+}
+.dlg-title code,
+.banner code {
+  font-family: var(--mono);
+  font-size: 0.95em;
+}
