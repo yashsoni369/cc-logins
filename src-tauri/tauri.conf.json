@@ -70,7 +70,7 @@
     "shortDescription": "Quota visibility and account switching for Claude Code",
     "longDescription": "A tray application that shows which Claude Code account is active, how much 5-hour and 7-day quota each account has left, and switches between them manually or automatically before a limit lands. It never routes model traffic and has no server.",
     "copyright": "MIT. Portions ported from claude-swap (MIT), realiti4/claude-swap.",
-    "licenseFile": "../LICENSE",
+    "licenseFile": "../NOTICE",
     "homepage": "https://github.com/yashsoni369/cc-logins",
     "publisher": "Yash Soni",
     "macOS": {
