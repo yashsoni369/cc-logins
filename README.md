@@ -396,4 +396,4 @@ project and is not affiliated with, endorsed by, or supported by Anthropic.
 ## License
 
 MIT — see [LICENSE](LICENSE). Portions are adapted from third-party code by Onur Cetinkol under
-the MIT License; the required notice is included in [LICENSE](LICENSE).
+the MIT License; the required notice is in [NOTICE](NOTICE), which the installers also carry.
