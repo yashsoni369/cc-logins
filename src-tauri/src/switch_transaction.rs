@@ -10,12 +10,14 @@ use std::time::Duration;
 
 use serde_json::{Map, Value};
 
-#[cfg(test)]
-use crate::credentials::{merge_shared_credential_fields, shared_credential_fields, StoreHost};
-use crate::credentials::{ActiveCredentialState, CredentialStore};
-use crate::switch_journal::{sha256, ArtifactRecord, JournalPhase, JournalStore, SwitchJournal};
-#[cfg(test)]
-use crate::switch_journal::{JournalTarget, OutgoingGeneration};
+use crate::credentials::{
+    merge_shared_credential_fields, shared_credential_fields, ActiveCredentialState,
+    CredentialStore, StoreHost,
+};
+use crate::switch_journal::{
+    sha256, ArtifactRecord, JournalPhase, JournalStore, JournalTarget, OutgoingGeneration,
+    SwitchJournal,
+};
 
 #[derive(Debug, thiserror::Error)]
 pub enum LiveStateLockError {
@@ -42,24 +44,32 @@ pub struct ActiveRefreshLocks {
     _vault: crate::locking::FileLock,
 }
 
-// Since v0.4 the app never performs a switch. The forward path below is kept
-// only for tests: the recovery tests use it to create genuinely interrupted
-// journals, and recovery itself stays until v0.5 to finish a switch that a
-// v0.3 build left half done.
-#[cfg(test)]
+// By default v0.4 never performs a switch: picking an account only points new
+// sessions at its folder. The forward path below runs only for the opt-in
+// live swap (Settings -> Switch running sessions too, see `crate::live_swap`),
+// and for the recovery tests, which use it to create genuinely interrupted
+// journals.
 #[derive(Debug, Clone)]
 pub(crate) enum OutgoingDestination {
+    /// A v0.3 vault slot. Only the tests still build one.
+    #[cfg_attr(not(test), allow(dead_code))]
     Managed {
         number: String,
         email: String,
         config_backup_path: std::path::PathBuf,
     },
-    // The forward path still handles it; no remaining test builds one.
-    #[allow(dead_code)]
+    /// The outgoing account's own profile folder: the live login, with
+    /// whatever Claude Code refreshed while it was live, goes back home.
+    ProfileFolder {
+        number: String,
+        email: String,
+        config_dir: String,
+    },
+    /// A live login that belongs to no account folder; kept in the
+    /// recovery stash rather than overwritten.
     Unclaimed,
 }
 
-#[cfg(test)]
 #[derive(Debug, Clone)]
 pub(crate) struct SwitchPlan {
     pub target: JournalTarget,
@@ -185,7 +195,6 @@ pub fn recovery_requirement() -> Option<String> {
     TEST_RECOVERY_STATE.with(|state| state.borrow().clone())
 }
 
-#[cfg(test)]
 fn transaction_id() -> String {
     use std::sync::atomic::{AtomicU64, Ordering};
     static NEXT: AtomicU64 = AtomicU64::new(0);
@@ -197,7 +206,6 @@ fn transaction_id() -> String {
     )
 }
 
-#[cfg(test)]
 fn file_artifact(
     recovery: &mut crate::recovery_store::RecoveryStore,
     transaction_id: &str,
@@ -218,7 +226,6 @@ fn file_artifact(
     })
 }
 
-#[cfg(test)]
 fn active_artifact(
     recovery: &mut crate::recovery_store::RecoveryStore,
     transaction_id: &str,
@@ -236,7 +243,6 @@ fn active_artifact(
     })
 }
 
-#[cfg(test)]
 fn stage_name(stage: &crate::durable_fs::StagedFile) -> Option<std::path::PathBuf> {
     stage.path().file_name().map(std::path::PathBuf::from)
 }
@@ -249,7 +255,6 @@ fn remove_stage(path: &std::path::Path) {
     }
 }
 
-#[cfg(test)]
 /// Execute a prepared, network-free switch while the caller holds
 /// [`LiveStateLocks`]. Before-images are protected and journaled before any
 /// live or vault mutation. Any pre-commit failure attempts a complete exact
@@ -378,11 +383,20 @@ pub(crate) fn execute_locked<H: StoreHost>(
             .existed
             .then(|| recovery.put(&transaction_id, "outgoing-config", &config_before.bytes))
             .transpose()?;
-        let (outgoing_number, outgoing_email) = match &plan.outgoing {
+        let (outgoing_number, outgoing_email, outgoing_dir) = match &plan.outgoing {
             OutgoingDestination::Managed { number, email, .. } => {
-                (Some(number.clone()), Some(email.clone()))
+                (Some(number.clone()), Some(email.clone()), None)
             }
-            OutgoingDestination::Unclaimed => (None, None),
+            OutgoingDestination::ProfileFolder {
+                number,
+                email,
+                config_dir,
+            } => (
+                Some(number.clone()),
+                Some(email.clone()),
+                Some(config_dir.clone()),
+            ),
+            OutgoingDestination::Unclaimed => (None, None, None),
         };
         journal.outgoing_generation = Some(OutgoingGeneration {
             account_number: outgoing_number,
@@ -391,6 +405,7 @@ pub(crate) fn execute_locked<H: StoreHost>(
             config: outgoing_config,
             credential_sha256: Some(sha256(active_value.as_bytes())),
             config_sha256: config_before.existed.then(|| sha256(&config_before.bytes)),
+            config_dir: outgoing_dir,
         });
         journal_store.rewrite_current(&journal)?;
         faults.hit(FaultPoint::AfterOutgoingCapture)?;
@@ -408,6 +423,9 @@ pub(crate) fn execute_locked<H: StoreHost>(
                     Some(0o600),
                 )?
                 .commit()?;
+            }
+            OutgoingDestination::ProfileFolder { config_dir, .. } => {
+                crate::live_swap::write_profile_credentials(config_dir, &active_value)?;
             }
             OutgoingDestination::Unclaimed => {
                 let mut context = Map::new();
@@ -587,6 +605,13 @@ fn preserve_outgoing_generation(
     let credential_text = String::from_utf8(credential).map_err(|error| {
         TransactionError::Verification(format!("outgoing credential is not UTF-8: {error}"))
     })?;
+
+    // A live swap hands the login back to its folder; the folder keeps its
+    // own `.claude.json`, so there is no config to restore with it.
+    if let Some(config_dir) = &outgoing.config_dir {
+        crate::live_swap::write_profile_credentials(config_dir, &credential_text)?;
+        return Ok(());
+    }
 
     match (&outgoing.account_number, &outgoing.email) {
         (Some(number), Some(email)) => {

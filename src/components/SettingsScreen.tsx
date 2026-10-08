@@ -124,6 +124,7 @@ export default function SettingsScreen({
   const { settings, live, loading, update } = runtime;
   const [saveError, setSaveError] = useState<string | null>(null);
   const [alertNote, setAlertNote] = useState<string | null>(null);
+  const [liveSwapPending, setLiveSwapPending] = useState(false);
 
   // Local draft for the slider only, so dragging feels instant even though
   // the backend write is debounced. Cleared once the backend echoes back.
@@ -294,6 +295,38 @@ export default function SettingsScreen({
                 checked={settings.autoSwitchEnabled}
                 onChange={(v) => commitField("autoSwitchEnabled", v)}
                 label={settings.autoSwitchEnabled ? "Enabled" : "Disabled"}
+              />
+            </div>
+          </div>
+
+          <div className="field">
+            <div className="k">
+              Switch running sessions too
+              <i>
+                Sessions already running move to the account you pick. CC Logins writes that account's login into
+                Claude Code's own folder, the way v0.3 did, which Anthropic's terms discourage. Off by default.
+              </i>
+            </div>
+            <div className="v">
+              <Toggle
+                checked={settings.switchRunningSessions === true}
+                pending={liveSwapPending}
+                onChange={(v) => {
+                  setLiveSwapPending(true);
+                  runtime
+                    .setSwitchRunningSessions(v)
+                    .then(() => {
+                      if (mounted.current) setSaveError(null);
+                    })
+                    .catch((err: unknown) => {
+                      if (!mounted.current) return;
+                      setSaveError(err instanceof IpcError ? err.message : "Couldn't change this setting.");
+                    })
+                    .finally(() => {
+                      if (mounted.current) setLiveSwapPending(false);
+                    });
+                }}
+                label={settings.switchRunningSessions ? "Enabled" : "Disabled"}
               />
             </div>
           </div>

@@ -40,7 +40,7 @@ use crate::paths;
 
 /// `<backup_root>/sequence.json` — the account registry (slot numbers, email/
 /// org identity, aliases, disabled flags, `activeAccountNumber`).
-fn accounts_file() -> PathBuf {
+pub(crate) fn accounts_file() -> PathBuf {
     paths::backup_root().join("sequence.json")
 }
 
@@ -237,7 +237,7 @@ pub(crate) fn write_sequence_data(data: &Map<String, Value>) -> Result<(), Switc
 /// identity is read from `~/.claude.json`'s `oauthAccount` block (never from
 /// the stored `activeAccountNumber`, which is just cswap's own memory of
 /// where it left things and can drift from what's actually live).
-fn current_account_number(data: &Map<String, Value>) -> Option<String> {
+pub(crate) fn current_account_number(data: &Map<String, Value>) -> Option<String> {
     let text = std::fs::read_to_string(paths::global_config_path()).ok()?;
     let config: Value = serde_json::from_str(&text).ok()?;
     let oauth_account = config.get("oauthAccount")?.as_object()?;
@@ -505,6 +505,14 @@ fn read_profile(account: &Account, profile: &crate::model::AccountProfile) -> Pr
     };
     if !folder_matches(account, &identity) {
         return ProfileRead::Mismatch;
+    }
+    // With the live swap on, the account that is live in `~/.claude` has its
+    // newest login there; its folder copy is stale until it is swapped out.
+    if crate::live_swap::enabled() && config_dir.is_some() {
+        let live = crate::auth_status::read_folder_identity(&crate::paths::global_config_path());
+        if live.is_some_and(|live| folder_matches(account, &live)) {
+            return ProfileRead::Signed(crate::usage_reader::read_access(None));
+        }
     }
     ProfileRead::Signed(crate::usage_reader::read_access(config_dir))
 }

@@ -87,6 +87,10 @@ pub struct OutgoingGeneration {
     pub config: Option<ProtectedArtifactRef>,
     pub credential_sha256: Option<String>,
     pub config_sha256: Option<String>,
+    /// Set when the outgoing login goes back to the account's own profile
+    /// folder (the opt-in live swap) instead of a v0.3 vault slot.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub config_dir: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

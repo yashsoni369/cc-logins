@@ -41,6 +41,7 @@ function owner(
     update,
     snooze: vi.fn(),
     resume: vi.fn(),
+    setSwitchRunningSessions: vi.fn(),
   };
 }
 

@@ -62,10 +62,12 @@ fn accounts(data: &Map<String, Value>) -> impl Iterator<Item = (u32, &Map<String
 
 /// `shim.json`'s account half, derived from the registry: the selected
 /// account (when it is a ready profile) and one launcher per ready profile.
+/// With the live swap on, plain `claude` is left on `~/.claude`, which then
+/// holds the selected account's login.
 pub fn shim_accounts(
     data: &Map<String, Value>,
 ) -> (Option<ShimProfile>, Vec<(String, ShimProfile)>) {
-    let selected = selected_number(data);
+    let selected = selected_number(data).filter(|_| !crate::live_swap::enabled());
     let mut chosen = None;
     let mut launchers = Vec::new();
     for (number, record) in accounts(data) {

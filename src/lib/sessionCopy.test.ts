@@ -7,6 +7,7 @@ import {
   freshnessLabel,
   pickedMessage,
   profileProblem,
+  setLiveSwap,
   useLabel,
   useLongLabel,
 } from "@/lib/sessionCopy";
@@ -28,6 +29,19 @@ describe("sessionCopy", () => {
     expect(useLongLabel(profile, "Work")).toBe("Use for new sessions");
     expect(pickedMessage(profile, "Work")).toMatch(/Running sessions keep their account/);
     expect(pickedMessage(legacy, "Main")).toBe("Switched to Main");
+  });
+
+  it("words a profile account as swapped in when running sessions follow the pick", () => {
+    setLiveSwap(true);
+    try {
+      expect(currentLabel(profile)).toBe("in use");
+      expect(useLabel(profile, false)).toBe("Switch");
+      expect(useLongLabel(profile, "Work")).toBe("Switch to Work");
+      expect(pickedMessage(profile, "Work")).toBe("Switched to Work. Running sessions use it on their next request.");
+      expect(autoPickedNotice(profile, "Work", "Main").title).toBe("Switched to Work");
+    } finally {
+      setLiveSwap(false);
+    }
   });
 
   it("words the auto-switch notice by account kind", () => {

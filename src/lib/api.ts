@@ -602,6 +602,7 @@ export const DEFAULT_SETTINGS: Settings = {
   clockFormat: "system",
   claudeBinaryPath: null,
   displayMode: "used",
+  switchRunningSessions: false,
 };
 
 /** Current settings. Falls back to the same defaults the backend ships with. */
@@ -632,6 +633,18 @@ export async function updateSettings(
   return call<SettingsSnapshot>("update_settings", {
     input: { expectedRevision, patch },
   });
+}
+
+/**
+ * Turn the opt-in live swap on or off. On gives the default account a folder
+ * of its own and swaps the selected account into `~/.claude`; off hands the
+ * live login back to its folder. Resolves to the saved settings.
+ */
+export async function setSwitchRunningSessions(enabled: boolean): Promise<SettingsSnapshot> {
+  if (!hasBackend()) {
+    throw new IpcError("internal", "Not running in the desktop app, so settings cannot be saved.");
+  }
+  return call<SettingsSnapshot>("set_switch_running_sessions", { enabled });
 }
 
 export async function snoozeAutoSwitch(durationSeconds: number): Promise<SettingsSnapshot> {

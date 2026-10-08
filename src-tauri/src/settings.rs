@@ -210,6 +210,14 @@ pub struct Settings {
     /// never launches `claude`, only interactive login does, so this field has
     /// nothing to contribute to the policy the poller reads.
     pub claude_binary_path: Option<String>,
+
+    /// Off by default. When on, picking an account also writes its login into
+    /// the default `~/.claude`, so sessions already running follow the
+    /// selection on their next request (the v0.3 behaviour). Each account's
+    /// own folder stays its home: the live login is written back to it before
+    /// another account is swapped in. Only allowed once every account has its
+    /// own folder.
+    pub switch_running_sessions: bool,
 }
 
 impl Default for Settings {
@@ -233,6 +241,7 @@ impl Default for Settings {
             display_mode: DisplayMode::default(),
             history_retention_days: 14,
             claude_binary_path: None,
+            switch_running_sessions: false,
         }
     }
 }
@@ -296,6 +305,7 @@ pub struct SettingsPatch {
     pub history_retention_days: Option<i64>,
     #[serde(default, deserialize_with = "deserialize_present_nullable")]
     pub claude_binary_path: Option<Option<String>>,
+    pub switch_running_sessions: Option<bool>,
 }
 
 fn deserialize_present_nullable<'de, D, T>(deserializer: D) -> Result<Option<Option<T>>, D::Error>
@@ -498,6 +508,9 @@ fn apply_patch(settings: &mut Settings, patch: SettingsPatch) {
     }
     if let Some(value) = patch.claude_binary_path {
         settings.claude_binary_path = value;
+    }
+    if let Some(value) = patch.switch_running_sessions {
+        settings.switch_running_sessions = value;
     }
 }
 
@@ -1091,6 +1104,19 @@ mod tests {
         // No opinion on where `claude` lives until the user states one —
         // auto-discovery in `claude_cli` is the default, not this field.
         assert_eq!(Settings::default().claude_binary_path, None);
+    }
+
+    #[test]
+    fn switch_running_sessions_is_off_by_default_and_patchable() {
+        assert!(!Settings::default().switch_running_sessions);
+        let patch: SettingsPatch =
+            serde_json::from_str(r#"{"switchRunningSessions":true}"#).unwrap();
+        let mut settings = Settings::default();
+        apply_patch(&mut settings, patch);
+        assert!(settings.switch_running_sessions);
+        // An older settings file without the field still loads, with it off.
+        let old: Settings = serde_json::from_str(r#"{"threshold":80}"#).unwrap();
+        assert!(!old.switch_running_sessions);
     }
 
     #[test]

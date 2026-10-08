@@ -40,6 +40,7 @@ function owner(update: UseSettingsResult["update"], claudeBinaryPath: string | n
     update,
     snooze: vi.fn(),
     resume: vi.fn(),
+    setSwitchRunningSessions: vi.fn().mockResolvedValue(confirmed),
   };
 }
 
@@ -68,8 +69,12 @@ describe("SettingsScreen", () => {
       />,
     );
 
-    fireEvent.click(screen.getByRole("switch", { name: /disabled/i }));
+    // The first switch is auto-switch; the second, running sessions.
+    const [autoSwitch, runningSessions] = screen.getAllByRole("switch", { name: /disabled/i });
+    fireEvent.click(autoSwitch!);
     expect(update).toHaveBeenCalledWith({ autoSwitchEnabled: true });
+    fireEvent.click(runningSessions!);
+    expect(update).not.toHaveBeenCalledWith({ switchRunningSessions: true });
 
     fireEvent.change(screen.getByRole("slider", { name: "Auto-switch threshold" }), {
       target: { value: "81" },
@@ -78,6 +83,17 @@ describe("SettingsScreen", () => {
     await act(async () => vi.advanceTimersByTime(400));
     expect(update).toHaveBeenCalledWith({ threshold: 81 });
     vi.useRealTimers();
+  });
+
+  it("turns running-session switching on through its own command", () => {
+    const runtime = owner(vi.fn());
+    const turnOn = vi.fn().mockResolvedValue(confirmed);
+    runtime.setSwitchRunningSessions = turnOn;
+    render(<SettingsScreen runtime={runtime} theme="system" onThemeChange={vi.fn()} themeError={null} update={noUpdate} />);
+
+    fireEvent.click(screen.getAllByRole("switch", { name: /disabled/i })[1]!);
+    expect(turnOn).toHaveBeenCalledWith(true);
+    expect(runtime.update).not.toHaveBeenCalled();
   });
 
   it("offers a time format choice and saves it as a single field", () => {

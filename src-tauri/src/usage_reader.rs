@@ -65,7 +65,7 @@ pub fn credentials_file(config_dir: Option<&str>) -> PathBuf {
     }
 }
 
-fn read_raw(config_dir: Option<&str>) -> Result<Option<String>, String> {
+pub(crate) fn read_raw(config_dir: Option<&str>) -> Result<Option<String>, String> {
     #[cfg(target_os = "macos")]
     {
         // Claude Code keeps the login in the Keychain on macOS, under a

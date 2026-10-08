@@ -6,46 +6,63 @@
  * account. A v0.3 account (not yet moved to its own folder) is still swapped
  * in, so it is *in use* everywhere at once. The UI must never describe the
  * first as if it were the second.
+ *
+ * With the opt-in live swap (Settings -> Switch running sessions too), a
+ * profile account is swapped in as well, so it reads like the second.
  */
 import type { Account } from "@/types";
+
+let liveSwap = false;
+
+/** Mirror of the `switchRunningSessions` setting; set by `useSettings`. */
+export function setLiveSwap(on: boolean): void {
+  liveSwap = on;
+}
 
 export function isProfile(account: Account): boolean {
   return account.profile !== undefined;
 }
 
+/** Picking this account changes only what new sessions start with. */
+function newSessionsOnly(account: Account): boolean {
+  return isProfile(account) && !liveSwap;
+}
+
 /** Pill beside the current account's name. */
 export function currentLabel(account: Account): string {
-  return isProfile(account) ? "new sessions" : "in use";
+  return newSessionsOnly(account) ? "new sessions" : "in use";
 }
 
 /** Tooltip for that pill. */
 export function currentTitle(account: Account): string {
-  return isProfile(account)
+  return newSessionsOnly(account)
     ? "New Claude sessions start with this account. Sessions already running keep theirs."
     : "Claude Code is using this account now.";
 }
 
 /** Short action button label. */
 export function useLabel(account: Account, pending: boolean): string {
-  if (isProfile(account)) return pending ? "Selecting…" : "Use";
+  if (newSessionsOnly(account)) return pending ? "Selecting…" : "Use";
   return pending ? "Switching…" : "Switch";
 }
 
 /** Long action label, for the drawer. */
 export function useLongLabel(account: Account, name: string): string {
-  return isProfile(account) ? "Use for new sessions" : `Switch to ${name}`;
+  return newSessionsOnly(account) ? "Use for new sessions" : `Switch to ${name}`;
 }
 
 /** Confirmation after the user picked an account. */
 export function pickedMessage(account: Account, name: string): string {
-  return isProfile(account)
+  return newSessionsOnly(account)
     ? `New sessions will use ${name}. Running sessions keep their account.`
-    : `Switched to ${name}`;
+    : liveSwap && isProfile(account)
+      ? `Switched to ${name}. Running sessions use it on their next request.`
+      : `Switched to ${name}`;
 }
 
 /** Notification after auto-switch picked an account. */
 export function autoPickedNotice(account: Account | undefined, name: string, from: string): { title: string; body: string } {
-  if (account && isProfile(account)) {
+  if (account && newSessionsOnly(account)) {
     return {
       title: `New sessions will use ${name}`,
       body: `${from} was near its limit. Start a new claude session to continue on ${name}; running sessions keep their account.`,

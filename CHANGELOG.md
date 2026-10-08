@@ -11,7 +11,8 @@ A breaking change to any of those bumps the minor version, since major is pinned
 
 ## [Unreleased] — 0.4.0
 
-The app no longer stores, copies or refreshes any Claude login.
+The app no longer stores, copies or refreshes any Claude login, unless you turn on the opt-in
+**Switch running sessions too** setting.
 
 ### Changed
 
@@ -33,11 +34,18 @@ The app no longer stores, copies or refreshes any Claude login.
 - **Settings → Claude command**: installs a `claude` launcher first on your `PATH` so new
   terminals start the selected account, plus a `claude-<name>` command per account for running
   accounts side by side. Shows the VS Code `claudeCode.claudeProcessWrapper` line to copy.
+- **Settings → Auto-switch → Switch running sessions too**, off by default. Picking an account
+  also writes its login into Claude Code's own folder, the way v0.3 did, so sessions already
+  running move to it on their next request. Each account's folder stays its home: the live login is
+  written back to it before another account is swapped in, so a token Claude Code refreshed while
+  it was live is kept. Turning it on gives the account that used `~/.claude` a folder of its own
+  (its login is copied there; nothing is signed out). The swap is journaled and recovered at the
+  next start if interrupted. This is the v0.3 behaviour that Anthropic's terms discourage.
 
 ### Removed
 
-- Switching by rewriting Claude Code's credential files, the app's own encrypted copies of each
-  login, token refresh, and **Paste a setup token**.
+- Switching by rewriting Claude Code's credential files (except with the opt-in setting above),
+  the app's own encrypted copies of each login, token refresh, and **Paste a setup token**.
 
 ### Migration
 

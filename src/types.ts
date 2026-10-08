@@ -413,6 +413,13 @@ export interface Settings {
    * because a pre-0.3 backend does not send it.
    */
   displayMode?: "used" | "left";
+  /**
+   * Opt-in: picking an account also swaps its login into the default
+   * `~/.claude`, so sessions already running follow it. Changed only through
+   * `setSwitchRunningSessions`, never a plain settings patch. Optional because
+   * an older backend does not send it.
+   */
+  switchRunningSessions?: boolean;
 }
 
 export interface SettingsSnapshot {

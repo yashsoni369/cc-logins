@@ -1022,13 +1022,22 @@ fn restore_keychain_entry(
     .map_err(|error| CredentialError::Restore(error.to_string()))
 }
 
-/// Read one of Claude Code's own Keychain items by service name. Read-only:
-/// v0.4 reads a profile's current access token in place for one usage
-/// request and never writes Claude Code's items.
+/// Read one of Claude Code's own Keychain items by service name. v0.4 reads
+/// a profile's current access token in place for one usage request; only
+/// the opt-in live swap ([`write_claude_keychain_item`]) ever writes one.
 #[cfg(target_os = "macos")]
 pub(crate) fn read_claude_keychain_item(service: &str) -> Result<Option<String>, String> {
     let account = macos_keychain::keychain_account_name();
     macos_keychain::get_password(service, &account).map_err(|error| error.to_string())
+}
+
+/// Write one of Claude Code's own Keychain items by service name. Used only
+/// by the opt-in live swap, to hand an account's login back to its folder.
+#[cfg(target_os = "macos")]
+#[cfg_attr(test, allow(dead_code))]
+pub(crate) fn write_claude_keychain_item(service: &str, value: &str) -> Result<(), String> {
+    let account = macos_keychain::keychain_account_name();
+    macos_keychain::set_password(service, &account, value).map_err(|error| error.to_string())
 }
 
 #[cfg(target_os = "macos")]

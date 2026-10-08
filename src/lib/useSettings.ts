@@ -5,9 +5,11 @@ import {
   IpcError,
   onSettingsUpdated,
   resumeAutoSwitch,
+  setSwitchRunningSessions,
   snoozeAutoSwitch,
   updateSettings,
 } from "@/lib/api";
+import { setLiveSwap } from "@/lib/sessionCopy";
 import type { Settings, SettingsPatch, SettingsSnapshot } from "@/types";
 
 export interface UseSettingsResult {
@@ -19,6 +21,7 @@ export interface UseSettingsResult {
   update: (patch: SettingsPatch) => Promise<SettingsSnapshot>;
   snooze: (durationSeconds: number) => Promise<SettingsSnapshot>;
   resume: () => Promise<SettingsSnapshot>;
+  setSwitchRunningSessions: (enabled: boolean) => Promise<SettingsSnapshot>;
 }
 
 function acceptNewest<T extends { revision: number }>(old: T | null, next: T): T {
@@ -36,6 +39,7 @@ export function useSettings(): UseSettingsResult {
   const accept = useCallback((next: SettingsSnapshot) => {
     const accepted = acceptNewest(snapshotRef.current, next);
     snapshotRef.current = accepted;
+    setLiveSwap(accepted.settings.switchRunningSessions === true);
     setSnapshot(accepted);
   }, []);
 
@@ -111,6 +115,10 @@ export function useSettings(): UseSettingsResult {
     [enqueue],
   );
   const resume = useCallback(() => enqueue(() => resumeAutoSwitch()), [enqueue]);
+  const switchRunningSessions = useCallback(
+    (enabled: boolean) => enqueue(() => setSwitchRunningSessions(enabled)),
+    [enqueue],
+  );
 
   return {
     snapshot,
@@ -121,5 +129,6 @@ export function useSettings(): UseSettingsResult {
     update,
     snooze,
     resume,
+    setSwitchRunningSessions: switchRunningSessions,
   };
 }

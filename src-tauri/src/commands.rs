@@ -410,9 +410,27 @@ pub async fn switch_account_for(
         .find(|a| a.number == account_number)
         .ok_or_else(|| IpcError::Internal(format!("no account in slot {account_number}")))?;
 
-    // A profile account is never swapped in: new sessions are pointed at its
-    // folder and running sessions keep theirs. Nothing is written but the
-    // registry and shim.json.
+    // With the opt-in live swap, a profile account with its own folder is
+    // swapped into `~/.claude`, so running sessions follow it too.
+    if crate::live_swap::enabled()
+        && target
+            .profile
+            .as_ref()
+            .is_some_and(|profile| profile.config_dir.is_some())
+    {
+        crate::poller::publish_switching(app);
+        let swapped = off_runtime(move || crate::live_swap::swap_to(account_number)).await?;
+        let snap = snapshot_uncached(&state).await;
+        if let Ok(snap) = &snap {
+            crate::poller::publish_snapshot(app, snap);
+        }
+        swapped?;
+        return snap;
+    }
+
+    // Otherwise a profile account is never swapped in: new sessions are
+    // pointed at its folder and running sessions keep theirs. Nothing is
+    // written but the registry and shim.json.
     if target.profile.is_some() {
         off_runtime(move || crate::profile_registry::select(account_number)).await??;
         let snap = snapshot_uncached(&state).await?;
@@ -790,6 +808,7 @@ impl AppState {
             let current = receiver.borrow().clone();
             current
         };
+        crate::live_swap::set_enabled(settings.snapshot().settings.switch_running_sessions);
         let daemon_status = crate::runtime::DaemonStatusStore::new(&policy, now);
         if let Some(detail) = crate::switch_transaction::recovery_requirement() {
             let _ = daemon_status.transition(
@@ -1360,6 +1379,76 @@ pub fn update_settings(
     Ok(updated)
 }
 
+/// Turn the opt-in live swap (Settings -> Switch running sessions too) on or
+/// off. See [`crate::live_swap`].
+///
+/// On: the default account first gets a folder of its own (its login is
+/// copied there; nothing is signed out), then the selected account is
+/// swapped into `~/.claude`. Off: the live login goes back to its folder and
+/// plain `claude` follows the folder selection again.
+#[tauri::command]
+pub async fn set_switch_running_sessions(
+    app: tauri::AppHandle,
+    enabled: bool,
+) -> IpcResult<crate::settings::SettingsSnapshot> {
+    let state = app.state::<AppState>();
+    refuse_if_recovery_required()?;
+    if enabled {
+        let data = switcher::read_sequence_data().unwrap_or_default();
+        if crate::live_swap::default_without_folder(&data).is_some() {
+            let dir = off_runtime(new_profile_dir).await??;
+            let moving = dir.clone();
+            match off_runtime(move || crate::live_swap::move_default_into(&moving)).await? {
+                Ok(Some(_)) => {}
+                Ok(None) => discard_new_profile_dir(&dir),
+                Err(error) => {
+                    discard_new_profile_dir(&dir);
+                    return Err(error.into());
+                }
+            }
+        }
+        crate::live_swap::set_enabled(true);
+        let selected = crate::profile_registry::selected_number(
+            &switcher::read_sequence_data().unwrap_or_default(),
+        );
+        if let Some(number) = selected {
+            crate::poller::publish_switching(&app);
+            if let Err(error) = off_runtime(move || crate::live_swap::swap_to(number)).await? {
+                crate::live_swap::set_enabled(false);
+                return Err(error.into());
+            }
+        }
+    } else {
+        crate::live_swap::set_enabled(false);
+        if let Err(error) = off_runtime(crate::live_swap::send_live_home).await? {
+            log::warn!("live login not handed back to its folder: {error}");
+        }
+    }
+    off_runtime(refresh_claude_command).await?;
+
+    let current = state.settings.snapshot();
+    let patch = crate::settings::SettingsPatch {
+        switch_running_sessions: Some(enabled),
+        ..Default::default()
+    };
+    let updated = match state
+        .settings
+        .update(current.revision, patch, chrono::Utc::now())
+    {
+        Ok(updated) => updated,
+        Err(error) => {
+            crate::live_swap::set_enabled(current.settings.switch_running_sessions);
+            off_runtime(refresh_claude_command).await?;
+            return Err(error.into());
+        }
+    };
+    let _ = app.emit(SETTINGS_UPDATED_EVENT, &updated);
+    if let Ok(snap) = snapshot_uncached(&state).await {
+        crate::poller::publish_snapshot(&app, &snap);
+    }
+    Ok(updated)
+}
+
 #[tauri::command]
 pub fn snooze_auto_switch(
     app: tauri::AppHandle,
@@ -1395,9 +1484,11 @@ where
     E: std::fmt::Display,
     F: FnOnce(&crate::settings::SettingsSnapshot) -> Result<(), E>,
 {
-    let snapshot = state
-        .settings
-        .update(input.expected_revision, input.patch, now)?;
+    // The live swap moves logins when it changes, so it only ever changes
+    // through `set_switch_running_sessions`.
+    let mut patch = input.patch;
+    patch.switch_running_sessions = None;
+    let snapshot = state.settings.update(input.expected_revision, patch, now)?;
     emit(&snapshot).map_err(|error| IpcError::Internal(error.to_string()))?;
     Ok(snapshot)
 }

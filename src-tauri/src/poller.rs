@@ -1400,7 +1400,20 @@ async fn perform_switch(app: &AppHandle, snapshot: &Snapshot, from: u32, to: u32
         log::warn!("poller: account {to} has not moved to its own folder; not selecting it");
         return false;
     }
-    let result = tokio::task::spawn_blocking(move || crate::profile_registry::select(to)).await;
+    // With the opt-in live swap, running sessions follow the pick too.
+    let swap = crate::live_swap::enabled()
+        && target
+            .profile
+            .as_ref()
+            .is_some_and(|profile| profile.config_dir.is_some());
+    let result = tokio::task::spawn_blocking(move || {
+        if swap {
+            crate::live_swap::swap_to(to)
+        } else {
+            crate::profile_registry::select(to)
+        }
+    })
+    .await;
     match result {
         Ok(Ok(())) => {
             let _ = app.emit(

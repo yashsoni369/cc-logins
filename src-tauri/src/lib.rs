@@ -19,6 +19,7 @@ pub mod durable_fs;
 pub mod hex;
 pub mod history;
 pub mod linux;
+pub mod live_swap;
 pub mod locking;
 pub mod login;
 pub mod migrate;
@@ -339,6 +340,7 @@ pub fn run() {
             commands::get_settings,
             commands::get_daemon_status,
             commands::update_settings,
+            commands::set_switch_running_sessions,
             commands::snooze_auto_switch,
             commands::resume_auto_switch,
             commands::data_locations,

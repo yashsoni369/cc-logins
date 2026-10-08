@@ -80,7 +80,9 @@ v0.4 is built around those three lines. Every sign-in completes in the unmodifie
 `claude auth login`. Each account lives in its own `CLAUDE_CONFIG_DIR` folder, the setup
 Anthropic's docs describe. The app keeps no copy of any login and never refreshes one. Versions
 before v0.4 kept an encrypted local copy of each account to switch between them; that is gone, and
-upgrading removes those copies (see [Moving from v0.3](#moving-from-v03)).
+upgrading removes those copies (see [Moving from v0.3](#moving-from-v03)). The one exception is
+the opt-in [Switch running sessions too](#switch-running-sessions-too) setting, off by default,
+which copies the selected account's login into `~/.claude`.
 
 This is a tool for people who legitimately hold separate subscriptions (work and personal, say)
 and want to see where each one stands. It is not a way to get more usage than your plans allow.
@@ -201,7 +203,8 @@ shell startup files elsewhere). From then on, a new terminal's `claude` starts C
 account selected in the app. Uninstall removes both.
 
 - Picking another account, by hand or by auto-switch, changes what the **next** `claude` starts
-  with. A session that is already running keeps its account.
+  with. A session that is already running keeps its account, unless you turn on
+  [Switch running sessions too](#switch-running-sessions-too).
 - Every account also gets a `claude-<name>` command that always starts that account, whatever is
   selected. Handy for running two accounts side by side.
 - If you already set `CLAUDE_CONFIG_DIR` yourself (an alias, say), plain `claude` leaves it alone.
@@ -211,6 +214,25 @@ account selected in the app. Uninstall removes both.
 
 Without the command installed, plain `claude` keeps using your default `~/.claude` account, and
 the Settings screen shows the full launcher paths to run instead.
+
+### Switch running sessions too
+
+Off by default, under **Settings → Auto-switch**. When it is on, picking an account also writes
+its login into Claude Code's own folder (`~/.claude`, or the Keychain on macOS), as v0.3 did, and
+sessions already running use it on their next request. Plain `claude` then uses `~/.claude` too.
+
+- Each account's folder stays its home. Before another account is swapped in, the live login,
+  including any token Claude Code refreshed while it was live, is written back to its folder. A
+  login that belongs to no account's folder is kept aside rather than written over one.
+- Turning it on moves the account that used `~/.claude` into a folder of its own by copying its
+  login there. Nothing is signed out.
+- Turning it off writes the live login back to its folder, and new sessions follow the folders
+  again.
+- While an account is live in `~/.claude`, don't also run its `claude-<name>` command: the two
+  copies refresh separately, and one of them gets signed out.
+- This means the app copies Claude logins again, which Anthropic's
+  [legal and compliance page](https://code.claude.com/docs/en/legal-and-compliance) asks tools not
+  to do. Leave it off unless running sessions following the pick matters more to you.
 
 ### Idle accounts
 
