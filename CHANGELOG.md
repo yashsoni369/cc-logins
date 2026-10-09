@@ -13,7 +13,7 @@ A breaking change to any of those bumps the minor version, since major is pinned
 
 Nothing yet.
 
-## [0.3.0]
+## [0.3.0] - 2026-10-09
 
 A redesign. Switching works exactly as before: the selected account's saved login is swapped into
 Claude Code, and sessions already running move to it on their next request.
@@ -280,7 +280,8 @@ Claude Code, and sessions already running move to it on their next request.
   otherwise.
 - Builds are unsigned. See [SECURITY.md](SECURITY.md).
 
-[Unreleased]: https://github.com/yashsoni369/cc-logins/compare/v0.2.6...HEAD
+[Unreleased]: https://github.com/yashsoni369/cc-logins/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/yashsoni369/cc-logins/compare/v0.2.6...v0.3.0
 [0.2.6]: https://github.com/yashsoni369/cc-logins/compare/v0.2.5...v0.2.6
 [0.2.5]: https://github.com/yashsoni369/cc-logins/compare/v0.2.4...v0.2.5
 [0.2.4]: https://github.com/yashsoni369/cc-logins/compare/v0.2.3...v0.2.4
