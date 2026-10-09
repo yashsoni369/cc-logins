@@ -142,6 +142,21 @@ jobs:
       # uploads the resulting per-platform installers (nsis on Windows, dmg
       # on macOS, deb/appimage on Linux) to a GitHub release matching the
       # tag, creating it as a draft so a human reviews and publishes it.
+      # tauri-cli writes the AppImage launcher it downloads (AppRun, which
+      # becomes AppRun.wrapped) with mode 0770 and copies it into the AppImage
+      # unchanged, so only its owner can start the AppImage. The AppImage
+      # catalog and firejail run it as another user and fail with "Permission
+      # denied" (tauri-apps/tauri#16155; still so in tauri-cli 2.12.1). The
+      # bundler reuses a launcher already in its tool cache, so seed one that
+      # every user can run. Same file, verified by hash; only the mode differs.
+      - name: Seed an AppImage launcher every user can run
+        if: matrix.platform == 'ubuntu-22.04'
+        run: |
+          mkdir -p "$HOME/.cache/tauri"
+          curl -sSfL -o "$HOME/.cache/tauri/AppRun-x86_64"             https://github.com/tauri-apps/binary-releases/releases/download/apprun-old/AppRun-x86_64
+          echo "f30140a43a0a59e46db21bdefdf749b9e9f2c6946e92afabbacf98b8ae73fb4f  $HOME/.cache/tauri/AppRun-x86_64" | sha256sum -c -
+          chmod 755 "$HOME/.cache/tauri/AppRun-x86_64"
+
       - name: Build and attach to draft release
         uses: tauri-apps/tauri-action@v1
         env:
@@ -250,6 +265,26 @@ jobs:
           # asset list. Read `action.yml` at the ref actually pinned above
           # before touching either.
           releaseAssetNamePattern: CC-Logins-[platform]-[arch][setup][ext]
+
+      # The AppImage catalog (appimage.github.io) and `firejail --appimage`
+      # mount an AppImage as one user and run it as another. A file inside
+      # that only its owner may read or execute then fails with "Permission
+      # denied"; tauri-cli before 2.12 wrote the AppRun launcher as 0770
+      # (tauri-apps/tauri#16155). Fail the release if that ever comes back.
+      - name: AppImage files are usable by every user
+        if: matrix.platform == 'ubuntu-22.04'
+        shell: bash
+        run: |
+          for f in src-tauri/target/release/bundle/appimage/*.AppImage; do appimage=$f; done
+          chmod +x "$appimage"
+          (cd "$RUNNER_TEMP" && "$GITHUB_WORKSPACE/$appimage" --appimage-extract > /dev/null)
+          bad=$(find "$RUNNER_TEMP/squashfs-root" -type f \( ! -perm -o+r -o \( -perm -u+x ! -perm -o+x \) \))
+          if [ -n "$bad" ]; then
+            echo "Files in the AppImage that only their owner can use:"
+            echo "$bad" | while read -r file; do ls -l "$file"; done
+            exit 1
+          fi
+          echo "Every file in the AppImage is readable, and executable where it should be, by any user."
 
   # `releaseBody` above is one string serving two audiences, and tauri-action
   # writes it to both the release page and `latest.json`. On the page the

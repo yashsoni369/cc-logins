@@ -13,6 +13,18 @@ A breaking change to any of those bumps the minor version, since major is pinned
 
 Nothing yet.
 
+## [0.2.6] - 2026-10-06
+
+### Fixed
+
+- The Linux AppImage would not start for a user other than the one who mounted it, failing with
+  "Permission denied". That is how `firejail --appimage` runs AppImages, and how the AppImage
+  catalog tests them. Its internal launcher, `AppRun.wrapped`, was packaged with mode `0770`
+  because of a Tauri bundler issue (tauri-apps/tauri#16155). The release build now packages it
+  as `0755`, and a release fails if any file in the AppImage is usable only by its owner.
+- GitHub now recognises the license as MIT. `LICENSE` holds only the MIT text, and the notice for
+  third-party code moved to `NOTICE`, which the installers include.
+
 ## [0.2.5] - 2026-08-29
 
 ### Fixed
@@ -237,7 +249,8 @@ Nothing yet.
   otherwise.
 - Builds are unsigned. See [SECURITY.md](SECURITY.md).
 
-[Unreleased]: https://github.com/yashsoni369/cc-logins/compare/v0.2.5...HEAD
+[Unreleased]: https://github.com/yashsoni369/cc-logins/compare/v0.2.6...HEAD
+[0.2.6]: https://github.com/yashsoni369/cc-logins/compare/v0.2.5...v0.2.6
 [0.2.5]: https://github.com/yashsoni369/cc-logins/compare/v0.2.4...v0.2.5
 [0.2.4]: https://github.com/yashsoni369/cc-logins/compare/v0.2.3...v0.2.4
 [0.2.3]: https://github.com/yashsoni369/cc-logins/compare/v0.2.2...v0.2.3
