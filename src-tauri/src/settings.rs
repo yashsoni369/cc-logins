@@ -117,6 +117,34 @@ impl<'de> Deserialize<'de> for ClockFormat {
     }
 }
 
+/// Whether quota figures read as what is used or what is left.
+///
+/// Purely presentational: thresholds, strategies and history always work in
+/// utilisation. Only the numbers shown to the user (windows and the tray
+/// menu) flip.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum DisplayMode {
+    /// "72%" means 72% of the window is spent — the API's own framing.
+    #[default]
+    Used,
+    /// "28% left" — headroom, for people who think in what remains.
+    Left,
+}
+
+impl<'de> Deserialize<'de> for DisplayMode {
+    /// Tolerant, for the same reason as [`Theme`]: an unrecognised value in a
+    /// settings file must cost one field, never the whole file.
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        let raw = String::deserialize(d)?;
+        Ok(match raw.trim().to_ascii_lowercase().as_str() {
+            "used" | "consumed" | "utilisation" | "utilization" => Self::Used,
+            "left" | "remaining" | "headroom" => Self::Left,
+            _ => Self::default(),
+        })
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
 pub struct Settings {
@@ -168,6 +196,9 @@ pub struct Settings {
     /// 12- or 24-hour clocks, so every view agrees on how a time reads.
     pub clock_format: ClockFormat,
 
+    /// Show quota as used or as left.
+    pub display_mode: DisplayMode,
+
     /// Days of raw history kept before downsampling to daily rollups.
     pub history_retention_days: i64,
 
@@ -199,6 +230,7 @@ impl Default for Settings {
             auto_check_updates: true,
             theme: Theme::default(),
             clock_format: ClockFormat::default(),
+            display_mode: DisplayMode::default(),
             history_retention_days: 14,
             claude_binary_path: None,
         }
@@ -260,6 +292,7 @@ pub struct SettingsPatch {
     pub auto_check_updates: Option<bool>,
     pub theme: Option<Theme>,
     pub clock_format: Option<ClockFormat>,
+    pub display_mode: Option<DisplayMode>,
     pub history_retention_days: Option<i64>,
     #[serde(default, deserialize_with = "deserialize_present_nullable")]
     pub claude_binary_path: Option<Option<String>>,
@@ -456,6 +489,9 @@ fn apply_patch(settings: &mut Settings, patch: SettingsPatch) {
     }
     if let Some(value) = patch.clock_format {
         settings.clock_format = value;
+    }
+    if let Some(value) = patch.display_mode {
+        settings.display_mode = value;
     }
     if let Some(value) = patch.history_retention_days {
         settings.history_retention_days = value;
@@ -738,6 +774,70 @@ mod tests {
             .unwrap();
             assert_eq!(load(dir.path()).clock_format, expected, "spelling {raw:?}");
         }
+    }
+
+    #[test]
+    fn display_mode_defaults_to_used() {
+        assert_eq!(Settings::default().display_mode, DisplayMode::Used);
+    }
+
+    #[test]
+    fn display_mode_round_trips_on_the_wire_as_used_and_left() {
+        // The frontend switches on these exact strings.
+        for (value, wire) in [(DisplayMode::Used, "used"), (DisplayMode::Left, "left")] {
+            let settings = Settings {
+                display_mode: value,
+                ..Settings::default()
+            };
+            let json = serde_json::to_value(&settings).unwrap();
+
+            assert_eq!(json["displayMode"], wire);
+            assert_eq!(
+                serde_json::from_value::<Settings>(json)
+                    .unwrap()
+                    .display_mode,
+                value
+            );
+        }
+    }
+
+    #[test]
+    fn an_unrecognised_display_mode_costs_one_field_not_the_file() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            settings_path(dir.path()),
+            r#"{"threshold": 63, "displayMode": "sideways"}"#,
+        )
+        .unwrap();
+
+        let loaded = load(dir.path());
+        assert_eq!(loaded.display_mode, DisplayMode::default());
+        assert_eq!(loaded.threshold, 63, "the rest of the file must survive");
+    }
+
+    #[test]
+    fn the_alternate_spellings_of_a_display_mode_are_understood() {
+        for (raw, expected) in [
+            ("remaining", DisplayMode::Left),
+            ("headroom", DisplayMode::Left),
+            (" LEFT ", DisplayMode::Left),
+            ("consumed", DisplayMode::Used),
+        ] {
+            let parsed: DisplayMode = serde_json::from_value(serde_json::json!(raw)).unwrap();
+            assert_eq!(parsed, expected, "spelling {raw:?}");
+        }
+    }
+
+    #[test]
+    fn settings_store_patch_applies_a_display_mode() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = SettingsStore::new(dir.path().to_path_buf(), fixed_now());
+
+        let patch: SettingsPatch = serde_json::from_str(r#"{"displayMode":"left"}"#).unwrap();
+        let result = store.update(0, patch, fixed_now()).unwrap();
+
+        assert_eq!(result.settings.display_mode, DisplayMode::Left);
+        assert_eq!(load(dir.path()).display_mode, DisplayMode::Left);
     }
 
     #[test]

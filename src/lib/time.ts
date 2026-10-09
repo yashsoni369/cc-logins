@@ -150,3 +150,42 @@ export function useNow(intervalMs = 30_000): number {
   useEffect(() => subscribe(intervalMs, setNow), [intervalMs]);
   return now;
 }
+
+/**
+ * Like `formatClock`, but a weekday within the coming week — `"Thu 11:20"`
+ * rather than `"Oct 2 11:20"` — because a day name is what people plan by.
+ * Further out it falls back to `formatClock`'s month-and-day shape.
+ */
+export function formatDayClock(
+  iso: string | undefined,
+  fmt: ClockFormat,
+  now = Date.now(),
+  locale?: string,
+): string | null {
+  const ms = parse(iso);
+  if (ms === null) return null;
+  const at = new Date(ms);
+  const time = new Intl.DateTimeFormat(locale, timeOptions(fmt)).format(at);
+  if (sameLocalDay(at, new Date(now))) return time;
+  if (ms > now && ms - now < 6 * 86_400_000) {
+    const day = new Intl.DateTimeFormat(locale, { weekday: "short" }).format(at);
+    return `${day} ${time}`;
+  }
+  return formatClock(iso, fmt, now, locale);
+}
+
+/**
+ * `"in 2h 6m · 6:30 PM"` — the countdown people act on plus the clock they
+ * plan by, for places with room for both. Null when the instant is unknown.
+ */
+export function formatWhen(
+  iso: string | undefined,
+  fmt: ClockFormat,
+  now = Date.now(),
+  locale?: string,
+): string | null {
+  const countdown = formatCountdown(iso, now);
+  const clock = formatDayClock(iso, fmt, now, locale);
+  if (countdown === null || clock === null) return null;
+  return countdown === "now" ? `now · ${clock}` : `in ${countdown} · ${clock}`;
+}

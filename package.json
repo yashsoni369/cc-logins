@@ -1,7 +1,7 @@
 {
   "name": "cc-logins",
   "private": true,
-  "version": "0.2.6",
+  "version": "0.3.0",
   "description": "Quota visibility and account switching for Claude Code",
   "type": "module",
   "packageManager": "pnpm@10.14.0",
@@ -43,6 +43,7 @@
     "@tauri-apps/plugin-opener": "^2",
     "@tauri-apps/plugin-process": "^2.3.1",
     "@tauri-apps/plugin-updater": "^2.10.1",
+    "cmdk": "^1.1.1",
     "react": "^19.1.0",
     "react-dom": "^19.1.0",
     "zustand": "^5.0.15"

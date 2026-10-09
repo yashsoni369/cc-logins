@@ -58,7 +58,7 @@ export default function LoadBalance({ rows }: LoadBalanceProps) {
   return (
     <section className="band">
       <div className="band-head">
-        <h2>Load balance</h2>
+        <h2>Usage by account</h2>
         <span className="sub">daily peak per account, last {days} days</span>
       </div>
 

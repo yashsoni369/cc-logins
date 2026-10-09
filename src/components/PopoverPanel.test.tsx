@@ -9,6 +9,7 @@ const mocks = vi.hoisted(() => ({
   refresh: vi.fn().mockResolvedValue(undefined),
   snooze: vi.fn().mockResolvedValue(undefined),
   resume: vi.fn().mockResolvedValue(undefined),
+  update: vi.fn().mockResolvedValue(undefined),
 }));
 
 vi.mock("@/lib/useDaemonStatus", () => ({
@@ -30,7 +31,7 @@ vi.mock("@/lib/useSettings", () => ({
     live: true,
     loading: false,
     error: null,
-    update: vi.fn(),
+    update: mocks.update,
     snooze: mocks.snooze,
     resume: mocks.resume,
   }),
@@ -377,5 +378,41 @@ describe("PopoverPanel long names", () => {
     render(<PopoverPanel />);
 
     expect(screen.getByTitle("not-an-email-address-just-a-long-token")).toBeInTheDocument();
+  });
+});
+
+describe("PopoverPanel auto-switch control", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    fixture.environments[0]!.accounts[1]!.usageStatus = "ok";
+  });
+
+  it("reads its value from the daemon phase and turns auto-switch off", () => {
+    mocks.status = status({ kind: "monitoring" });
+    render(<PopoverPanel />);
+    const group = within(screen.getByRole("radiogroup", { name: "Auto-switch" }));
+    expect(group.getByRole("radio", { name: "On", checked: true })).toBeInTheDocument();
+    fireEvent.click(group.getByRole("radio", { name: "Off" }));
+    expect(mocks.update).toHaveBeenCalledWith({ autoSwitchEnabled: false });
+  });
+
+  it("holds for an hour through the same snooze the warning banner uses", () => {
+    mocks.status = status({ kind: "monitoring" });
+    render(<PopoverPanel />);
+    fireEvent.click(within(screen.getByRole("radiogroup", { name: "Auto-switch" })).getByRole("radio", { name: "Hold 1h" }));
+    expect(mocks.snooze).toHaveBeenCalledWith(3600);
+  });
+
+  it("turns auto-switch on from off", () => {
+    mocks.status = status({ kind: "disabled" });
+    render(<PopoverPanel />);
+    fireEvent.click(within(screen.getByRole("radiogroup", { name: "Auto-switch" })).getByRole("radio", { name: "On" }));
+    expect(mocks.update).toHaveBeenCalledWith({ autoSwitchEnabled: true });
+  });
+
+  it("marks the account auto-switch would pick", () => {
+    mocks.status = status({ kind: "monitoring" });
+    render(<PopoverPanel />);
+    expect(within(screen.getByRole("button", { name: /Next/ })).getByText("best")).toBeInTheDocument();
   });
 });

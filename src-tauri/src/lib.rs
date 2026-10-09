@@ -34,6 +34,7 @@ pub mod switch_journal;
 pub mod switch_transaction;
 pub mod switcher;
 pub mod tray;
+pub mod tray_menu;
 pub mod usage_cache;
 pub mod wsl;
 
@@ -41,7 +42,6 @@ pub mod wsl;
 mod test_support;
 
 use tauri::{
-    menu::{Menu, MenuItem, PredefinedMenuItem},
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
     Manager, WindowEvent,
 };
@@ -155,6 +155,18 @@ fn popover_position(
     Some(tauri::PhysicalPosition::new(x, y))
 }
 
+/// Startup backstop for `switcher::remove_account`: delete account backups
+/// that no registry slot references, so a recycled slot number never inherits
+/// another account's files. Best-effort and logged; never touches the live
+/// Claude Code login.
+fn sweep_orphaned_backups() {
+    match switcher::sweep_orphaned_slot_files() {
+        Ok(0) => {}
+        Ok(found) => log::info!("swept {found} orphaned account backup file(s)"),
+        Err(error) => log::warn!("orphaned account backup sweep skipped: {error}"),
+    }
+}
+
 /// Where the log file lives. Returned so the UI and bug reports can point at it.
 pub fn log_path() -> std::path::PathBuf {
     dirs::data_dir()
@@ -258,6 +270,14 @@ pub fn run() {
         }
     }
 
+    // A 0.4 test build moved logins into per-account folders and deleted the
+    // saved copies this version swaps from. Save them back, once.
+    match switcher::import_profile_logins() {
+        Ok(0) => {}
+        Ok(count) => log::info!("imported {count} login(s) from 0.4 account folders"),
+        Err(error) => log::warn!("could not import logins from 0.4 account folders: {error}"),
+    }
+
     // Backstop for isolated-login temp dirs. They clean up on Drop, but an
     // abort runs no destructors, and one of those briefly holds a real
     // credential. Only sweeps dirs older than an hour so a login running in
@@ -290,6 +310,7 @@ pub fn run() {
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_process::init())
         .manage(poller::TrayCache::default())
+        .manage(tray_menu::TrayMenuState::default())
         // Managed here, not in `setup`: a config-declared window's webview can
         // invoke a command before `setup` has run.
         .manage(app_state)
@@ -306,6 +327,10 @@ pub fn run() {
             commands::relogin_account,
             commands::add_token,
             commands::set_account_enabled,
+            commands::set_account_alias,
+            commands::remove_account,
+            commands::reorder_accounts,
+            commands::wake_environment,
             commands::history_summary,
             commands::history_series,
             commands::history_samples,
@@ -351,6 +376,10 @@ pub fn run() {
                 });
             }
 
+            // Off the UI thread: it waits on the vault lock. After the
+            // single-instance check, so a rejected second launch never sweeps.
+            tauri::async_runtime::spawn_blocking(sweep_orphaned_backups);
+
             // A hard process termination leaves Claude Code's proper-lockfile
             // directories behind. Claude Code deliberately protects a fresh
             // credential lock for 60 seconds, so the synchronous startup
@@ -384,26 +413,26 @@ pub fn run() {
                 });
             }
 
-            let quota_i = MenuItem::with_id(app, "quota", "Show quota panel", true, None::<&str>)?;
-            let open_i = MenuItem::with_id(app, "open", "Open dashboard", true, None::<&str>)?;
-            let switch_i = MenuItem::with_id(app, "switch", "Switch account…", true, None::<&str>)?;
-            let quit_i = MenuItem::with_id(app, "quit", "Quit", true, None::<&str>)?;
-            let sep = PredefinedMenuItem::separator(app)?;
-            let menu = Menu::with_items(app, &[&quota_i, &open_i, &switch_i, &sep, &quit_i])?;
+            // Fixed actions only until the first snapshot is published; the
+            // account rows are added by `tray_menu::schedule_update`.
+            let (menu, _) = tray_menu::build_menu(app.handle(), &[])?;
 
             // The tray is built in Rust rather than declared in tauri.conf.json;
             // declaring it in both produces two tray icons.
-            TrayIconBuilder::with_id("main")
+            TrayIconBuilder::with_id(tray_menu::TRAY_ID)
                 .menu(&menu)
                 // Left click belongs to the popover, not the context menu.
                 .show_menu_on_left_click(false)
                 .icon_as_template(cfg!(target_os = "macos"))
+                // Runs on the main thread: every arm only shows a window or
+                // spawns work, never waits on it.
                 .on_menu_event(|app, event| match event.id.as_ref() {
-                    "quota" => toggle_popover_centered(app),
-                    "open" => reveal(app),
-                    "switch" => reveal(app),
-                    "quit" => app.exit(0),
-                    _ => {}
+                    // Also the only way to the popover on Linux, where
+                    // AppIndicator delivers no tray click events.
+                    tray_menu::ids::QUOTA => toggle_popover_centered(app),
+                    tray_menu::ids::OPEN => reveal(app),
+                    tray_menu::ids::QUIT => app.exit(0),
+                    other => tray_menu::on_account_click(app, other),
                 })
                 .on_tray_icon_event(|icon, event| {
                     // Left click opens the popover, not the dashboard: the

@@ -190,31 +190,6 @@ describe("DashboardScreen", () => {
     expect(screen.getByRole("button", { name: /Beta/ })).toBeInTheDocument();
   });
 
-  // Regressions found by looking at the built screen, not by reading the code.
-  it("leads with pooled headroom when the runway cannot be projected", async () => {
-    // accountBurn returns null on a flat or falling slope — "not burning right
-    // now". A giant "unknown" as the hero wastes the most prominent element on
-    // the screen, so the measured figure takes the lead.
-    mocks.historySamples.mockResolvedValue({ data: [sample(60, 40), sample(5, 40)], source: "live" });
-    renderDash();
-
-    expect(await screen.findByText("pooled headroom")).toBeInTheDocument();
-    expect(screen.getByText(/runway unknown/)).toBeInTheDocument();
-    expect(screen.queryByText("pooled runway")).not.toBeInTheDocument();
-  });
-
-  it("shows the runway as the hero once one can be projected", async () => {
-    // A rising slope on the active account: 20% -> 62% over two hours.
-    mocks.historySamples.mockResolvedValue({
-      data: [sample(120, 20), sample(60, 40), sample(5, 62)],
-      source: "live",
-    });
-    renderDash();
-
-    expect(await screen.findByText("pooled runway")).toBeInTheDocument();
-    expect(screen.getByText(/headroom pooled/)).toBeInTheDocument();
-  });
-
   it("says it is still reading rather than reporting an empty history", async () => {
     let release: (v: { data: Sample[]; source: string }) => void = () => {};
     mocks.historySamples.mockReturnValue(new Promise((r) => (release = r)));
@@ -243,69 +218,33 @@ describe("DashboardScreen", () => {
     await waitFor(() => expect(span()).toBe(before));
   });
 
-  it("separates the forward-looking resets from the backward-looking chart", async () => {
-    renderDash();
-    // Flush against the rotation chart they read as one timeline running the
-    // wrong way, so the resets get their own titled band.
-    expect(await screen.findByText("Next resets")).toBeInTheDocument();
-  });
-
-  /*
-   * The poller's first fetch can take over a minute. Until it lands, every
-   * account has no usage — which is indistinguishable from total failure
-   * unless the screen says which one it is.
-   */
-  describe("before the first reading", () => {
-    const blank: Snapshot = {
-      ...snapshot,
-      environments: [
-        {
-          ...snapshot.environments[0]!,
-          accounts: snapshot.environments[0]!.accounts.map((a) => ({ ...a, usage: undefined })),
-        },
-      ],
-    };
-
-    it("never reports zero headroom for usage it could not read", async () => {
-      const { container } = render(
-        <DashboardScreen snapshot={blank} settingsThreshold={85} degraded={false} />,
-      );
-      await screen.findByText("waiting for the first reading");
-      // 0% asserts "no capacity left". The truth is "we do not know". The
-      // headline figure specifically — the qualifier pill also reads "unknown".
-      expect(container.querySelector(".cap-big")).toHaveTextContent("unknown");
-      expect(container.querySelector(".cap-big")).not.toHaveTextContent("0%");
-    });
-
-    it("says it is waiting, not that everything failed", async () => {
-      render(<DashboardScreen snapshot={blank} settingsThreshold={85} degraded={false} />);
-      expect(await screen.findByText("waiting for the first reading")).toBeInTheDocument();
-    });
-
-    it("but does say so when a refresh actually failed", async () => {
-      render(<DashboardScreen snapshot={blank} settingsThreshold={85} degraded />);
-      expect(await screen.findByText(/no usage could be read/)).toBeInTheDocument();
-    });
-  });
-
   it("tells the truth about an empty fleet instead of drawing empty axes", () => {
     renderDash({ environments: [] });
     expect(screen.getByText("No accounts yet")).toBeInTheDocument();
     expect(screen.queryByRole("group", { name: "Time range" })).not.toBeInTheDocument();
   });
 
-  it("names a held-out account as held out and leaves it out of pooled capacity", async () => {
+  it("names a held-out account as held out on its row", async () => {
     const held: Snapshot = JSON.parse(JSON.stringify(snapshot));
     held.environments[0]!.accounts[1]!.usageStatus = "disabled";
     render(<DashboardScreen snapshot={held} settingsThreshold={85} degraded={false} />);
 
-    // Named on its own row...
     expect(await screen.findByRole("button", { name: /Beta.*held out/ })).toBeInTheDocument();
-    // ...and named beneath the capacity bar rather than given a share of it.
-    // Drawn proportionally, an untouched held-out account owns the most
-    // headroom in the fleet and became the bar's widest block — advertising
-    // capacity the switcher cannot spend.
-    expect(screen.getByText(/Not in rotation/)).toBeInTheDocument();
-    expect(screen.getByText(/\(held out\)/)).toBeInTheDocument();
+  });
+
+  it("is titled History and leaves live capacity to Home", async () => {
+    renderDash();
+    expect(await screen.findByRole("heading", { name: "History" })).toBeInTheDocument();
+    // Pooled runway and the reset timeline moved to Home; nothing here restates them.
+    expect(screen.queryByText(/pooled runway|pooled headroom/)).not.toBeInTheDocument();
+    expect(screen.queryByText("Next resets")).not.toBeInTheDocument();
+  });
+
+  it("opens the account it was sent to from Home", async () => {
+    render(
+      <DashboardScreen snapshot={snapshot} settingsThreshold={85} degraded={false} focus={{ accountNumber: 2, nonce: 1 }} />,
+    );
+    await waitFor(() => expect(screen.getByRole("button", { name: /Beta/ })).toHaveAttribute("aria-expanded", "true"));
+    expect(screen.getByRole("button", { name: /Alpha/ })).toHaveAttribute("aria-expanded", "false");
   });
 });

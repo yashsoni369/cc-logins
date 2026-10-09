@@ -258,6 +258,22 @@ pub enum SwitchError {
         "account {0} is the active account; switch to a different account before disabling it"
     )]
     CannotDisableActive(String),
+
+    #[error("account {0} is the active account; switch to another account before removing it")]
+    CannotRemoveActive(String),
+
+    /// The account is already gone from the registry, so nothing points at
+    /// the files that were left behind; the startup sweep
+    /// ([`sweep_orphaned_slot_files`]) retries them.
+    #[error(
+        "account {0} was removed, but some of its stored files could not be deleted ({1}); they will be cleaned up the next time CC Logins starts"
+    )]
+    RemovedWithLeftovers(String, String),
+
+    /// A request the backend refuses on its face (too long, not a
+    /// permutation, not a WSL environment). The text is shown to the user.
+    #[error("{0}")]
+    InvalidInput(String),
 }
 
 // ---------------------------------------------------------------------------
@@ -1756,9 +1772,10 @@ fn refuse_pending_recovery() -> Result<(), SwitchError> {
 ///
 /// Deliberately *not* upstream's `max(existing) + 1` (`_get_next_account_number`):
 /// reusing the lowest free slot means a freed slot is recycled instead of
-/// leaving a permanent gap, which matters more here since removal isn't
-/// (yet) exposed by this port and slots are a comparatively scarcer, more
-/// visible resource in the GUI's account list than in the CLI.
+/// leaving a permanent gap, since slots are a comparatively scarcer, more
+/// visible resource in the GUI's account list than in the CLI. Recycling is
+/// why [`remove_account`] and [`sweep_orphaned_slot_files`] must leave no
+/// backup behind for a freed number.
 fn next_free_slot(data: &Map<String, Value>) -> u32 {
     let used: std::collections::HashSet<u32> = data
         .get("accounts")
@@ -2755,6 +2772,364 @@ fn set_account_enabled_with_timeout(
 }
 
 // ---------------------------------------------------------------------------
+// Account management: alias / remove / reorder.
+//
+// Registry-only edits follow `set_account_enabled_with_timeout` exactly: vault
+// lock, recovery gate, read, mutate, stamp `lastUpdated`, atomic write.
+// ---------------------------------------------------------------------------
+
+/// Longest alias accepted, in characters. Long enough for a real name, short
+/// enough to fit a tray menu row.
+pub const MAX_ALIAS_CHARS: usize = 40;
+
+/// Set or clear the display alias of `number`.
+///
+/// Whitespace is trimmed; `None` or an empty result removes the alias so the
+/// account falls back to its (masked) email.
+pub fn set_account_alias(number: u32, alias: Option<&str>) -> Result<(), SwitchError> {
+    set_account_alias_with_timeout(number, alias, crate::locking::DEFAULT_TIMEOUT)
+}
+
+fn set_account_alias_with_timeout(
+    number: u32,
+    alias: Option<&str>,
+    timeout: Duration,
+) -> Result<(), SwitchError> {
+    // Validated before the lock: a refusal must cost nothing.
+    let alias = alias.map(str::trim).filter(|a| !a.is_empty());
+    if alias.is_some_and(|a| a.chars().count() > MAX_ALIAS_CHARS) {
+        return Err(SwitchError::InvalidInput(format!(
+            "an alias can be at most {MAX_ALIAS_CHARS} characters"
+        )));
+    }
+
+    let _lock = crate::locking::acquire_or_err(vault_lock_path(), timeout)?;
+    refuse_pending_recovery()?;
+
+    let mut data = read_sequence_data().ok_or(SwitchError::NoAccountsManaged)?;
+    let num = number.to_string();
+
+    let Some(record) = data
+        .get_mut("accounts")
+        .and_then(Value::as_object_mut)
+        .and_then(|accounts| accounts.get_mut(&num))
+        .and_then(Value::as_object_mut)
+    else {
+        return Err(SwitchError::UnknownAccount(num));
+    };
+    match alias {
+        Some(a) => {
+            record.insert("alias".to_string(), Value::String(a.to_string()));
+        }
+        None => {
+            record.remove("alias");
+        }
+    }
+    data.insert(
+        "lastUpdated".to_string(),
+        Value::String(chrono::Utc::now().to_rfc3339()),
+    );
+    write_sequence_data(&data)?;
+
+    Ok(())
+}
+
+/// Whether a `sequence` / `activeAccountNumber` entry names `number`. Both
+/// numbers and numeric strings are accepted, matching [`accounts_from_sequence`].
+fn registry_entry_is(value: &Value, number: u32) -> bool {
+    value.as_u64() == Some(u64::from(number))
+        || value.as_str().and_then(|s| s.trim().parse::<u32>().ok()) == Some(number)
+}
+
+/// The registered email of slot `num`, or `None` when there is no such slot.
+fn registered_email(data: &Map<String, Value>, num: &str) -> Option<String> {
+    let record = data.get("accounts")?.as_object()?.get(num)?;
+    let email = record
+        .get("email")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    Some(email.to_string())
+}
+
+/// Stop managing `number` and delete everything stored for it.
+///
+/// Refuses the live account ([`SwitchError::CannotRemoveActive`]): removing
+/// it would leave Claude Code running on a login nothing manages.
+///
+/// Order is the safety property. The registry is durably rewritten without
+/// the slot **first**, so there is never a registry entry pointing at deleted
+/// files. Only then are the slot's credential backup (`.enc`, `.prev`, macOS
+/// Keychain) and config backup deleted. If that second step fails the account
+/// is still removed and [`SwitchError::RemovedWithLeftovers`] says so; the
+/// files are unreferenced by then and [`sweep_orphaned_slot_files`] deletes
+/// them at the next launch, before [`next_free_slot`] can hand the number to
+/// a new account.
+///
+/// Usage history is keyed by `Account::stable_key`, not the slot, and is
+/// left alone.
+pub fn remove_account(number: u32) -> Result<(), SwitchError> {
+    remove_account_with_timeout(number, crate::locking::DEFAULT_TIMEOUT)
+}
+
+fn remove_account_with_timeout(number: u32, timeout: Duration) -> Result<(), SwitchError> {
+    let _lock = crate::locking::acquire_or_err(vault_lock_path(), timeout)?;
+    refuse_pending_recovery()?;
+
+    let mut data = read_sequence_data().ok_or(SwitchError::NoAccountsManaged)?;
+    let num = number.to_string();
+
+    let Some(email) = registered_email(&data, &num) else {
+        return Err(SwitchError::UnknownAccount(num));
+    };
+
+    if current_account_number(&data).as_deref() == Some(num.as_str()) {
+        return Err(SwitchError::CannotRemoveActive(num));
+    }
+
+    // 1. The registry, durably, so nothing references the files below.
+    if let Some(accounts) = data.get_mut("accounts").and_then(Value::as_object_mut) {
+        accounts.remove(&num);
+    }
+    if let Some(sequence) = data.get_mut("sequence").and_then(Value::as_array_mut) {
+        sequence.retain(|entry| !registry_entry_is(entry, number));
+    }
+    if data
+        .get("activeAccountNumber")
+        .is_some_and(|entry| registry_entry_is(entry, number))
+    {
+        data.remove("activeAccountNumber");
+    }
+    data.insert(
+        "lastUpdated".to_string(),
+        Value::String(chrono::Utc::now().to_rfc3339()),
+    );
+    write_sequence_data(&data)?;
+
+    // 2. The files. Every step is attempted and every failure reported.
+    let mut failures: Vec<String> = Vec::new();
+    let mut store = CredentialStore::new(GuiStoreHost);
+    if let Err(e) = store.delete_account_credentials_strict(&num, &email) {
+        failures.push(e.to_string());
+    }
+    if let Err(e) = remove_file_if_present(&account_config_path(&num, &email)) {
+        failures.push(format!("config backup: {e}"));
+    }
+    if failures.is_empty() {
+        Ok(())
+    } else {
+        let detail = failures.join("; ");
+        Err(SwitchError::RemovedWithLeftovers(num, detail))
+    }
+}
+
+/// `remove_file` that treats an already-absent file as success.
+fn remove_file_if_present(path: &Path) -> std::io::Result<()> {
+    match std::fs::remove_file(path) {
+        Err(e) if e.kind() != std::io::ErrorKind::NotFound => Err(e),
+        _ => Ok(()),
+    }
+}
+
+/// Replace the rotation order with `order`.
+///
+/// `order` must name every managed slot exactly once; anything else is
+/// [`SwitchError::InvalidInput`] and changes nothing. `sequence` is both the
+/// display order and the order `Strategy::NextAvailable` walks, so this is a
+/// real behavioural change, not a view preference.
+pub fn reorder_accounts(order: &[u32]) -> Result<(), SwitchError> {
+    reorder_accounts_with_timeout(order, crate::locking::DEFAULT_TIMEOUT)
+}
+
+fn reorder_accounts_with_timeout(order: &[u32], timeout: Duration) -> Result<(), SwitchError> {
+    let _lock = crate::locking::acquire_or_err(vault_lock_path(), timeout)?;
+    refuse_pending_recovery()?;
+
+    let mut data = read_sequence_data().ok_or(SwitchError::NoAccountsManaged)?;
+
+    let mut existing: Vec<u32> = data
+        .get("accounts")
+        .and_then(Value::as_object)
+        .map(|accounts| {
+            accounts
+                .keys()
+                .filter_map(|k| k.parse::<u32>().ok())
+                .collect()
+        })
+        .unwrap_or_default();
+    existing.sort_unstable();
+    let mut requested = order.to_vec();
+    requested.sort_unstable();
+    if requested != existing {
+        return Err(SwitchError::InvalidInput(
+            "the new order must list every account exactly once".to_string(),
+        ));
+    }
+
+    data.insert(
+        "sequence".to_string(),
+        Value::Array(order.iter().copied().map(Value::from).collect()),
+    );
+    data.insert(
+        "lastUpdated".to_string(),
+        Value::String(chrono::Utc::now().to_rfc3339()),
+    );
+    write_sequence_data(&data)?;
+
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Orphaned slot files.
+//
+// `next_free_slot` recycles numbers, so a credential or config backup left
+// behind by a removal that could not finish (or by a crash between an add's
+// file write and its registry write) would otherwise be picked up by the next
+// account to land on that number.
+// ---------------------------------------------------------------------------
+
+/// Which per-slot backup a file is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SlotFileKind {
+    /// `credentials/.creds-{num}-{email}.enc` or its `.enc.prev`.
+    Credentials,
+    /// `configs/.claude-config-{num}-{email}.json`.
+    Config,
+}
+
+impl SlotFileKind {
+    fn dir(self, root: &Path) -> PathBuf {
+        match self {
+            Self::Credentials => root.join("credentials"),
+            Self::Config => root.join("configs"),
+        }
+    }
+
+    fn prefix(self) -> &'static str {
+        match self {
+            Self::Credentials => ".creds-",
+            Self::Config => ".claude-config-",
+        }
+    }
+
+    /// Longest first: `.enc.prev` must win over `.enc`.
+    fn suffixes(self) -> &'static [&'static str] {
+        match self {
+            Self::Credentials => &[".enc.prev", ".enc"],
+            Self::Config => &[".json"],
+        }
+    }
+
+    /// `(slot, email)` from a file name of this kind. `None` for anything
+    /// else, including the legacy `None` slot and in-flight `.stage` files.
+    fn parse(self, name: &str) -> Option<(u32, String)> {
+        let rest = name.strip_prefix(self.prefix())?;
+        let rest = self
+            .suffixes()
+            .iter()
+            .find_map(|suffix| rest.strip_suffix(*suffix))?;
+        let (number, email) = rest.split_once('-')?;
+        if email.is_empty() {
+            return None;
+        }
+        Some((number.parse().ok()?, email.to_string()))
+    }
+}
+
+/// A per-slot backup file whose slot number is not in the registry.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct OrphanedSlotFile {
+    kind: SlotFileKind,
+    number: u32,
+    email: String,
+    path: PathBuf,
+}
+
+/// Every slot backup under `root` whose number is not an `accounts` key in
+/// `data`. Reads directory listings only; deletes nothing.
+///
+/// Only `root/credentials` and `root/configs` are looked at — never the live
+/// `~/.claude.json` or Claude Code's own credential store. A registry without
+/// an `accounts` object yields nothing rather than "everything is orphaned".
+fn orphaned_slot_files(root: &Path, data: &Map<String, Value>) -> Vec<OrphanedSlotFile> {
+    let Some(accounts) = data.get("accounts").and_then(Value::as_object) else {
+        return Vec::new();
+    };
+    let registered: std::collections::HashSet<u32> = accounts
+        .keys()
+        .filter_map(|k| k.parse::<u32>().ok())
+        .collect();
+
+    let mut out = Vec::new();
+    for kind in [SlotFileKind::Credentials, SlotFileKind::Config] {
+        let Ok(entries) = std::fs::read_dir(kind.dir(root)) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let name = entry.file_name().to_string_lossy().into_owned();
+            let Some((number, email)) = kind.parse(&name) else {
+                continue;
+            };
+            if !registered.contains(&number) {
+                out.push(OrphanedSlotFile {
+                    kind,
+                    number,
+                    email,
+                    path: entry.path(),
+                });
+            }
+        }
+    }
+    out
+}
+
+/// Delete one orphan through the same helpers a removal uses, so a
+/// credential orphan also loses its `.prev` and (macOS) Keychain copy.
+fn delete_orphan(
+    store: &mut CredentialStore<GuiStoreHost>,
+    orphan: &OrphanedSlotFile,
+) -> Result<(), SwitchError> {
+    if orphan.kind == SlotFileKind::Config {
+        remove_file_if_present(&orphan.path)?;
+    } else {
+        let number = orphan.number.to_string();
+        store.delete_account_credentials_strict(&number, &orphan.email)?;
+    }
+    Ok(())
+}
+
+/// Delete slot backups no registry slot references. Best-effort, run once at
+/// startup; returns how many orphaned files were found.
+///
+/// Does nothing at all when the registry is missing or unreadable — "no
+/// registry" must never be read as "every file is an orphan" — or when a
+/// switch recovery is pending, since recovery may still need those files.
+pub fn sweep_orphaned_slot_files() -> Result<usize, SwitchError> {
+    sweep_orphaned_slot_files_with_timeout(crate::locking::DEFAULT_TIMEOUT)
+}
+
+fn sweep_orphaned_slot_files_with_timeout(timeout: Duration) -> Result<usize, SwitchError> {
+    let _lock = crate::locking::acquire_or_err(vault_lock_path(), timeout)?;
+    refuse_pending_recovery()?;
+
+    let Some(data) = read_sequence_data() else {
+        return Ok(0);
+    };
+    let orphans = orphaned_slot_files(&paths::backup_root(), &data);
+
+    let mut store = CredentialStore::new(GuiStoreHost);
+    for orphan in &orphans {
+        match delete_orphan(&mut store, orphan) {
+            Ok(()) => log::info!("removed orphaned backup {}", orphan.path.display()),
+            Err(e) => log::warn!(
+                "could not remove orphaned backup {}: {e}",
+                orphan.path.display()
+            ),
+        }
+    }
+    Ok(orphans.len())
+}
+
+// ---------------------------------------------------------------------------
 // Target selection.
 // ---------------------------------------------------------------------------
 
@@ -2887,6 +3262,286 @@ fn seven_day_reset_ts(account: &Account) -> Option<f64> {
         Some(ts)
     } else {
         None
+    }
+}
+
+// ---------------------------------------------------------------------------
+// One-time import of logins a 0.4 test build moved into profile folders.
+// ---------------------------------------------------------------------------
+
+/// The macOS Keychain service Claude Code uses for a `CLAUDE_CONFIG_DIR`:
+/// the plain service plus the first 8 hex of sha256 of the exact path.
+#[cfg_attr(not(all(target_os = "macos", not(test))), allow(dead_code))]
+fn profile_keychain_service(config_dir: &str) -> String {
+    use sha2::{Digest, Sha256};
+    let digest = Sha256::digest(config_dir.as_bytes());
+    format!(
+        "{}-{}",
+        crate::credentials::CLAUDE_CODE_KEYCHAIN_SERVICE,
+        &crate::hex::lower(&digest)[..8]
+    )
+}
+
+/// The login Claude Code keeps for a profile folder, or `None`.
+fn read_profile_login(config_dir: &str) -> Option<String> {
+    #[cfg(all(target_os = "macos", not(test)))]
+    {
+        let service = profile_keychain_service(config_dir);
+        if let Ok(Some(raw)) = crate::credentials::read_claude_keychain_item(&service) {
+            if !raw.trim().is_empty() {
+                return Some(raw);
+            }
+        }
+    }
+    std::fs::read_to_string(Path::new(config_dir).join(".credentials.json"))
+        .ok()
+        .filter(|raw| !raw.trim().is_empty())
+}
+
+/// Whether a folder's `oauthAccount` is this registry record's account:
+/// account UUID when both have one, else email plus organization.
+fn profile_matches_record(oauth_account: &Map<String, Value>, record: &Map<String, Value>) -> bool {
+    let text = |map: &Map<String, Value>, key: &str| {
+        map.get(key)
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string)
+    };
+    if let (Some(a), Some(b)) = (text(record, "uuid"), text(oauth_account, "accountUuid")) {
+        return a == b;
+    }
+    let same_email = match (text(record, "email"), text(oauth_account, "emailAddress")) {
+        (Some(a), Some(b)) => a.eq_ignore_ascii_case(&b),
+        _ => false,
+    };
+    same_email && text(record, "organizationUuid") == text(oauth_account, "organizationUuid")
+}
+
+/// Bring back the saved copy of every account whose login a 0.4 test build
+/// moved into its own folder (a record with a `configDir`) and whose copy
+/// that build then deleted. The folder's login is saved only after its
+/// `oauthAccount` is confirmed to be the same account; the folder itself is
+/// left as it is. A record that already has a saved copy is never touched,
+/// so this is a no-op after the first run. Returns how many were imported.
+pub fn import_profile_logins() -> Result<usize, SwitchError> {
+    import_profile_logins_with_timeout(crate::locking::DEFAULT_TIMEOUT)
+}
+
+fn import_profile_logins_with_timeout(timeout: Duration) -> Result<usize, SwitchError> {
+    let Some(data) = read_sequence_data() else {
+        return Ok(0);
+    };
+    let has_folders = data
+        .get("accounts")
+        .and_then(Value::as_object)
+        .is_some_and(|accounts| {
+            accounts
+                .values()
+                .any(|record| record.get("configDir").and_then(Value::as_str).is_some())
+        });
+    if !has_folders {
+        return Ok(0);
+    }
+
+    let _lock = crate::locking::acquire_or_err(vault_lock_path(), timeout)?;
+    refuse_pending_recovery()?;
+    let data = read_sequence_data().unwrap_or_default();
+    let Some(accounts) = data.get("accounts").and_then(Value::as_object) else {
+        return Ok(0);
+    };
+    let mut store = CredentialStore::new(GuiStoreHost);
+    let mut imported = 0;
+    for (num, record) in accounts {
+        let Some(record) = record.as_object() else {
+            continue;
+        };
+        let Some(config_dir) = record
+            .get("configDir")
+            .and_then(Value::as_str)
+            .filter(|dir| !dir.is_empty())
+        else {
+            continue;
+        };
+        let email = record
+            .get("email")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        if email.is_empty() || !store.read_account_credentials(num, email).is_empty() {
+            continue;
+        }
+        let config_text = match std::fs::read_to_string(Path::new(config_dir).join(".claude.json"))
+        {
+            Ok(text) => text,
+            Err(error) => {
+                log::warn!("import: account {num}'s folder has no readable config: {error}");
+                continue;
+            }
+        };
+        let oauth_account = serde_json::from_str::<Value>(&config_text)
+            .ok()
+            .and_then(|config| {
+                config
+                    .get("oauthAccount")
+                    .and_then(Value::as_object)
+                    .cloned()
+            });
+        let Some(oauth_account) = oauth_account else {
+            log::warn!("import: account {num}'s folder is signed out; sign in to it again");
+            continue;
+        };
+        if !profile_matches_record(&oauth_account, record) {
+            log::warn!("import: account {num}'s folder holds a different account; skipped");
+            continue;
+        }
+        let Some(login) = read_profile_login(config_dir) else {
+            log::warn!("import: account {num}'s folder has no login; sign in to it again");
+            continue;
+        };
+        if oauth::extract_access_token(&login).is_none() {
+            log::warn!("import: account {num}'s folder login is not an OAuth login; skipped");
+            continue;
+        }
+        store.write_account_credentials(num, email, &login)?;
+        let config_payload =
+            serde_json::json!({ "oauthAccount": Value::Object(oauth_account) }).to_string();
+        write_account_config(num, email, &config_payload)?;
+        log::info!("import: saved account {num}'s login from its folder");
+        imported += 1;
+    }
+    Ok(imported)
+}
+
+#[cfg(test)]
+mod profile_import_tests {
+    use super::*;
+    use crate::test_support::{env_lock, EnvGuard, StoreRootGuard};
+    use serde_json::json;
+    use tempfile::TempDir;
+
+    struct Env {
+        _guards: Vec<EnvGuard>,
+        _store: StoreRootGuard,
+        _dirs: Vec<TempDir>,
+        profiles: TempDir,
+        _lock: std::sync::MutexGuard<'static, ()>,
+    }
+
+    fn setup() -> Env {
+        let lock = env_lock();
+        let home = TempDir::new().unwrap();
+        let live = TempDir::new().unwrap();
+        let vault = TempDir::new().unwrap();
+        let home_text = home.path().to_str().unwrap().to_string();
+        let guards = vec![
+            EnvGuard::set("HOME", &home_text),
+            EnvGuard::set("USERPROFILE", &home_text),
+            EnvGuard::set("CLAUDE_CONFIG_DIR", live.path().to_str().unwrap()),
+            EnvGuard::unset("XDG_DATA_HOME"),
+            EnvGuard::unset("WSL_DISTRO_NAME"),
+        ];
+        let store = StoreRootGuard::set(vault.path().to_path_buf());
+        Env {
+            _guards: guards,
+            _store: store,
+            _dirs: vec![home, live, vault],
+            profiles: TempDir::new().unwrap(),
+            _lock: lock,
+        }
+    }
+
+    fn login(token: &str) -> String {
+        json!({"claudeAiOauth": {"accessToken": token, "refreshToken": format!("{token}-r")}})
+            .to_string()
+    }
+
+    fn folder(env: &Env, name: &str, email: &str, token: &str) -> String {
+        let dir = env.profiles.path().join(name);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join(".credentials.json"), login(token)).unwrap();
+        std::fs::write(
+            dir.join(".claude.json"),
+            json!({"oauthAccount": {"emailAddress": email, "organizationUuid": ""}}).to_string(),
+        )
+        .unwrap();
+        dir.to_str().unwrap().to_string()
+    }
+
+    fn registry(accounts: Value) {
+        let data = json!({"sequence": [1, 2, 3], "activeAccountNumber": 1, "accounts": accounts});
+        std::fs::create_dir_all(paths::backup_root()).unwrap();
+        std::fs::write(accounts_file(), data.to_string()).unwrap();
+    }
+
+    fn saved(num: &str, email: &str) -> String {
+        CredentialStore::new(GuiStoreHost).read_account_credentials(num, email)
+    }
+
+    #[test]
+    fn a_matching_folder_login_is_saved_once() {
+        let env = setup();
+        let b = folder(&env, "b", "b@example.com", "b-token");
+        registry(json!({
+            "1": {"email": "a@example.com", "organizationUuid": "", "configDir": null},
+            "2": {"email": "b@example.com", "organizationUuid": "", "configDir": b},
+        }));
+
+        assert_eq!(import_profile_logins().unwrap(), 1);
+        assert_eq!(
+            oauth::extract_access_token(&saved("2", "b@example.com")).unwrap(),
+            "b-token"
+        );
+        let config = read_account_config("2", "b@example.com").unwrap();
+        assert!(config.contains("b@example.com"));
+        assert_eq!(
+            saved("1", "a@example.com"),
+            "",
+            "the live default account is left alone"
+        );
+
+        // Second run: nothing to do, and the saved copy is never overwritten.
+        std::fs::write(Path::new(&b).join(".credentials.json"), login("newer")).unwrap();
+        assert_eq!(import_profile_logins().unwrap(), 0);
+        assert_eq!(
+            oauth::extract_access_token(&saved("2", "b@example.com")).unwrap(),
+            "b-token"
+        );
+    }
+
+    #[test]
+    fn a_folder_signed_in_as_someone_else_is_skipped() {
+        let env = setup();
+        let c = folder(&env, "c", "stranger@example.com", "c-token");
+        registry(json!({
+            "3": {"email": "c@example.com", "organizationUuid": "", "configDir": c},
+        }));
+
+        assert_eq!(import_profile_logins().unwrap(), 0);
+        assert_eq!(saved("3", "c@example.com"), "");
+    }
+
+    #[test]
+    fn uuid_decides_when_both_sides_have_one() {
+        let record = json!({"email": "a@example.com", "uuid": "u-1"});
+        let same = json!({"emailAddress": "other@example.com", "accountUuid": "u-1"});
+        let other = json!({"emailAddress": "a@example.com", "accountUuid": "u-2"});
+        let record = record.as_object().unwrap();
+        assert!(profile_matches_record(same.as_object().unwrap(), record));
+        assert!(!profile_matches_record(other.as_object().unwrap(), record));
+    }
+
+    #[test]
+    fn a_registry_without_folders_is_a_no_op() {
+        let _env = setup();
+        registry(json!({"1": {"email": "a@example.com", "organizationUuid": ""}}));
+        assert_eq!(import_profile_logins().unwrap(), 0);
+    }
+
+    #[test]
+    fn keychain_service_matches_claude_code() {
+        let service = profile_keychain_service("/Users/alice/.cc-logins/profiles/p2-abcdef");
+        assert!(service.starts_with("Claude Code-credentials-"));
+        assert_eq!(service.len(), "Claude Code-credentials-".len() + 8);
     }
 }
 
@@ -5512,5 +6167,241 @@ mod tests {
 
         let err = set_account_enabled(99, false).unwrap_err();
         assert!(matches!(err, SwitchError::UnknownAccount(ref n) if n == "99"));
+    }
+
+    // -- set_account_alias ------------------------------------------------------
+
+    fn read_registry() -> Value {
+        serde_json::from_str(&std::fs::read_to_string(accounts_file()).unwrap()).unwrap()
+    }
+
+    #[test]
+    fn set_account_alias_trims_sets_and_clears() {
+        let _env = setup_env();
+        seed_two_accounts();
+
+        set_account_alias(2, Some("  Work  ")).unwrap();
+        assert_eq!(read_registry()["accounts"]["2"]["alias"], "Work");
+        let bravo = read_accounts()
+            .unwrap()
+            .into_iter()
+            .find(|account| account.number == 2)
+            .unwrap();
+        assert_eq!(bravo.display_name(), "Work");
+
+        set_account_alias(2, Some("   ")).unwrap();
+        assert!(read_registry()["accounts"]["2"].get("alias").is_none());
+
+        set_account_alias(2, Some("Personal")).unwrap();
+        assert_eq!(read_registry()["accounts"]["2"]["alias"], "Personal");
+        set_account_alias(2, None).unwrap();
+        assert!(read_registry()["accounts"]["2"].get("alias").is_none());
+    }
+
+    #[test]
+    fn set_account_alias_refuses_an_overlong_alias_as_a_strict_no_op() {
+        let _env = setup_env();
+        seed_two_accounts();
+
+        let longest = "x".repeat(MAX_ALIAS_CHARS);
+        set_account_alias(2, Some(&longest)).unwrap();
+
+        let too_long = "y".repeat(MAX_ALIAS_CHARS + 1);
+        let err = set_account_alias(2, Some(&too_long)).unwrap_err();
+        assert!(matches!(err, SwitchError::InvalidInput(_)), "got {err:?}");
+        let registry = read_registry();
+        assert_eq!(registry["accounts"]["2"]["alias"], longest.as_str());
+    }
+
+    #[test]
+    fn set_account_alias_errors_on_an_unknown_account() {
+        let _env = setup_env();
+        seed_two_accounts();
+
+        let err = set_account_alias(99, Some("Nobody")).unwrap_err();
+        assert!(matches!(err, SwitchError::UnknownAccount(ref n) if n == "99"));
+    }
+
+    // -- remove_account ---------------------------------------------------------
+
+    #[test]
+    fn remove_account_refuses_the_active_account() {
+        let _env = setup_env();
+        seed_two_accounts(); // account 1 (alpha) is live
+
+        let err = remove_account(1).unwrap_err();
+        assert!(matches!(err, SwitchError::CannotRemoveActive(ref n) if n == "1"));
+
+        let registry = read_registry();
+        assert!(
+            registry["accounts"].get("1").is_some(),
+            "must be a strict no-op"
+        );
+        assert_eq!(registry["sequence"], serde_json::json!([1, 2]));
+    }
+
+    #[test]
+    fn remove_account_drops_the_registry_entry_then_every_backup_of_that_slot_only() {
+        let _env = setup_env();
+        seed_two_accounts();
+        // A registry that still remembers slot 2 as active (as a string, the
+        // way older writers stored it) must not keep pointing at it.
+        let mut registry = read_registry();
+        registry["activeAccountNumber"] = Value::from("2");
+        write_json_file(&accounts_file(), &registry);
+
+        let mut store = CredentialStore::new(GuiStoreHost);
+        store
+            .write_account_credentials("1", "alpha@example.com", "alpha-backup")
+            .unwrap();
+        // A second write leaves a `.prev` generation behind for slot 2.
+        store
+            .write_account_credentials("2", "bravo@example.com", "target-creds-2b")
+            .unwrap();
+        let prev = credentials_dir().join(".creds-2-bravo@example.com.enc.prev");
+        assert!(prev.exists(), "precondition: slot 2 has a .prev backup");
+
+        remove_account(2).unwrap();
+
+        let registry = read_registry();
+        assert!(registry["accounts"].get("2").is_none());
+        assert_eq!(registry["sequence"], serde_json::json!([1]));
+        assert!(registry.get("activeAccountNumber").is_none());
+        let leftover = store.read_account_credentials("2", "bravo@example.com");
+        assert!(leftover.is_empty());
+        assert!(!prev.exists());
+        assert!(!account_config_path("2", "bravo@example.com").exists());
+
+        // Everything else is untouched: the other slot and the live login.
+        assert!(registry["accounts"].get("1").is_some());
+        let alpha = store.read_account_credentials("1", "alpha@example.com");
+        assert_eq!(alpha, "alpha-backup");
+        let live = std::fs::read_to_string(paths::credentials_path()).unwrap();
+        assert_eq!(live, "original-active-creds-for-account-1");
+    }
+
+    #[test]
+    fn remove_account_errors_on_an_unknown_account() {
+        let _env = setup_env();
+        seed_two_accounts();
+
+        let err = remove_account(99).unwrap_err();
+        assert!(matches!(err, SwitchError::UnknownAccount(ref n) if n == "99"));
+    }
+
+    #[test]
+    fn remove_account_refuses_pending_switch_recovery() {
+        let _env = setup_env();
+        seed_two_accounts();
+        crate::switch_transaction::set_recovery_requirement(Some("repair required".into()));
+
+        let error = remove_account_with_timeout(2, Duration::from_secs(1)).unwrap_err();
+
+        crate::switch_transaction::set_recovery_requirement(None);
+        assert!(matches!(
+            error,
+            SwitchError::Transaction(crate::switch_transaction::TransactionError::RecoveryRequired)
+        ));
+        assert!(read_registry()["accounts"].get("2").is_some());
+    }
+
+    // -- reorder_accounts -------------------------------------------------------
+
+    #[test]
+    fn reorder_accounts_rewrites_the_rotation_order() {
+        let _env = setup_env();
+        seed_two_accounts();
+
+        reorder_accounts(&[2, 1]).unwrap();
+
+        assert_eq!(read_registry()["sequence"], serde_json::json!([2, 1]));
+        let numbers: Vec<u32> = read_accounts()
+            .unwrap()
+            .into_iter()
+            .map(|account| account.number)
+            .collect();
+        assert_eq!(numbers, vec![2, 1]);
+    }
+
+    #[test]
+    fn reorder_accounts_refuses_anything_but_a_permutation_of_the_slots() {
+        let _env = setup_env();
+        seed_two_accounts();
+
+        for bad in [vec![1], vec![1, 2, 3], vec![1, 1], Vec::new()] {
+            let err = reorder_accounts(&bad).unwrap_err();
+            assert!(matches!(err, SwitchError::InvalidInput(_)), "{bad:?}");
+        }
+        assert_eq!(read_registry()["sequence"], serde_json::json!([1, 2]));
+    }
+
+    // -- orphaned slot files ----------------------------------------------------
+
+    #[test]
+    fn slot_file_names_parse_only_numbered_backups() {
+        let creds = SlotFileKind::Credentials;
+        assert_eq!(
+            creds.parse(".creds-12-first-last@example.com.enc"),
+            Some((12, "first-last@example.com".to_string()))
+        );
+        assert_eq!(
+            creds.parse(".creds-3-a@example.com.enc.prev"),
+            Some((3, "a@example.com".to_string()))
+        );
+        assert_eq!(creds.parse(".creds-None-a@example.com.enc"), None);
+        assert_eq!(creds.parse("..creds-1-a@x.io.enc.1.stage"), None);
+        assert_eq!(creds.parse(".unclaimed-abc.enc"), None);
+        assert_eq!(
+            SlotFileKind::Config.parse(".claude-config-4-Mixed@Example.com.json"),
+            Some((4, "Mixed@Example.com".to_string()))
+        );
+    }
+
+    #[test]
+    fn sweep_deletes_backups_no_registry_slot_references_and_nothing_else() {
+        let _env = setup_env();
+        seed_two_accounts(); // slots 1 and 2; slot 2 has backups
+
+        // Slot 3 is gone from the registry but its files survived.
+        let mut store = CredentialStore::new(GuiStoreHost);
+        store
+            .write_account_credentials("3", "Carol@Example.com", "orphan-creds")
+            .unwrap();
+        store
+            .write_account_credentials("3", "Carol@Example.com", "orphan-creds-2")
+            .unwrap();
+        let orphan_prev = credentials_dir().join(".creds-3-carol@example.com.enc.prev");
+        assert!(orphan_prev.exists(), "precondition: slot 3 has a .prev");
+        let orphan_config = account_config_path("3", "Carol@Example.com");
+        write_json_file(&orphan_config, &serde_json::json!({"oauthAccount": {}}));
+        let unrelated = credentials_dir().join(".unclaimed-keep.enc");
+        std::fs::write(&unrelated, "not a slot").unwrap();
+
+        let found = sweep_orphaned_slot_files().unwrap();
+
+        assert_eq!(found, 3, "the .enc, its .prev, and the config");
+        let leftover = store.read_account_credentials("3", "Carol@Example.com");
+        assert!(leftover.is_empty());
+        assert!(!orphan_prev.exists());
+        assert!(!orphan_config.exists());
+        assert!(unrelated.exists());
+        let bravo = store.read_account_credentials("2", "bravo@example.com");
+        assert_eq!(bravo, "target-creds-2");
+        assert!(account_config_path("2", "bravo@example.com").exists());
+        let live = std::fs::read_to_string(paths::credentials_path()).unwrap();
+        assert_eq!(live, "original-active-creds-for-account-1");
+    }
+
+    #[test]
+    fn sweep_never_reads_a_missing_registry_as_every_file_being_orphaned() {
+        let _env = setup_env();
+        let mut store = CredentialStore::new(GuiStoreHost);
+        store
+            .write_account_credentials("1", "alpha@example.com", "only-copy")
+            .unwrap();
+
+        assert_eq!(sweep_orphaned_slot_files().unwrap(), 0);
+        let kept = store.read_account_credentials("1", "alpha@example.com");
+        assert_eq!(kept, "only-copy");
     }
 }

@@ -13,7 +13,7 @@
 //! this file. No polling path may ever call a mutating command.
 
 use serde::{Deserialize, Serialize};
-use tauri::Emitter;
+use tauri::{Emitter, Manager};
 
 use crate::login::{self, LoginError};
 use crate::model::{Account, Environment, Snapshot};
@@ -64,6 +64,13 @@ pub enum IpcError {
     /// Refused to disable the currently-active account — auto-switch would
     /// have nowhere valid to land.
     CannotDisableActive(String),
+    /// Refused to remove the currently-active account — Claude Code would be
+    /// left running on a login nothing manages. Switch away first.
+    CannotRemoveActive(String),
+    /// The request itself is invalid (an alias that is too long, an order
+    /// that is not a permutation of the accounts, an environment that is not
+    /// WSL). `detail` is a sentence fit to show the user.
+    InvalidInput(String),
     /// The server proved this account's refresh-token lineage is dead.
     ReloginRequired(String),
     /// An interrupted switch could not be recovered automatically.
@@ -129,6 +136,8 @@ impl From<SwitchError> for IpcError {
             // missing, empty, or otherwise not trustworthy — as distinct
             // from a business-rule refusal below, where the store is fine
             // and the requested mutation just isn't valid right now.
+            // `RemovedWithLeftovers` belongs here too: the account is already
+            // out of the registry, and what failed is deleting its files.
             SwitchError::Credential(_)
             | SwitchError::Transaction(
                 crate::switch_transaction::TransactionError::Credential(_)
@@ -143,6 +152,7 @@ impl From<SwitchError> for IpcError {
             | SwitchError::Stash(_)
             | SwitchError::NoLiveCredential
             | SwitchError::InvalidCredential(_)
+            | SwitchError::RemovedWithLeftovers(..)
             | SwitchError::Refresh(
                 crate::oauth_refresh::RefreshCoordinatorError::Missing
                 | crate::oauth_refresh::RefreshCoordinatorError::PersistenceFailed(_)
@@ -154,6 +164,8 @@ impl From<SwitchError> for IpcError {
             // branch without reading the message.
             SwitchError::AlreadyRegistered(_) => IpcError::AlreadyRegistered(e.to_string()),
             SwitchError::CannotDisableActive(_) => IpcError::CannotDisableActive(e.to_string()),
+            SwitchError::CannotRemoveActive(_) => IpcError::CannotRemoveActive(e.to_string()),
+            SwitchError::InvalidInput(_) => IpcError::InvalidInput(e.to_string()),
             // Malformed user input (an obviously-bad pasted token) and
             // everything else genuinely uncategorized fall to `Internal` —
             // the UI still gets the full, specific message via `e.to_string()`.
@@ -395,11 +407,17 @@ fn refuse_if_recovery_required() -> IpcResult<()> {
 /// keep showing the pre-switch state until the poller's next tick, which on
 /// the adaptive cadence can be minutes away.
 #[tauri::command]
-pub async fn switch_account(
-    state: tauri::State<'_, AppState>,
-    app: tauri::AppHandle,
+pub async fn switch_account(app: tauri::AppHandle, account_number: u32) -> IpcResult<Snapshot> {
+    switch_account_for(&app, account_number).await
+}
+
+/// Body of [`switch_account`], shared with the tray menu's account rows so
+/// both paths take exactly the same guards and publish the same way.
+pub async fn switch_account_for(
+    app: &tauri::AppHandle,
     account_number: u32,
 ) -> IpcResult<Snapshot> {
+    let state = app.state::<AppState>();
     refuse_if_recovery_required()?;
     let accounts = switcher::read_accounts()?;
     let target = accounts
@@ -409,7 +427,7 @@ pub async fn switch_account(
 
     // Show the switch in flight before mutating anything, so a slow swap
     // doesn't leave the tray sitting on the outgoing account's stale number.
-    crate::poller::publish_switching(&app);
+    crate::poller::publish_switching(app);
 
     switcher::switch_to(target).await?;
 
@@ -420,7 +438,7 @@ pub async fn switch_account(
     // The credential change already succeeded above; publish_snapshot never
     // fails the caller, so a tray/emit hiccup here can't misreport this
     // switch as failed.
-    crate::poller::publish_snapshot(&app, &snap);
+    crate::poller::publish_snapshot(app, &snap);
     Ok(snap)
 }
 
@@ -568,6 +586,132 @@ pub async fn set_account_enabled(
     let snap = snapshot_uncached(&state).await?;
     crate::poller::publish_snapshot(&app, &snap);
     Ok(snap)
+}
+
+/// Run blocking work (a registry mutation may wait up to
+/// [`crate::locking::DEFAULT_TIMEOUT`] on the vault lock; waking WSL boots a
+/// VM) off the async runtime's worker threads.
+async fn off_runtime<T, F>(work: F) -> IpcResult<T>
+where
+    F: FnOnce() -> T + Send + 'static,
+    T: Send + 'static,
+{
+    tokio::task::spawn_blocking(work)
+        .await
+        .map_err(|error| IpcError::Internal(format!("background task failed: {error}")))
+}
+
+/// Set (or, with `None`/blank, clear) an account's display alias.
+///
+/// Trimmed; longer than [`switcher::MAX_ALIAS_CHARS`] characters is
+/// [`IpcError::InvalidInput`].
+#[tauri::command]
+pub async fn set_account_alias(
+    state: tauri::State<'_, AppState>,
+    app: tauri::AppHandle,
+    account_number: u32,
+    alias: Option<String>,
+) -> IpcResult<Snapshot> {
+    refuse_if_recovery_required()?;
+    let task = move || switcher::set_account_alias(account_number, alias.as_deref());
+    off_runtime(task).await??;
+    let snap = snapshot_uncached(&state).await?;
+    crate::poller::publish_snapshot(&app, &snap);
+    Ok(snap)
+}
+
+/// Stop managing an account and delete its stored credential and config.
+///
+/// Refuses the active account ([`IpcError::CannotRemoveActive`]). The
+/// registry is rewritten before any file is deleted; if a file then cannot be
+/// deleted the account is still gone, the fresh state is published anyway,
+/// and the error ([`IpcError::Credential`]) says the files remain.
+#[tauri::command]
+pub async fn remove_account(
+    state: tauri::State<'_, AppState>,
+    app: tauri::AppHandle,
+    account_number: u32,
+) -> IpcResult<Snapshot> {
+    refuse_if_recovery_required()?;
+    let task = move || switcher::remove_account(account_number);
+    if let Err(error) = off_runtime(task).await? {
+        if matches!(error, SwitchError::RemovedWithLeftovers(..)) {
+            // The registry did change: show that before reporting the rest.
+            if let Ok(snap) = snapshot_uncached(&state).await {
+                crate::poller::publish_snapshot(&app, &snap);
+            }
+        }
+        return Err(error.into());
+    }
+    let snap = snapshot_uncached(&state).await?;
+    crate::poller::publish_snapshot(&app, &snap);
+    Ok(snap)
+}
+
+/// Replace the rotation order. `order` must list every account number
+/// exactly once ([`IpcError::InvalidInput`] otherwise). Both the account list
+/// and the "next available" strategy follow it.
+#[tauri::command]
+pub async fn reorder_accounts(
+    state: tauri::State<'_, AppState>,
+    app: tauri::AppHandle,
+    order: Vec<u32>,
+) -> IpcResult<Snapshot> {
+    refuse_if_recovery_required()?;
+    let task = move || switcher::reorder_accounts(&order);
+    off_runtime(task).await??;
+    let snap = snapshot_uncached(&state).await?;
+    crate::poller::publish_snapshot(&app, &snap);
+    Ok(snap)
+}
+
+/// Start a sleeping WSL distro and re-read whether it holds Claude Code
+/// credentials, then return a fresh snapshot.
+///
+/// **User-initiated only** — this boots a Linux VM, which no polling path is
+/// ever allowed to do (see [`crate::wsl::wake_and_read`]). `env_id` is the
+/// `wsl:{name}` id from the snapshot; anything else, a distro that is not
+/// detected, or any platform other than Windows is [`IpcError::InvalidInput`].
+#[tauri::command]
+pub async fn wake_environment(
+    state: tauri::State<'_, AppState>,
+    app: tauri::AppHandle,
+    env_id: String,
+) -> IpcResult<Snapshot> {
+    if !cfg!(target_os = "windows") {
+        return Err(IpcError::InvalidInput(
+            "WSL is only available on Windows".to_string(),
+        ));
+    }
+    let Some(name) = env_id.strip_prefix("wsl:").map(str::to_string) else {
+        return Err(IpcError::InvalidInput(format!(
+            "{env_id} is not a WSL environment"
+        )));
+    };
+    let found = off_runtime(move || wake_distro(&name)).await??;
+    log::info!("woke {env_id}; Claude Code credentials found: {found}");
+    let snap = snapshot_uncached(&state).await?;
+    crate::poller::publish_snapshot(&app, &snap);
+    Ok(snap)
+}
+
+fn is_wsl_named(env: &Environment, name: &str) -> bool {
+    env.kind == crate::model::EnvKind::Wsl && env.id.strip_prefix("wsl:") == Some(name)
+}
+
+/// Blocking body of [`wake_environment`]: confirm `name` is a detected
+/// distro, then wake it.
+fn wake_distro(name: &str) -> IpcResult<bool> {
+    let environments = crate::wsl::detect_environments();
+    if !environments.iter().any(|env| is_wsl_named(env, name)) {
+        return Err(IpcError::InvalidInput(format!(
+            "no WSL distro named {name} was found"
+        )));
+    }
+    crate::wsl::wake_and_read(name).map_err(|error| match &error {
+        crate::wsl::WslError::Unsupported => IpcError::InvalidInput(error.to_string()),
+        crate::wsl::WslError::Spawn { .. } => IpcError::Internal(error.to_string()),
+    })
 }
 
 // ─── application state ───────────────────────────────────────────────────────
@@ -733,11 +877,11 @@ pub fn history_samples(
     let Some(h) = state.history.as_ref() else {
         return Ok(Vec::new());
     };
-    // Clamped to the raw retention window: asking for more would silently
-    // return only what survived pruning, which reads as a gap in usage.
-    let hours = hours
-        .unwrap_or(24)
-        .clamp(1, crate::history::DEFAULT_RAW_RETENTION_DAYS * 24);
+    // Clamped to the raw retention window the poller prunes to: asking for
+    // more would silently return only what survived pruning, which reads as
+    // a gap in usage.
+    let retention_days = state.settings.snapshot().settings.history_retention_days;
+    let hours = hours.unwrap_or(24).clamp(1, retention_days * 24);
     let until = chrono::Utc::now();
     let since = until - chrono::Duration::hours(hours);
     h.series(&account_key, since, until)
@@ -873,9 +1017,15 @@ pub fn update_settings(
     state: tauri::State<'_, AppState>,
     input: UpdateSettingsInput,
 ) -> IpcResult<crate::settings::SettingsSnapshot> {
-    update_settings_at(&state, input, chrono::Utc::now(), |snapshot| {
+    let updated = update_settings_at(&state, input, chrono::Utc::now(), |snapshot| {
         app.emit(SETTINGS_UPDATED_EVENT, snapshot)
-    })
+    })?;
+    // The tray menu's percentages follow the used/left display setting; the
+    // last snapshot, of any age, is enough to relabel them.
+    if let Some(snapshot) = state.cached_snapshot(std::time::Duration::MAX) {
+        crate::tray_menu::schedule_update(&app, &snapshot);
+    }
+    Ok(updated)
 }
 
 #[tauri::command]
@@ -1370,6 +1520,40 @@ mod tests {
 
         let json = serde_json::to_string(&mapped).unwrap();
         assert!(json.contains("cannotDisableActive"), "got {json}");
+    }
+
+    #[test]
+    fn switch_cannot_remove_active_maps_to_its_own_kind() {
+        let mapped: IpcError = SwitchError::CannotRemoveActive("1".to_string()).into();
+        assert!(
+            matches!(mapped, IpcError::CannotRemoveActive(_)),
+            "got {mapped:?}"
+        );
+
+        let json = serde_json::to_string(&mapped).unwrap();
+        assert!(json.contains("cannotRemoveActive"), "got {json}");
+    }
+
+    #[test]
+    fn switch_invalid_input_maps_to_its_own_kind_with_the_sentence_as_detail() {
+        let mapped: IpcError = SwitchError::InvalidInput("too long".to_string()).into();
+        assert_eq!(
+            serde_json::to_value(mapped).unwrap(),
+            serde_json::json!({ "kind": "invalidInput", "detail": "too long" })
+        );
+    }
+
+    #[test]
+    fn a_removal_that_left_files_behind_is_a_credential_error() {
+        let mapped: IpcError =
+            SwitchError::RemovedWithLeftovers("2".to_string(), "disk busy".to_string()).into();
+        match mapped {
+            IpcError::Credential(detail) => {
+                assert!(detail.contains("was removed"), "got {detail}");
+                assert!(detail.contains("disk busy"), "got {detail}");
+            }
+            other => panic!("expected Credential, got {other:?}"),
+        }
     }
 
     #[test]

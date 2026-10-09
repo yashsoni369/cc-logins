@@ -1,7 +1,7 @@
 import { act, renderHook } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { formatClock, formatCountdown, formatInstant, useNow } from "@/lib/time";
+import { formatClock, formatCountdown, formatDayClock, formatInstant, formatWhen, useNow } from "@/lib/time";
 
 // Local noon, so every offset below stays inside the same local day whatever
 // timezone the runner is in. Locales are always passed explicitly for the same
@@ -127,5 +127,31 @@ describe("useNow", () => {
     expect(result.current).toBe(NOW + 1_000);
 
     unmount();
+  });
+});
+
+describe("formatDayClock", () => {
+  it("uses the clock alone today and a weekday within the week", () => {
+    expect(norm(formatDayClock(at(2026, 6, 29, 18, 30), "24h", NOW, "en-US"))).toBe("18:30");
+    // July 29 2026 is a Wednesday, so two days on is a Friday.
+    expect(norm(formatDayClock(at(2026, 6, 31, 9, 5), "24h", NOW, "en-US"))).toBe("Fri 09:05");
+  });
+
+  it("falls back to month and day beyond the week", () => {
+    expect(norm(formatDayClock(at(2026, 7, 20, 9, 5), "24h", NOW, "en-US"))).toBe("Aug 20 09:05");
+  });
+
+  it("returns null rather than inventing a value", () => {
+    expect(formatDayClock(undefined, "24h", NOW)).toBeNull();
+  });
+});
+
+describe("formatWhen", () => {
+  it("joins the countdown and the clock", () => {
+    expect(norm(formatWhen(after(2 * 3600 + 6 * 60), "24h", NOW))).toMatch(/^in 2h 6m · \d{2}:\d{2}$/);
+  });
+
+  it("is null when the instant is unknown", () => {
+    expect(formatWhen(undefined, "24h", NOW)).toBeNull();
   });
 });

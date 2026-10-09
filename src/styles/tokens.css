@@ -65,6 +65,16 @@
   --z-overlay: 20;
 
   --r: 3px;
+
+  /* MOTION — state changes only (PRODUCT.md). transform/opacity only, so it
+     runs on the compositor. Durations follow Fluent's small/medium/large
+     steps; decelerate-in easing. One reduced-motion override in app.css
+     zeroes them all. */
+  --dur-fast: 120ms;   /* controls: press, toggle, hover */
+  --dur-med: 200ms;    /* menus, popover content, toasts */
+  --dur-slow: 280ms;   /* drawer, meter fill */
+  --ease-out: cubic-bezier(0, 0, 0, 1);
+  --ease-in: cubic-bezier(0.4, 0, 1, 1);
 }
 
 @media (prefers-color-scheme: light) {

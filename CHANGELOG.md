@@ -13,6 +13,37 @@ A breaking change to any of those bumps the minor version, since major is pinned
 
 Nothing yet.
 
+## [0.3.0] - 2026-10-09
+
+A redesign. Switching works exactly as before: the selected account's saved login is swapped into
+Claude Code, and sessions already running move to it on their next request.
+
+### Changed
+
+- **Home** replaces Accounts and the top of the old Dashboard: when your coverage runs out, the
+  account in use, the best next one, a 12-hour coverage timeline with the predicted auto-switch,
+  and one accounts table with pace, projected run-out and reset times.
+- **History** is the old Dashboard, focused on the past.
+- **Tray popover**: pace, projected run-out, best next account, a visible Switch, and an
+  Off / On / Hold 1h control. The tray menu lists accounts and switches in one click.
+- **Settings** regrouped. Auto-switch reads as one sentence with a live preview; notifications,
+  open at login, history retention, cooldown and used/left display are working controls.
+
+### Added
+
+- Rename, remove and reorder accounts; Ctrl/Cmd+K command palette; undo after a switch.
+
+### Fixed
+
+- The tray popover could open as a thin sliver on Windows.
+- On Windows, saving a file could fail while another program briefly held it open.
+
+### Migration
+
+- If you ran a 0.4 test build, the logins it moved into `~/.cc-logins/profiles/` are saved back
+  once at first start, after checking each one is the right account. The folders are left as
+  they are.
+
 ## [0.2.6] - 2026-10-06
 
 ### Fixed
@@ -249,7 +280,8 @@ Nothing yet.
   otherwise.
 - Builds are unsigned. See [SECURITY.md](SECURITY.md).
 
-[Unreleased]: https://github.com/yashsoni369/cc-logins/compare/v0.2.6...HEAD
+[Unreleased]: https://github.com/yashsoni369/cc-logins/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/yashsoni369/cc-logins/compare/v0.2.6...v0.3.0
 [0.2.6]: https://github.com/yashsoni369/cc-logins/compare/v0.2.5...v0.2.6
 [0.2.5]: https://github.com/yashsoni369/cc-logins/compare/v0.2.4...v0.2.5
 [0.2.4]: https://github.com/yashsoni369/cc-logins/compare/v0.2.3...v0.2.4
