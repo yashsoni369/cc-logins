@@ -213,13 +213,15 @@ export default function PopoverPanel() {
     phase?.kind === "warning" ? accounts.find((account) => account.number === phase.to) ?? null : null;
 
   const cli = useCliStatus();
+  // The live swap needs no claude command: the pick lands in `~/.claude`.
+  const commandNeeded = cli.missing && settings.settings?.switchRunningSessions !== true;
   const handleSwitch = useCallback(
     (accountNumber: number) => {
       const target = accounts.find((account) => account.number === accountNumber);
       // Moving an account, or installing the claude command it needs, happens
       // in the main window: Move opens a sign-in terminal, and the install
       // prompt explains what it changes.
-      if (target && (needsMove(target) || (target.profile && cli.missing))) {
+      if (target && (needsMove(target) || (target.profile && commandNeeded))) {
         void openMainWindow();
         return;
       }
@@ -240,7 +242,7 @@ export default function PopoverPanel() {
         })
         .finally(() => setPendingAccount(null));
     },
-    [accounts, cli.missing, refresh],
+    [accounts, commandNeeded, refresh],
   );
 
   const snooze = useCallback(() => {

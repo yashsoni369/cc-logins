@@ -348,19 +348,23 @@ function AppContent() {
   // The `claude` command is a prerequisite for picking an account: picking
   // only changes which folder new sessions use, and plain `claude` reaches
   // that choice only through the command. A user pick therefore asks to
-  // install it first. Builds without the shim (development) skip this.
+  // install it first. Builds without the shim (development) skip this, and
+  // so does the live swap: it puts the pick in `~/.claude`, which plain
+  // `claude` already uses.
   const cli = useCliStatus();
+  const liveSwap = settings.settings?.switchRunningSessions === true;
+  const commandNeeded = cli.missing && !liveSwap;
   const [cliGateFor, setCliGateFor] = useState<number | null>(null);
   const handlePick = useCallback(
     (accountNumber: number) => {
       const target = accountsNow.find((a) => a.number === accountNumber);
-      if (target?.profile && cli.missing) {
+      if (target?.profile && commandNeeded) {
         setCliGateFor(accountNumber);
         return;
       }
       handleSwitch(accountNumber);
     },
-    [accountsNow, cli.missing, handleSwitch],
+    [accountsNow, commandNeeded, handleSwitch],
   );
   const installAndPick = useCallback(async () => {
     const accountNumber = cliGateFor;
@@ -372,7 +376,7 @@ function AppContent() {
   }, [cli, cliGateFor, handleSwitch]);
   const cliGateAccount = cliGateFor === null ? null : (accountsNow.find((a) => a.number === cliGateFor) ?? null);
   const showCliBanner =
-    accountsNow.some((a) => a.profile) && (cli.missing || cli.shadowedBy !== null);
+    !liveSwap && accountsNow.some((a) => a.profile) && (cli.missing || cli.shadowedBy !== null);
 
   // The ONLY call site for `addCurrentAccount`.
   const handleAddAccount = useCallback(() => {
