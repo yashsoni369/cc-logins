@@ -3,7 +3,7 @@
  * action comes from the backend's revisioned `DaemonStatus` contract.
  */
 
-import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties } from "react";
 
 import { Loading } from "@/components/Loading";
 import { RefreshButton } from "@/components/RefreshButton";
@@ -66,31 +66,65 @@ function useDismissOnBlurOrEscape() {
   }, []);
 }
 
+/** Never shrink the popover below this, so a bad measurement can't leave an invisible sliver. */
+const MIN_POPOVER_HEIGHT = 120;
+
+/**
+ * Keep the popover window exactly as tall as its content.
+ *
+ * The popover lives hidden until a tray click shows it, and a hidden WebView2
+ * runs no animation frames. An earlier version deferred `setSize` to
+ * `requestAnimationFrame`, so content that changed while hidden never resized
+ * the window, and it opened as a 2-pixel sliver (found in a Windows smoke
+ * test). So: measure after every render (layout reads work while hidden),
+ * apply immediately, re-measure on focus, and clamp to a sane minimum.
+ */
 function useSizeToContent(ref: { current: HTMLDivElement | null }) {
-  useEffect(() => {
-    if (!hasBackend()) return;
-    const node = ref.current;
-    if (!node) return;
-    let frame = 0;
-    const apply = async (height: number) => {
+  const applied = useRef(0);
+
+  const apply = useCallback((height: number) => {
+    const next = Math.max(MIN_POPOVER_HEIGHT, Math.ceil(height));
+    if (next === applied.current) return;
+    applied.current = next;
+    void (async () => {
       const [win, { LogicalSize }] = await Promise.all([
         currentPopoverWindow(),
         import("@tauri-apps/api/window"),
       ]);
-      await win.setSize(new LogicalSize(364, Math.max(1, Math.ceil(height))));
-    };
-    const observer = new ResizeObserver((entries) => {
-      const height = entries[0]?.contentRect.height;
-      if (height == null) return;
-      cancelAnimationFrame(frame);
-      frame = requestAnimationFrame(() => void apply(height));
-    });
+      await win.setSize(new LogicalSize(364, next));
+    })();
+  }, []);
+
+  const measure = useCallback(() => {
+    const node = ref.current;
+    if (node) apply(node.getBoundingClientRect().height);
+  }, [ref, apply]);
+
+  // Every commit: data arriving while hidden still resizes the window.
+  useLayoutEffect(() => {
+    if (hasBackend()) measure();
+  });
+
+  useEffect(() => {
+    if (!hasBackend()) return;
+    const node = ref.current;
+    if (!node) return;
+    // Late layout changes (fonts, images) with no React render behind them.
+    const observer = new ResizeObserver(() => measure());
     observer.observe(node);
-    return () => {
-      cancelAnimationFrame(frame);
-      observer.disconnect();
+    // Shown again: measure fresh in case anything was missed while hidden.
+    const onShown = () => {
+      applied.current = 0;
+      measure();
     };
-  }, [ref]);
+    window.addEventListener("focus", onShown);
+    document.addEventListener("visibilitychange", onShown);
+    return () => {
+      observer.disconnect();
+      window.removeEventListener("focus", onShown);
+      document.removeEventListener("visibilitychange", onShown);
+    };
+  }, [ref, measure]);
 }
 
 /**
