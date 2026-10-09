@@ -3266,6 +3266,286 @@ fn seven_day_reset_ts(account: &Account) -> Option<f64> {
 }
 
 // ---------------------------------------------------------------------------
+// One-time import of logins a 0.4 test build moved into profile folders.
+// ---------------------------------------------------------------------------
+
+/// The macOS Keychain service Claude Code uses for a `CLAUDE_CONFIG_DIR`:
+/// the plain service plus the first 8 hex of sha256 of the exact path.
+#[cfg_attr(not(all(target_os = "macos", not(test))), allow(dead_code))]
+fn profile_keychain_service(config_dir: &str) -> String {
+    use sha2::{Digest, Sha256};
+    let digest = Sha256::digest(config_dir.as_bytes());
+    format!(
+        "{}-{}",
+        crate::credentials::CLAUDE_CODE_KEYCHAIN_SERVICE,
+        &crate::hex::lower(&digest)[..8]
+    )
+}
+
+/// The login Claude Code keeps for a profile folder, or `None`.
+fn read_profile_login(config_dir: &str) -> Option<String> {
+    #[cfg(all(target_os = "macos", not(test)))]
+    {
+        let service = profile_keychain_service(config_dir);
+        if let Ok(Some(raw)) = crate::credentials::read_claude_keychain_item(&service) {
+            if !raw.trim().is_empty() {
+                return Some(raw);
+            }
+        }
+    }
+    std::fs::read_to_string(Path::new(config_dir).join(".credentials.json"))
+        .ok()
+        .filter(|raw| !raw.trim().is_empty())
+}
+
+/// Whether a folder's `oauthAccount` is this registry record's account:
+/// account UUID when both have one, else email plus organization.
+fn profile_matches_record(oauth_account: &Map<String, Value>, record: &Map<String, Value>) -> bool {
+    let text = |map: &Map<String, Value>, key: &str| {
+        map.get(key)
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string)
+    };
+    if let (Some(a), Some(b)) = (text(record, "uuid"), text(oauth_account, "accountUuid")) {
+        return a == b;
+    }
+    let same_email = match (text(record, "email"), text(oauth_account, "emailAddress")) {
+        (Some(a), Some(b)) => a.eq_ignore_ascii_case(&b),
+        _ => false,
+    };
+    same_email && text(record, "organizationUuid") == text(oauth_account, "organizationUuid")
+}
+
+/// Bring back the saved copy of every account whose login a 0.4 test build
+/// moved into its own folder (a record with a `configDir`) and whose copy
+/// that build then deleted. The folder's login is saved only after its
+/// `oauthAccount` is confirmed to be the same account; the folder itself is
+/// left as it is. A record that already has a saved copy is never touched,
+/// so this is a no-op after the first run. Returns how many were imported.
+pub fn import_profile_logins() -> Result<usize, SwitchError> {
+    import_profile_logins_with_timeout(crate::locking::DEFAULT_TIMEOUT)
+}
+
+fn import_profile_logins_with_timeout(timeout: Duration) -> Result<usize, SwitchError> {
+    let Some(data) = read_sequence_data() else {
+        return Ok(0);
+    };
+    let has_folders = data
+        .get("accounts")
+        .and_then(Value::as_object)
+        .is_some_and(|accounts| {
+            accounts
+                .values()
+                .any(|record| record.get("configDir").and_then(Value::as_str).is_some())
+        });
+    if !has_folders {
+        return Ok(0);
+    }
+
+    let _lock = crate::locking::acquire_or_err(vault_lock_path(), timeout)?;
+    refuse_pending_recovery()?;
+    let data = read_sequence_data().unwrap_or_default();
+    let Some(accounts) = data.get("accounts").and_then(Value::as_object) else {
+        return Ok(0);
+    };
+    let mut store = CredentialStore::new(GuiStoreHost);
+    let mut imported = 0;
+    for (num, record) in accounts {
+        let Some(record) = record.as_object() else {
+            continue;
+        };
+        let Some(config_dir) = record
+            .get("configDir")
+            .and_then(Value::as_str)
+            .filter(|dir| !dir.is_empty())
+        else {
+            continue;
+        };
+        let email = record
+            .get("email")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        if email.is_empty() || !store.read_account_credentials(num, email).is_empty() {
+            continue;
+        }
+        let config_text = match std::fs::read_to_string(Path::new(config_dir).join(".claude.json"))
+        {
+            Ok(text) => text,
+            Err(error) => {
+                log::warn!("import: account {num}'s folder has no readable config: {error}");
+                continue;
+            }
+        };
+        let oauth_account = serde_json::from_str::<Value>(&config_text)
+            .ok()
+            .and_then(|config| {
+                config
+                    .get("oauthAccount")
+                    .and_then(Value::as_object)
+                    .cloned()
+            });
+        let Some(oauth_account) = oauth_account else {
+            log::warn!("import: account {num}'s folder is signed out; sign in to it again");
+            continue;
+        };
+        if !profile_matches_record(&oauth_account, record) {
+            log::warn!("import: account {num}'s folder holds a different account; skipped");
+            continue;
+        }
+        let Some(login) = read_profile_login(config_dir) else {
+            log::warn!("import: account {num}'s folder has no login; sign in to it again");
+            continue;
+        };
+        if oauth::extract_access_token(&login).is_none() {
+            log::warn!("import: account {num}'s folder login is not an OAuth login; skipped");
+            continue;
+        }
+        store.write_account_credentials(num, email, &login)?;
+        let config_payload =
+            serde_json::json!({ "oauthAccount": Value::Object(oauth_account) }).to_string();
+        write_account_config(num, email, &config_payload)?;
+        log::info!("import: saved account {num}'s login from its folder");
+        imported += 1;
+    }
+    Ok(imported)
+}
+
+#[cfg(test)]
+mod profile_import_tests {
+    use super::*;
+    use crate::test_support::{env_lock, EnvGuard, StoreRootGuard};
+    use serde_json::json;
+    use tempfile::TempDir;
+
+    struct Env {
+        _guards: Vec<EnvGuard>,
+        _store: StoreRootGuard,
+        _dirs: Vec<TempDir>,
+        profiles: TempDir,
+        _lock: std::sync::MutexGuard<'static, ()>,
+    }
+
+    fn setup() -> Env {
+        let lock = env_lock();
+        let home = TempDir::new().unwrap();
+        let live = TempDir::new().unwrap();
+        let vault = TempDir::new().unwrap();
+        let home_text = home.path().to_str().unwrap().to_string();
+        let guards = vec![
+            EnvGuard::set("HOME", &home_text),
+            EnvGuard::set("USERPROFILE", &home_text),
+            EnvGuard::set("CLAUDE_CONFIG_DIR", live.path().to_str().unwrap()),
+            EnvGuard::unset("XDG_DATA_HOME"),
+            EnvGuard::unset("WSL_DISTRO_NAME"),
+        ];
+        let store = StoreRootGuard::set(vault.path().to_path_buf());
+        Env {
+            _guards: guards,
+            _store: store,
+            _dirs: vec![home, live, vault],
+            profiles: TempDir::new().unwrap(),
+            _lock: lock,
+        }
+    }
+
+    fn login(token: &str) -> String {
+        json!({"claudeAiOauth": {"accessToken": token, "refreshToken": format!("{token}-r")}})
+            .to_string()
+    }
+
+    fn folder(env: &Env, name: &str, email: &str, token: &str) -> String {
+        let dir = env.profiles.path().join(name);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join(".credentials.json"), login(token)).unwrap();
+        std::fs::write(
+            dir.join(".claude.json"),
+            json!({"oauthAccount": {"emailAddress": email, "organizationUuid": ""}}).to_string(),
+        )
+        .unwrap();
+        dir.to_str().unwrap().to_string()
+    }
+
+    fn registry(accounts: Value) {
+        let data = json!({"sequence": [1, 2, 3], "activeAccountNumber": 1, "accounts": accounts});
+        std::fs::create_dir_all(paths::backup_root()).unwrap();
+        std::fs::write(accounts_file(), data.to_string()).unwrap();
+    }
+
+    fn saved(num: &str, email: &str) -> String {
+        CredentialStore::new(GuiStoreHost).read_account_credentials(num, email)
+    }
+
+    #[test]
+    fn a_matching_folder_login_is_saved_once() {
+        let env = setup();
+        let b = folder(&env, "b", "b@example.com", "b-token");
+        registry(json!({
+            "1": {"email": "a@example.com", "organizationUuid": "", "configDir": null},
+            "2": {"email": "b@example.com", "organizationUuid": "", "configDir": b},
+        }));
+
+        assert_eq!(import_profile_logins().unwrap(), 1);
+        assert_eq!(
+            oauth::extract_access_token(&saved("2", "b@example.com")).unwrap(),
+            "b-token"
+        );
+        let config = read_account_config("2", "b@example.com").unwrap();
+        assert!(config.contains("b@example.com"));
+        assert_eq!(
+            saved("1", "a@example.com"),
+            "",
+            "the live default account is left alone"
+        );
+
+        // Second run: nothing to do, and the saved copy is never overwritten.
+        std::fs::write(Path::new(&b).join(".credentials.json"), login("newer")).unwrap();
+        assert_eq!(import_profile_logins().unwrap(), 0);
+        assert_eq!(
+            oauth::extract_access_token(&saved("2", "b@example.com")).unwrap(),
+            "b-token"
+        );
+    }
+
+    #[test]
+    fn a_folder_signed_in_as_someone_else_is_skipped() {
+        let env = setup();
+        let c = folder(&env, "c", "stranger@example.com", "c-token");
+        registry(json!({
+            "3": {"email": "c@example.com", "organizationUuid": "", "configDir": c},
+        }));
+
+        assert_eq!(import_profile_logins().unwrap(), 0);
+        assert_eq!(saved("3", "c@example.com"), "");
+    }
+
+    #[test]
+    fn uuid_decides_when_both_sides_have_one() {
+        let record = json!({"email": "a@example.com", "uuid": "u-1"});
+        let same = json!({"emailAddress": "other@example.com", "accountUuid": "u-1"});
+        let other = json!({"emailAddress": "a@example.com", "accountUuid": "u-2"});
+        let record = record.as_object().unwrap();
+        assert!(profile_matches_record(same.as_object().unwrap(), record));
+        assert!(!profile_matches_record(other.as_object().unwrap(), record));
+    }
+
+    #[test]
+    fn a_registry_without_folders_is_a_no_op() {
+        let _env = setup();
+        registry(json!({"1": {"email": "a@example.com", "organizationUuid": ""}}));
+        assert_eq!(import_profile_logins().unwrap(), 0);
+    }
+
+    #[test]
+    fn keychain_service_matches_claude_code() {
+        let service = profile_keychain_service("/Users/alice/.cc-logins/profiles/p2-abcdef");
+        assert!(service.starts_with("Claude Code-credentials-"));
+        assert_eq!(service.len(), "Claude Code-credentials-".len() + 8);
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Tests.
 // ---------------------------------------------------------------------------
 

@@ -9,9 +9,36 @@ At `0.x` the public contract is the on-disk shape — the account vault layout, 
 settings file, and the usage-history database schema — plus the supported OS matrix.
 A breaking change to any of those bumps the minor version, since major is pinned at 0.
 
-## [Unreleased]
+## [Unreleased] — 0.3.0
 
-Nothing yet.
+A redesign. Switching works exactly as before: the selected account's saved login is swapped into
+Claude Code, and sessions already running move to it on their next request.
+
+### Changed
+
+- **Home** replaces Accounts and the top of the old Dashboard: when your coverage runs out, the
+  account in use, the best next one, a 12-hour coverage timeline with the predicted auto-switch,
+  and one accounts table with pace, projected run-out and reset times.
+- **History** is the old Dashboard, focused on the past.
+- **Tray popover**: pace, projected run-out, best next account, a visible Switch, and an
+  Off / On / Hold 1h control. The tray menu lists accounts and switches in one click.
+- **Settings** regrouped. Auto-switch reads as one sentence with a live preview; notifications,
+  open at login, history retention, cooldown and used/left display are working controls.
+
+### Added
+
+- Rename, remove and reorder accounts; Ctrl/Cmd+K command palette; undo after a switch.
+
+### Fixed
+
+- The tray popover could open as a thin sliver on Windows.
+- On Windows, saving a file could fail while another program briefly held it open.
+
+### Migration
+
+- If you ran a 0.4 test build, the logins it moved into `~/.cc-logins/profiles/` are saved back
+  once at first start, after checking each one is the right account. The folders are left as
+  they are.
 
 ## [0.2.6] - 2026-10-06
 

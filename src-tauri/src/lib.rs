@@ -270,6 +270,14 @@ pub fn run() {
         }
     }
 
+    // A 0.4 test build moved logins into per-account folders and deleted the
+    // saved copies this version swaps from. Save them back, once.
+    match switcher::import_profile_logins() {
+        Ok(0) => {}
+        Ok(count) => log::info!("imported {count} login(s) from 0.4 account folders"),
+        Err(error) => log::warn!("could not import logins from 0.4 account folders: {error}"),
+    }
+
     // Backstop for isolated-login temp dirs. They clean up on Drop, but an
     // abort runs no destructors, and one of those briefly holds a real
     // credential. Only sweeps dirs older than an hour so a login running in
