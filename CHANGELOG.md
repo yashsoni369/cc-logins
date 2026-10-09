@@ -9,7 +9,11 @@ At `0.x` the public contract is the on-disk shape — the account vault layout, 
 settings file, and the usage-history database schema — plus the supported OS matrix.
 A breaking change to any of those bumps the minor version, since major is pinned at 0.
 
-## [Unreleased] — 0.3.0
+## [Unreleased]
+
+Nothing yet.
+
+## [0.3.0]
 
 A redesign. Switching works exactly as before: the selected account's saved login is swapped into
 Claude Code, and sessions already running move to it on their next request.
