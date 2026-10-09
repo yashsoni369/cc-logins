@@ -102,6 +102,16 @@ jobs:
           7z l "$installer" > listing.txt
           grep -i 'cc-logins-shim.exe' listing.txt || { cat listing.txt; exit 1; }
 
+      # Unsigned test builds for a manual smoke test before release. Kept
+      # briefly; release.yml builds the signed ones.
+      - name: Keep the Windows installer for smoke testing
+        if: matrix.platform == 'windows-latest'
+        uses: actions/upload-artifact@v7
+        with:
+          name: cc-logins-windows-nsis
+          path: ${{ matrix.out }}/nsis/*.exe
+          retention-days: 7
+
       - name: Shim is in the macOS app, with both architectures
         if: matrix.platform == 'macos-latest'
         shell: bash
