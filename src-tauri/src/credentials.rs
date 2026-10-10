@@ -73,7 +73,7 @@ pub const GUI_SECURITY_SERVICE: &str = "cc-logins";
 pub const CLAUDE_CODE_KEYCHAIN_SERVICE: &str = "Claude Code-credentials";
 
 /// Service name of Claude Code's *active* managed API key
-/// (`sk-ant-api…`, activated via `/login`) in the macOS Keychain. Distinct
+/// (`sk-ant-api…` / `sk-ant-usr…`, activated via `/login`) in the macOS Keychain. Distinct
 /// from the OAuth service above (no `-credentials` suffix) — Claude Code
 /// resolves it on a separate auth axis. On non-macOS the managed key instead
 /// lives in `~/.claude.json` as `primaryApiKey`.
@@ -238,9 +238,10 @@ pub(crate) struct ActiveCredentialState {
 
 /// Whether a stored active credential is a raw managed API key vs OAuth JSON.
 ///
-/// Strict on purpose: a managed key is a bare `sk-ant-api…` string, while
-/// every OAuth/setup-token credential is a JSON object
-/// (`{"claudeAiOauth": …}`). Requiring the `sk-ant-api` prefix (and that it
+/// Strict on purpose: a managed key is a bare Console key string — the
+/// classic `sk-ant-api…` or the newer personal/workspace `sk-ant-usr…` —
+/// while every OAuth/setup-token credential is a JSON object
+/// (`{"claudeAiOauth": …}`). Requiring one of those prefixes (and that it
 /// isn't JSON) keeps a raw/garbled `sk-ant-oat…` setup token from ever being
 /// misclassified as an API key.
 pub fn looks_like_api_key(credentials: Option<&str>) -> bool {
@@ -251,8 +252,15 @@ pub fn looks_like_api_key(credentials: Option<&str>) -> bool {
         return false;
     }
     let text = raw.trim();
-    text.starts_with("sk-ant-api") && !text.starts_with('{')
+    API_KEY_PREFIXES
+        .iter()
+        .any(|prefix| text.starts_with(prefix))
 }
+
+/// Prefixes of Console-issued API keys. `sk-ant-usr` is the personal /
+/// workspace key format the Console issues alongside the classic
+/// `sk-ant-api` one; setup tokens (`sk-ant-oat`) are deliberately absent.
+const API_KEY_PREFIXES: [&str; 2] = ["sk-ant-api", "sk-ant-usr"];
 
 /// True if `raw` is structurally plausible as an active credential: a bare
 /// API key, or valid JSON. Anything else is more likely a truncated or
@@ -1463,7 +1471,7 @@ impl<H: StoreHost> CredentialStore<H> {
 
     /// Write Claude Code's active credential, enforcing a single auth axis.
     ///
-    /// Detects the kind from the payload (raw `sk-ant-api…` key vs OAuth
+    /// Detects the kind from the payload (raw API key vs OAuth
     /// JSON) and mirrors Claude Code's own `saveApiKey`/`removeApiKey`:
     /// activating one axis clears the other so a stale credential can't
     /// shadow the switch.
@@ -2273,6 +2281,8 @@ mod tests {
     fn looks_like_api_key_accepts_bare_managed_keys() {
         assert!(looks_like_api_key(Some("sk-ant-api03-abc123")));
         assert!(looks_like_api_key(Some("  sk-ant-api03-abc123  ")));
+        // Newer personal/workspace Console keys.
+        assert!(looks_like_api_key(Some("sk-ant-usr01-abc123")));
     }
 
     #[test]

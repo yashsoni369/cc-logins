@@ -278,6 +278,13 @@ pub fn run() {
         Err(error) => log::warn!("could not import logins from 0.4 account folders: {error}"),
     }
 
+    // Builds before 0.3.1 stored `sk-ant-usr…` API keys as setup tokens.
+    match switcher::repair_misclassified_api_keys() {
+        Ok(0) => {}
+        Ok(count) => log::info!("re-registered {count} mis-classified API key(s)"),
+        Err(error) => log::warn!("could not repair mis-classified API keys: {error}"),
+    }
+
     // Backstop for isolated-login temp dirs. They clean up on Drop, but an
     // abort runs no destructors, and one of those briefly holds a real
     // credential. Only sweeps dirs older than an hour so a login running in

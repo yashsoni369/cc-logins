@@ -11,7 +11,12 @@ A breaking change to any of those bumps the minor version, since major is pinned
 
 ## [Unreleased]
 
-Nothing yet.
+### Fixed
+
+- Console API keys that start with `sk-ant-usr-` (the newer personal and workspace keys) were
+  saved as setup tokens, so Claude Code sent them as a subscription login instead of using your
+  API credits. They are now recognised as API keys, and accounts already added this way are
+  repaired on the next launch. If such an account is the one in use, it switches to the API key.
 
 ## [0.3.0] - 2026-10-09
 
