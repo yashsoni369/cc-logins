@@ -43,7 +43,7 @@ What it does **not** do:
   request still goes straight from Claude Code to Anthropic, unmodified.
 - It does not export tokens to a UI, a file you can copy elsewhere, or anywhere off your machine.
   There is no cloud sync.
-- It never shows or sends token material anywhere other than the Anthropic OAuth endpoints and
+- It never shows or sends token material anywhere other than Anthropic's own API endpoints and
   your own disk.
 - It sends no telemetry and reports no usage. The only other host it can contact is GitHub, to
   ask whether a newer release exists. That request carries nothing but the current version.
@@ -80,6 +80,22 @@ Two things follow, and both are deliberate:
 - It stays well under that limit. Requests are paced to roughly twenty an hour against a measured
   cap of about thirty, the budget is remembered across restarts so relaunching cannot spend it
   twice, and a rate-limit response backs the app off rather than retrying into it.
+
+**API-key accounts** (a Console API key, billed from API credits) have no quota, so the app
+never sends their key anywhere — not even to the usage endpoint. It shows their spend in dollars
+instead, from one of two places:
+
+- By default, an estimate from Claude Code's own logs on your machine (model and token counts
+  per reply, priced per model), counted only for the time that account was in use. Nothing is
+  sent anywhere.
+- If you choose to add an **Admin key** to that account, the app reads your organisation's
+  `cost_report` with it every 30 minutes — the same daily figures the Console's billing page
+  shows. That key is stored encrypted like your logins and used for nothing else. Anthropic has
+  no public endpoint for the remaining credit balance, so you enter that yourself.
+
+When every subscription is at its limit, auto-switch can fall back to an API-key account, and it
+moves back as soon as a subscription resets. Hold the account out of auto-switch if you'd rather
+it never spends credits on its own.
 
 That's a description of what the app does, not a legal opinion — read Anthropic's terms yourself
 if you're deciding whether multi-account use fits your situation. This project takes no position

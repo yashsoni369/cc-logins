@@ -9,10 +9,13 @@ import { weeklyPaceMark, type Projection } from "../../lib/coverage";
 import { formatClock, formatCountdown } from "../../lib/time";
 import {
   ageLabel,
+  apiSpendLine,
   bindingUtilisation,
   bindingWindow,
+  creditUtilisation,
   displayName,
   formatSpend,
+  isApiAccount,
   isEnterprise,
   maskEmail,
   type Account,
@@ -52,6 +55,7 @@ export interface AccountsTableProps {
 
 /** Which window gates the account, as the chip label. */
 function limitLabel(account: Account): string | null {
+  if (isApiAccount(account)) return "API";
   const usage = account.usage;
   if (!usage) return null;
   if (isEnterprise(usage)) return "$ cap";
@@ -95,14 +99,19 @@ export default function AccountsTable(props: AccountsTableProps) {
             const heldOut = account.usageStatus === "disabled";
             const needsRelogin = account.usageStatus === "reloginrequired";
             const mismatch = account.usageStatus === "foreigncredential";
+            const api = isApiAccount(account);
             const binding = bindingWindow(account.usage);
+            // An API account has no quota windows; its one reset is the
+            // monthly spend figure starting over.
+            const resetsAt = api ? account.billing?.resetsAt : binding?.resetsAt;
             // Recomputed from `resetsAt`; the backend's own strings are the
             // fallback — stale beats blank, as in `fresh_reset_strings`.
-            const resets = formatCountdown(binding?.resetsAt, now) ?? binding?.countdown ?? binding?.clock ?? "—";
-            const resetsTitle = formatClock(binding?.resetsAt, clockFormat, now) ?? undefined;
+            const resets =
+              formatCountdown(resetsAt, now) ?? (api ? undefined : (binding?.countdown ?? binding?.clock)) ?? "—";
+            const resetsTitle = formatClock(resetsAt, clockFormat, now) ?? undefined;
             const age = ageLabel(account.usageAgeSeconds);
             const limit = limitLabel(account);
-            const util = bindingUtilisation(account.usage);
+            const util = api ? creditUtilisation(account) : bindingUtilisation(account.usage);
             const pace = binding && binding === account.usage?.sevenDay ? weeklyPaceMark(account.usage, now) : null;
             const spend = isEnterprise(account.usage) ? account.usage?.spend : undefined;
             const isBest = bestNext === account.number;
@@ -110,7 +119,9 @@ export default function AccountsTable(props: AccountsTableProps) {
 
             let runsOut = { text: "—", tone: "faint", title: undefined as string | undefined };
             if (util !== null && util >= 100) {
-              runsOut = { text: "at limit", tone: "danger", title: undefined };
+              runsOut = api
+                ? { text: "no credit", tone: "danger", title: "A money limit set for this account is used up." }
+                : { text: "at limit", tone: "danger", title: undefined };
             } else if (account.active && projection?.at != null) {
               runsOut = projection.beforeReset
                 ? {
@@ -144,7 +155,7 @@ export default function AccountsTable(props: AccountsTableProps) {
                     <span className={`mark${account.active ? " on" : ""}`}></span>
                     <div style={{ minWidth: 0 }}>
                       <div className="alias" style={heldOut ? { color: "var(--faint)" } : undefined}>
-                        {displayName(account)} <PlanBadge usage={account.usage} />{" "}
+                        {displayName(account)} <PlanBadge usage={account.usage} apiKey={api} />{" "}
                         {account.active && <span className="pill on">in use</span>}
                         {isBest && <span className="pill best">best next</span>}
                         {heldOut && <span className="pill">held out</span>}
@@ -163,7 +174,9 @@ export default function AccountsTable(props: AccountsTableProps) {
                 <td>
                   <div className="used-cell" style={meterStyle}>
                     <UsageMeter pct={util} pace={pace} />
-                    {spend ? (
+                    {api ? (
+                      <span className="used-sub num">{apiSpendLine(account.billing)}</span>
+                    ) : spend ? (
                       <span className="used-sub num">{formatSpend(spend)} · monthly</span>
                     ) : account.usage?.fiveHour && account.usage?.sevenDay ? (
                       <span className="used-sub num">

@@ -1,6 +1,10 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  apiSpendLine,
+  creditUtilisation,
+  formatUsd,
+  type Billing,
   bindingUtilisation,
   bindingWindow,
   bindingWindows,
@@ -171,5 +175,46 @@ describe("enterprise spend cap", () => {
 
   it("states the cap the way the web UI does", () => {
     expect(formatSpend(spend)).toBe("$3.08 of $200.00");
+  });
+});
+
+describe("API-key account money helpers", () => {
+  const billing = (patch: Partial<Billing> = {}): Billing => ({
+    monthToDateUsd: 14.41,
+    todayUsd: 1,
+    last7dUsd: 5,
+    daily: [],
+    byModel: [],
+    resetsAt: "2026-11-01T00:00:00Z",
+    hasAdminKey: true,
+    source: "adminApi",
+    ...patch,
+  });
+  const api = (b?: Billing): Account => ({
+    number: 4,
+    email: "api-key-4@token.local",
+    active: false,
+    usageStatus: "payAsYouGo",
+    kind: "apiKey",
+    billing: b,
+  });
+
+  it("measures the further-along of the monthly limit and the balance", () => {
+    expect(creditUtilisation(api(billing()))).toBeNull();
+    expect(creditUtilisation(api(billing({ monthlyLimitUsd: 50, monthToDateUsd: 25 })))).toBe(50);
+    expect(
+      creditUtilisation(
+        api(billing({ monthlyLimitUsd: 100, monthToDateUsd: 10, prepaidBalanceUsd: 200, balanceLeftUsd: 50 })),
+      ),
+    ).toBe(75);
+    expect(creditUtilisation(api(billing({ monthlyLimitUsd: 10, monthToDateUsd: 30 })))).toBe(100);
+  });
+
+  it("marks an estimate and adds the limit and balance when known", () => {
+    expect(apiSpendLine(undefined)).toBe("pay as you go");
+    expect(apiSpendLine(billing())).toBe(`${formatUsd(14.41)} this month`);
+    expect(apiSpendLine(billing({ source: "estimate", monthlyLimitUsd: 50, balanceLeftUsd: 185.59 }))).toBe(
+      `≈ ${formatUsd(14.41)} of ${formatUsd(50)} this month · ${formatUsd(185.59)} left`,
+    );
   });
 });

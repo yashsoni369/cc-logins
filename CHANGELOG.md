@@ -11,7 +11,21 @@ A breaking change to any of those bumps the minor version, since major is pinned
 
 ## [Unreleased]
 
+### Added
+
+- **API-key accounts in dollars.** An account added with a Console API key now shows spend instead
+  of empty 5-hour and weekly cards: this month (with its reset), today, the last 7 days, daily
+  bars, and the top models. Figures are exact from your organisation's cost report when you add
+  an Admin key to the account, and otherwise estimated from Claude Code's logs on this machine.
+  You can set a monthly limit and enter your credit balance; spend is taken off it from then on.
+- Auto-switch treats an API-key account as a fallback. It moves there only when every subscription
+  is known to be at its limit, never on an unknown reading. It moves back as soon as a subscription
+  has quota again, and stops using the account once a limit you set is reached.
+
 ### Fixed
+
+- An active API-key account no longer reads as "usage unknown". Before, after a few polls,
+  auto-switch would move away from it, and the coverage headline was marked stale.
 
 - Console API keys that start with `sk-ant-usr-` (the newer personal and workspace keys) were
   saved as setup tokens, so Claude Code sent them as a subscription login instead of using your

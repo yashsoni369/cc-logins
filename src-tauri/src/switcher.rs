@@ -99,8 +99,8 @@ use crate::credentials::{
     self, CredentialError, CredentialStore, Platform as CredPlatform, StoreHost,
 };
 use crate::model::{
-    Account, EnvKind, EnvStatus, Environment, Snapshot, SpendWindow, Usage, UsageStatus,
-    UsageWindow,
+    Account, AccountKind, BillingLimits, EnvKind, EnvStatus, Environment, Snapshot, SpendWindow,
+    Usage, UsageStatus, UsageWindow,
 };
 use crate::oauth;
 use crate::oauth_quarantine::OAuthQuarantine;
@@ -451,6 +451,19 @@ fn accounts_from_sequence(data: &Map<String, Value>) -> Vec<Account> {
             .and_then(Value::as_bool)
             .unwrap_or(false);
         let active = active_num.as_deref() == Some(num_str.as_str());
+        let kind = if record.get("kind").and_then(Value::as_str) == Some("api_key") {
+            AccountKind::ApiKey
+        } else {
+            AccountKind::Subscription
+        };
+        let billing_limits = BillingLimits {
+            monthly_limit_usd: record.get("monthlyLimitUsd").and_then(Value::as_f64),
+            prepaid_balance_usd: record.get("prepaidBalanceUsd").and_then(Value::as_f64),
+            balance_set_at: record
+                .get("balanceSetAt")
+                .and_then(Value::as_str)
+                .map(str::to_string),
+        };
 
         out.push(Account {
             number,
@@ -463,12 +476,17 @@ fn accounts_from_sequence(data: &Map<String, Value>) -> Vec<Account> {
             active,
             usage_status: if disabled {
                 UsageStatus::Disabled
+            } else if kind == AccountKind::ApiKey {
+                UsageStatus::PayAsYouGo
             } else {
                 UsageStatus::Unknown
             },
             usage: None,
             usage_fetched_at: None,
             usage_age_seconds: None,
+            kind,
+            billing: None,
+            billing_limits,
         });
     }
     out
@@ -1173,6 +1191,12 @@ async fn read_snapshot_inner() -> Result<SnapshotFetch, SwitchError> {
     // Phase 2 — network work, with no credential store held.
     let mut measured = Vec::with_capacity(pending.len());
     for (mut account, creds, backup) in pending {
+        // An API key has no quota to measure: it is billed per request, and
+        // its dollar figures are attached below from the billing cache.
+        if account.is_pay_as_you_go() {
+            measured.push(account);
+            continue;
+        }
         let num = account.number.to_string();
 
         let result = if account.active {
@@ -1279,6 +1303,7 @@ async fn read_snapshot_inner() -> Result<SnapshotFetch, SwitchError> {
         }
         measured.push(account);
     }
+    crate::billing::attach(&mut measured);
 
     let environment = Environment {
         id: "native".to_string(),
@@ -2838,6 +2863,97 @@ fn set_account_alias_with_timeout(
     Ok(())
 }
 
+/// Largest dollar figure accepted for a limit or balance: anything above is a
+/// typo, not a budget.
+const MAX_BILLING_USD: f64 = 10_000_000.0;
+
+/// Set or clear an API account's monthly limit and prepaid balance.
+///
+/// `balanceSetAt` records when the balance was entered, so spend is counted
+/// from then; it is restamped only when the balance itself changes, so saving
+/// the form again does not forget what was spent.
+pub fn set_billing_limits(
+    number: u32,
+    monthly_limit_usd: Option<f64>,
+    prepaid_balance_usd: Option<f64>,
+) -> Result<(), SwitchError> {
+    set_billing_limits_with_timeout(
+        number,
+        monthly_limit_usd,
+        prepaid_balance_usd,
+        crate::locking::DEFAULT_TIMEOUT,
+    )
+}
+
+fn set_billing_limits_with_timeout(
+    number: u32,
+    monthly_limit_usd: Option<f64>,
+    prepaid_balance_usd: Option<f64>,
+    timeout: Duration,
+) -> Result<(), SwitchError> {
+    for value in [monthly_limit_usd, prepaid_balance_usd]
+        .into_iter()
+        .flatten()
+    {
+        if !value.is_finite() || !(0.0..MAX_BILLING_USD).contains(&value) {
+            return Err(SwitchError::InvalidInput(
+                "enter a dollar amount of 0 or more".to_string(),
+            ));
+        }
+    }
+
+    let _lock = crate::locking::acquire_or_err(vault_lock_path(), timeout)?;
+    refuse_pending_recovery()?;
+
+    let mut data = read_sequence_data().ok_or(SwitchError::NoAccountsManaged)?;
+    let num = number.to_string();
+    let Some(record) = data
+        .get_mut("accounts")
+        .and_then(Value::as_object_mut)
+        .and_then(|accounts| accounts.get_mut(&num))
+        .and_then(Value::as_object_mut)
+    else {
+        return Err(SwitchError::UnknownAccount(num));
+    };
+    if record.get("kind").and_then(Value::as_str) != Some("api_key") {
+        return Err(SwitchError::InvalidInput(
+            "only API-key accounts have a money limit".to_string(),
+        ));
+    }
+    match monthly_limit_usd {
+        Some(limit) => {
+            record.insert("monthlyLimitUsd".to_string(), Value::from(limit));
+        }
+        None => {
+            record.remove("monthlyLimitUsd");
+        }
+    }
+    match prepaid_balance_usd {
+        Some(balance) => {
+            let unchanged = record.get("prepaidBalanceUsd").and_then(Value::as_f64)
+                == Some(balance)
+                && record.get("balanceSetAt").is_some();
+            if !unchanged {
+                record.insert("prepaidBalanceUsd".to_string(), Value::from(balance));
+                record.insert(
+                    "balanceSetAt".to_string(),
+                    Value::String(chrono::Utc::now().to_rfc3339()),
+                );
+            }
+        }
+        None => {
+            record.remove("prepaidBalanceUsd");
+            record.remove("balanceSetAt");
+        }
+    }
+    data.insert(
+        "lastUpdated".to_string(),
+        Value::String(chrono::Utc::now().to_rfc3339()),
+    );
+    write_sequence_data(&data)?;
+    Ok(())
+}
+
 /// Whether a `sequence` / `activeAccountNumber` entry names `number`. Both
 /// numbers and numeric strings are accepted, matching [`accounts_from_sequence`].
 fn registry_entry_is(value: &Value, number: u32) -> bool {
@@ -3172,6 +3288,24 @@ pub fn pick_target(accounts: &[Account], strategy: Strategy) -> Option<&Account>
         Strategy::NextAvailable => pick_next_available(accounts),
         Strategy::ConsumeFirst => pick_consume_first(accounts),
     }
+    .or_else(|| pick_pay_as_you_go_fallback(accounts))
+}
+
+/// The last resort: an API account, which spends real money. Chosen only when
+/// every subscription that could be used (the active one included) is
+/// *known* to be at its limit. An unknown reading is never enough, so a
+/// network blip cannot start spending credits.
+fn pick_pay_as_you_go_fallback(accounts: &[Account]) -> Option<&Account> {
+    let mut subscriptions = accounts
+        .iter()
+        .filter(|a| !a.is_pay_as_you_go() && (a.active || a.is_switchable()))
+        .peekable();
+    subscriptions.peek()?;
+    let all_spent = subscriptions.all(|a| matches!(a.headroom(), Some(h) if h <= 0.0));
+    if !all_spent {
+        return None;
+    }
+    accounts.iter().find(|a| a.is_fallback_target())
 }
 
 /// `best`: the known-headroom switchable account with the most headroom.
@@ -5736,6 +5870,120 @@ mod tests {
             serde_json::from_str(&std::fs::read_to_string(paths::global_config_path()).unwrap())
                 .unwrap();
         assert_eq!(config["primaryApiKey"], key);
+    }
+
+    #[test]
+    fn billing_limits_are_set_cleared_and_keep_their_balance_stamp() {
+        let _env = setup_env();
+        write_json_file(
+            &accounts_file(),
+            &serde_json::json!({
+                "sequence": [1, 2],
+                "accounts": {
+                    "1": {"email": "api-key-1@token.local", "kind": "api_key"},
+                    "2": {"email": "alpha@example.com"}
+                }
+            }),
+        );
+        let read = || -> Value {
+            serde_json::from_str(&std::fs::read_to_string(accounts_file()).unwrap()).unwrap()
+        };
+        let timeout = crate::locking::DEFAULT_TIMEOUT;
+
+        set_billing_limits_with_timeout(1, Some(50.0), Some(200.0), timeout).unwrap();
+        let first = read();
+        assert_eq!(first["accounts"]["1"]["monthlyLimitUsd"], 50.0);
+        assert_eq!(first["accounts"]["1"]["prepaidBalanceUsd"], 200.0);
+        let stamp = first["accounts"]["1"]["balanceSetAt"].clone();
+        assert!(stamp.is_string());
+
+        // Saving the same balance again keeps when it was entered.
+        set_billing_limits_with_timeout(1, None, Some(200.0), timeout).unwrap();
+        let second = read();
+        assert_eq!(second["accounts"]["1"]["balanceSetAt"], stamp);
+        assert!(second["accounts"]["1"].get("monthlyLimitUsd").is_none());
+
+        let account = read_accounts().unwrap().remove(0);
+        assert_eq!(account.kind, AccountKind::ApiKey);
+        assert_eq!(account.usage_status, UsageStatus::PayAsYouGo);
+        assert_eq!(account.billing_limits.prepaid_balance_usd, Some(200.0));
+
+        set_billing_limits_with_timeout(1, None, None, timeout).unwrap();
+        let cleared = read();
+        assert!(cleared["accounts"]["1"].get("prepaidBalanceUsd").is_none());
+        assert!(cleared["accounts"]["1"].get("balanceSetAt").is_none());
+
+        assert!(matches!(
+            set_billing_limits_with_timeout(2, Some(10.0), None, timeout),
+            Err(SwitchError::InvalidInput(_))
+        ));
+        assert!(matches!(
+            set_billing_limits_with_timeout(1, Some(-1.0), None, timeout),
+            Err(SwitchError::InvalidInput(_))
+        ));
+    }
+
+    #[test]
+    fn an_api_account_is_the_fallback_only_once_every_subscription_is_spent() {
+        let sub = |number: u32, active: bool, headroom: Option<f64>| Account {
+            number,
+            active,
+            usage_status: if headroom.is_some() {
+                UsageStatus::Ok
+            } else {
+                UsageStatus::Unknown
+            },
+            usage: headroom.map(|h| Usage {
+                five_hour: Some(UsageWindow {
+                    pct: 100.0 - h,
+                    ..UsageWindow::default()
+                }),
+                ..Usage::default()
+            }),
+            ..Account::default()
+        };
+        let api = Account {
+            number: 9,
+            kind: AccountKind::ApiKey,
+            usage_status: UsageStatus::PayAsYouGo,
+            ..Account::default()
+        };
+
+        let spent = vec![
+            sub(1, true, Some(0.0)),
+            sub(2, false, Some(0.0)),
+            api.clone(),
+        ];
+        assert_eq!(
+            pick_target(&spent, Strategy::MostHeadroom).map(|a| a.number),
+            Some(9)
+        );
+        // An unknown reading is not proof the subscription is spent.
+        let unknown = vec![sub(1, true, Some(0.0)), sub(2, false, None), api.clone()];
+        assert_eq!(
+            pick_target(&unknown, Strategy::MostHeadroom).map(|a| a.number),
+            None
+        );
+        // Any headroom left on a subscription goes there first.
+        let room = vec![
+            sub(1, true, Some(0.0)),
+            sub(2, false, Some(3.0)),
+            api.clone(),
+        ];
+        assert_eq!(
+            pick_target(&room, Strategy::MostHeadroom).map(|a| a.number),
+            Some(2)
+        );
+        // Held out, it is never picked.
+        let held = Account {
+            usage_status: UsageStatus::Disabled,
+            ..api
+        };
+        let spent_held = vec![sub(1, true, Some(0.0)), held];
+        assert_eq!(
+            pick_target(&spent_held, Strategy::MostHeadroom).map(|a| a.number),
+            None
+        );
     }
 
     #[test]
