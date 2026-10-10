@@ -413,6 +413,41 @@ export async function setAccountEnabled(accountNumber: number, enabled: boolean)
 }
 
 /**
+ * Sets (or, with `null`, clears) an API account's monthly limit and prepaid
+ * balance, in dollars.
+ */
+export async function setBillingLimits(
+  accountNumber: number,
+  monthlyLimitUsd: number | null,
+  prepaidBalanceUsd: number | null,
+): Promise<Snapshot> {
+  if (!hasBackend()) {
+    throw new IpcError("internal", "Not running in the desktop app, so limits cannot be saved.");
+  }
+  return call<Snapshot>("set_billing_limits", { accountNumber, monthlyLimitUsd, prepaidBalanceUsd });
+}
+
+/**
+ * Saves (or, with `null`, forgets) the Admin key an API account's spend is
+ * read with. The backend checks the key with one cost-report read first and
+ * refuses one that cannot read it (`invalidInput`).
+ */
+export async function setBillingKey(accountNumber: number, key: string | null): Promise<Snapshot> {
+  if (!hasBackend()) {
+    throw new IpcError("internal", "Not running in the desktop app, so a key cannot be saved.");
+  }
+  return call<Snapshot>("set_billing_key", { accountNumber, key });
+}
+
+/** Re-reads spend for every API account now. */
+export async function refreshBilling(): Promise<Snapshot> {
+  if (!hasBackend()) {
+    throw new IpcError("internal", "Not running in the desktop app, so spend cannot be read.");
+  }
+  return call<Snapshot>("refresh_billing");
+}
+
+/**
  * Renames an account. `null` or a blank string clears the name so the masked
  * email shows again; names over 40 characters are refused (`invalidInput`).
  *

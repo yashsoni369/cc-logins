@@ -32,7 +32,15 @@ import {
   switchAccount,
   wakeEnvironment,
 } from "./lib/api";
-import { bindingUtilisation, bindingWindow, displayName, type DaemonPhase, type Snapshot } from "./types";
+import {
+  apiSpendShort,
+  bindingUtilisation,
+  bindingWindow,
+  displayName,
+  isApiAccount,
+  type DaemonPhase,
+  type Snapshot,
+} from "./types";
 
 // Loaded the first time the palette opens, so `cmdk` stays out of the startup bundle.
 const CommandPalette = lazy(() => import("./components/CommandPalette"));
@@ -505,7 +513,9 @@ function AppContent() {
         id: `switch-${account.number}`,
         group: "Switch to",
         label: displayName(account),
-        meta: [pct === null ? null : `${Math.round(pct)}%`, reset ? `resets ${reset}` : null].filter(Boolean).join(" · "),
+        meta: isApiAccount(account)
+          ? `API · ${apiSpendShort(account.billing)}`
+          : [pct === null ? null : `${Math.round(pct)}%`, reset ? `resets ${reset}` : null].filter(Boolean).join(" · "),
         keywords: [account.email, account.organizationName ?? ""],
         run: () => handleSwitch(account.number),
       });
@@ -541,7 +551,7 @@ function AppContent() {
       list.push({
         id: "add-token",
         group: "Actions",
-        label: "Paste a setup token",
+        label: "Paste a setup token or API key",
         run: () => {
           setScreen("home");
           setShowToken(true);

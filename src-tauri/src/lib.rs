@@ -8,6 +8,7 @@
 //! Portions of the credential, path and usage logic are ported from
 //! claude-swap (MIT) — https://github.com/realiti4/claude-swap
 
+pub mod billing;
 pub mod claude_cli;
 pub mod claude_locks;
 pub mod commands;
@@ -278,6 +279,13 @@ pub fn run() {
         Err(error) => log::warn!("could not import logins from 0.4 account folders: {error}"),
     }
 
+    // Builds before 0.3.1 stored `sk-ant-usr…` API keys as setup tokens.
+    match switcher::repair_misclassified_api_keys() {
+        Ok(0) => {}
+        Ok(count) => log::info!("re-registered {count} mis-classified API key(s)"),
+        Err(error) => log::warn!("could not repair mis-classified API keys: {error}"),
+    }
+
     // Backstop for isolated-login temp dirs. They clean up on Drop, but an
     // abort runs no destructors, and one of those briefly holds a real
     // credential. Only sweeps dirs older than an hour so a login running in
@@ -328,6 +336,9 @@ pub fn run() {
             commands::add_token,
             commands::set_account_enabled,
             commands::set_account_alias,
+            commands::set_billing_limits,
+            commands::set_billing_key,
+            commands::refresh_billing,
             commands::remove_account,
             commands::reorder_accounts,
             commands::wake_environment,
@@ -379,6 +390,20 @@ pub fn run() {
             // Off the UI thread: it waits on the vault lock. After the
             // single-instance check, so a rejected second launch never sweeps.
             tauri::async_runtime::spawn_blocking(sweep_orphaned_backups);
+
+            // Dollar figures for API-key accounts. Independent of the quota
+            // poller and its budget; the next poll publishes what this reads.
+            tauri::async_runtime::spawn(async {
+                tokio::time::sleep(std::time::Duration::from_secs(15)).await;
+                loop {
+                    match tokio::task::spawn_blocking(switcher::read_accounts).await {
+                        Ok(Ok(accounts)) => billing::refresh(&accounts).await,
+                        Ok(Err(error)) => log::debug!("billing refresh skipped: {error}"),
+                        Err(error) => log::debug!("billing refresh skipped: {error}"),
+                    }
+                    tokio::time::sleep(billing::REFRESH_EVERY).await;
+                }
+            });
 
             // A hard process termination leaves Claude Code's proper-lockfile
             // directories behind. Claude Code deliberately protects a fresh

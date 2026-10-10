@@ -24,7 +24,7 @@ export default function AddTokenDialog({ pending, error, onSubmit, onCancel }: A
   const [alias, setAlias] = useState("");
 
   // Only the prefix is inspected, to word the hint; the token goes nowhere but `onSubmit`.
-  const looksLikeApiKey = token.trim().startsWith("sk-ant-api");
+  const looksLikeApiKey = /^sk-ant-(api|usr)/.test(token.trim());
 
   const handleSubmit = (e: FormEvent) => {
     e.preventDefault();
@@ -47,7 +47,7 @@ export default function AddTokenDialog({ pending, error, onSubmit, onCancel }: A
   return (
     <form className="token-form" onSubmit={handleSubmit}>
       <div className="row">
-        <label htmlFor="acct-token">Setup token</label>
+        <label htmlFor="acct-token">Setup token or API key</label>
         <input
           id="acct-token"
           className="input mono"
@@ -63,10 +63,10 @@ export default function AddTokenDialog({ pending, error, onSubmit, onCancel }: A
       </div>
       <p id="acct-token-hint" className="token-hint">
         {looksLikeApiKey ? (
-          "This looks like an API key. API keys are billed per request and have no 5-hour or weekly limits, so this account will show no quota."
+          "This looks like a Console API key. It is billed per request from your API credits and has no 5-hour or weekly limits."
         ) : (
           <>
-            Create one with <code>claude setup-token</code>. An API key also works, but has no quota to track.
+            Create a setup token with <code>claude setup-token</code>, or paste a Console API key to use API credits.
           </>
         )}
       </p>

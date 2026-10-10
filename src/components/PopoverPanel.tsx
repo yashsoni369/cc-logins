@@ -20,9 +20,13 @@ import { useSettings } from "@/lib/useSettings";
 import { useSnapshot } from "@/lib/useSnapshot";
 import { useTheme } from "@/lib/useTheme";
 import {
+  apiSpendLine,
+  apiSpendShort,
   bindingUtilisation,
   bindingWindow,
+  creditUtilisation,
   displayName,
+  isApiAccount,
   isEnterprise,
   type Usage,
   type UsageWindow,
@@ -282,6 +286,7 @@ export default function PopoverPanel() {
   const fiveHour = activeAccount.usage?.fiveHour;
   const activeSpend = isEnterprise(activeAccount.usage) ? activeAccount.usage?.spend : undefined;
   const sevenDay = activeAccount.usage?.sevenDay;
+  const activeApi = isApiAccount(activeAccount);
   const dimStyle: CSSProperties | undefined = error ? { opacity: 0.55 } : undefined;
   const urgent = phase?.kind === "warning" || phase?.kind === "switching" || phase?.kind === "exhausted";
   const secondsLeft =
@@ -336,7 +341,7 @@ export default function PopoverPanel() {
           <span className="alias" title={displayName(activeAccount)}>
             {displayName(activeAccount)}
           </span>
-          <PlanBadge usage={activeAccount.usage} />
+          <PlanBadge usage={activeAccount.usage} apiKey={activeApi} />
           <span className={`pill ${urgent ? "danger" : "on"}`}>
             {urgent && activeUtil != null ? `${Math.round(activeUtil)}%` : "active"}
           </span>
@@ -345,6 +350,13 @@ export default function PopoverPanel() {
           {/* No rate-limit windows exist on an enterprise plan, so the cap it is
               actually limited by takes their place rather than leaving the
               block empty. */}
+          {activeApi && (
+            <div className="row" title={apiSpendLine(activeAccount.billing)}>
+              <span className="lab">spend</span>
+              <div style={dimStyle}><UsageMeter pct={creditUtilisation(activeAccount)} /></div>
+              <span className="rst">{apiSpendShort(activeAccount.billing)}</span>
+            </div>
+          )}
           {activeSpend && (
             <div className="row">
               <span className="lab">spend</span>
@@ -396,7 +408,8 @@ export default function PopoverPanel() {
           const isPending = pendingAccount === account.number;
           // Suppressed while unavailable: when an account cannot be switched to,
           // when its quota frees up is not the thing standing in the way.
-          const reset = unavailable ? null : bindingReset(account.usage, minuteNow);
+          const api = isApiAccount(account);
+          const reset = unavailable ? null : api ? apiSpendShort(account.billing) : bindingReset(account.usage, minuteNow);
           return (
             <button
               key={account.number}
@@ -407,7 +420,7 @@ export default function PopoverPanel() {
             >
               <span className="mark" />
               <span className="alias" title={displayName(account)}>{displayName(account)}</span>
-              <PlanBadge usage={account.usage} />
+              <PlanBadge usage={account.usage} apiKey={api} />
               {disabled && <span className="pill">held out</span>}
               {needsRelogin && <span className="pill danger" title="Re-login required">Re-login</span>}
               {hasForeignCredential && (
@@ -417,7 +430,7 @@ export default function PopoverPanel() {
               {!isNext && bestNext?.number === account.number && !unavailable && <span className="pill best" title="Auto-switch would pick this account next">best</span>}
               {isPending && <span className="pill">switching…</span>}
               <div className="pop-meter" style={dimStyle}>
-                <UsageMeter pct={bindingUtilisation(account.usage)} />
+                <UsageMeter pct={api ? creditUtilisation(account) : bindingUtilisation(account.usage)} />
               </div>
               <span className="rst">{reset}</span>
               {!unavailable && <span className="pop-go" aria-hidden="true">Switch</span>}

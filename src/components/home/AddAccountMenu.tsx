@@ -46,10 +46,10 @@ export default function AddAccountMenu({ loginPresent, onAddCurrent, onSignIn, o
   };
   const token: MenuItem = {
     id: "token",
-    label: "Paste a setup token",
+    label: "Paste a setup token or API key",
     description: (
       <>
-        For headless machines. Made with <code>claude setup-token</code>.
+        A <code>claude setup-token</code> for headless machines, or a Console API key for API credits.
       </>
     ),
     onSelect: onPasteToken,

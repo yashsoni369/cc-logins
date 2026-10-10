@@ -620,6 +620,78 @@ pub async fn set_account_alias(
     Ok(snap)
 }
 
+/// Set or clear an API account's monthly limit and prepaid balance.
+#[tauri::command]
+pub async fn set_billing_limits(
+    state: tauri::State<'_, AppState>,
+    app: tauri::AppHandle,
+    account_number: u32,
+    monthly_limit_usd: Option<f64>,
+    prepaid_balance_usd: Option<f64>,
+) -> IpcResult<Snapshot> {
+    refuse_if_recovery_required()?;
+    let task = move || {
+        switcher::set_billing_limits(account_number, monthly_limit_usd, prepaid_balance_usd)
+    };
+    off_runtime(task).await??;
+    let snap = snapshot_uncached(&state).await?;
+    crate::poller::publish_snapshot(&app, &snap);
+    Ok(snap)
+}
+
+/// Save (or, with `None`, forget) the Admin key an API account's spend is read
+/// with. A key is checked with one cost-report read before it is kept.
+#[tauri::command]
+pub async fn set_billing_key(
+    state: tauri::State<'_, AppState>,
+    app: tauri::AppHandle,
+    account_number: u32,
+    key: Option<String>,
+) -> IpcResult<Snapshot> {
+    let accounts = off_runtime(switcher::read_accounts).await??;
+    let account = accounts
+        .into_iter()
+        .find(|a| a.number == account_number)
+        .ok_or_else(|| IpcError::InvalidInput(format!("no account {account_number}")))?;
+    if !account.is_pay_as_you_go() {
+        return Err(IpcError::InvalidInput(
+            "only API-key accounts read spend with an Admin key".to_string(),
+        ));
+    }
+    let key = key.map(|k| k.trim().to_string()).filter(|k| !k.is_empty());
+    if let Some(key) = &key {
+        if !key.starts_with("sk-ant-") {
+            return Err(IpcError::InvalidInput(
+                "expected an Admin key starting with \"sk-ant-admin\"".to_string(),
+            ));
+        }
+        crate::billing::verify_admin_key(key)
+            .await
+            .map_err(|error| {
+                IpcError::InvalidInput(format!("that key can't read spend: {error}"))
+            })?;
+    }
+    crate::billing::write_admin_key(&account.stable_key(), key.as_deref())
+        .map_err(IpcError::Credential)?;
+    crate::billing::refresh(std::slice::from_ref(&account)).await;
+    let snap = snapshot_uncached(&state).await?;
+    crate::poller::publish_snapshot(&app, &snap);
+    Ok(snap)
+}
+
+/// Re-read spend for every API account now.
+#[tauri::command]
+pub async fn refresh_billing(
+    state: tauri::State<'_, AppState>,
+    app: tauri::AppHandle,
+) -> IpcResult<Snapshot> {
+    let accounts = off_runtime(switcher::read_accounts).await??;
+    crate::billing::refresh(&accounts).await;
+    let snap = snapshot_uncached(&state).await?;
+    crate::poller::publish_snapshot(&app, &snap);
+    Ok(snap)
+}
+
 /// Stop managing an account and delete its stored credential and config.
 ///
 /// Refuses the active account ([`IpcError::CannotRemoveActive`]). The

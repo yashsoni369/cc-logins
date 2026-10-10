@@ -422,7 +422,9 @@ pub fn next_unhealthy_ticks(previous: u32, active_usage_known_this_tick: bool) -
 /// exclusion (anti-flap on the one account just vacated), not a
 /// reinterpretation of "unknown" as disqualifying.
 fn hysteresis_ok(account: &Account, state: &LegacyDaemonState, config: &PollerConfig) -> bool {
-    if state.last_switch_from != Some(account.number) {
+    // An API account is only ever chosen once every subscription is spent,
+    // so there is no flapping to damp.
+    if state.last_switch_from != Some(account.number) || account.is_pay_as_you_go() {
         return true;
     }
     let floor = config.threshold - config.hysteresis_pct;
@@ -540,6 +542,26 @@ pub fn decide(
     let active_number = active.number;
     let active_headroom = active.headroom();
 
+    let all_accounts: Vec<Account> = snapshot
+        .environments
+        .iter()
+        .flat_map(|e| e.accounts.iter().cloned())
+        .collect();
+
+    // On an API account the only reason to move is to stop paying: leave as
+    // soon as a subscription has quota again, or when the credit runs out.
+    if active.is_pay_as_you_go() {
+        let target = switcher::pick_target(&all_accounts, config.strategy)
+            .filter(|target| !target.is_pay_as_you_go());
+        return match target {
+            Some(target) => LegacyDecision::Switch {
+                from: active_number,
+                to: target.number,
+            },
+            None => LegacyDecision::Hold,
+        };
+    }
+
     let need_switch = match active_headroom {
         Some(h) => 100.0 - h >= config.threshold,
         None => state.unhealthy_ticks >= config.unhealthy_ticks,
@@ -557,12 +579,6 @@ pub fn decide(
             return LegacyDecision::Hold;
         }
     }
-
-    let all_accounts: Vec<Account> = snapshot
-        .environments
-        .iter()
-        .flat_map(|e| e.accounts.iter().cloned())
-        .collect();
 
     // Rule 3: hysteresis pre-filter, scoped to `last_switch_from` only.
     let candidates: Vec<Account> = all_accounts
@@ -614,7 +630,7 @@ pub fn decide(
     // blocked this tick, not stuck) — is *known* to be at its limit.
     let relevant: Vec<&Account> = all_accounts
         .iter()
-        .filter(|a| a.active || a.is_switchable())
+        .filter(|a| (a.active || a.is_switchable()) && !a.is_pay_as_you_go())
         .collect();
     let any_unknown = relevant.iter().any(|a| a.headroom().is_none());
     let all_at_limit = !relevant.is_empty()
@@ -793,10 +809,10 @@ impl PollerLoopState {
             return decision;
         }
 
+        // An API account is never "unknown": it has no quota to measure.
         let active_known = snapshot
             .active_account()
-            .and_then(Account::headroom)
-            .is_some();
+            .is_some_and(|a| a.is_pay_as_you_go() || a.headroom().is_some());
         self.daemon.unhealthy_ticks =
             next_unhealthy_ticks(self.daemon.unhealthy_ticks, active_known);
 
@@ -804,9 +820,14 @@ impl PollerLoopState {
             self.daemon.pending = None;
             return Decision::Monitoring;
         };
-        let needs_switch = match active.headroom() {
-            Some(headroom) => 100.0 - headroom >= self.policy.threshold,
-            None => self.daemon.unhealthy_ticks >= self.policy.unhealthy_ticks,
+        let needs_switch = if active.is_pay_as_you_go() {
+            // Leaving is decided by `decide`: only when a subscription is back.
+            true
+        } else {
+            match active.headroom() {
+                Some(headroom) => 100.0 - headroom >= self.policy.threshold,
+                None => self.daemon.unhealthy_ticks >= self.policy.unhealthy_ticks,
+            }
         };
         if !needs_switch {
             self.daemon.pending = None;
@@ -866,6 +887,7 @@ impl PollerLoopState {
                     .iter()
                     .flat_map(|environment| environment.accounts.iter())
                     .filter(|account| account.active || account.is_switchable())
+                    .filter(|account| !account.is_pay_as_you_go())
                     .any(|account| account.headroom().is_none());
                 if has_unknown {
                     Decision::Degraded {
@@ -1514,6 +1536,11 @@ fn prune_history(app: &AppHandle, store: &HistoryStore) {
 fn tray_spec_for(snapshot: &Snapshot, theme: AmbientTheme) -> IconSpec {
     match snapshot.active_account() {
         None => IconSpec::unconfigured(theme),
+        // No quota to draw: show how much of the money limit is used, or an
+        // empty gauge when none is set. Never "stale" — nothing is missing.
+        Some(a) if a.is_pay_as_you_go() => {
+            IconSpec::resting(a.credit_utilisation().unwrap_or(0.0) as f32, theme)
+        }
         Some(a) => match a.binding_utilisation() {
             Some(u) => IconSpec::resting(u as f32, theme),
             None => IconSpec {

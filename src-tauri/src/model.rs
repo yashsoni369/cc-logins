@@ -114,6 +114,9 @@ pub enum UsageStatus {
     Unavailable,
     /// The CLI reported an error state for this account.
     Error,
+    /// A Console API key: billed per request, so there is no quota to measure.
+    #[serde(rename = "payAsYouGo")]
+    PayAsYouGo,
     /// Never successfully measured, or a status this build does not know.
     #[default]
     Unknown,
@@ -130,11 +133,94 @@ impl<'de> Deserialize<'de> for UsageStatus {
             "disabled" => Self::Disabled,
             "unavailable" => Self::Unavailable,
             "error" => Self::Error,
+            "payasyougo" => Self::PayAsYouGo,
             // Forward-compatible: a status added upstream must never cost us
             // the whole account.
             _ => Self::Unknown,
         })
     }
+}
+
+/// What an account bills against.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum AccountKind {
+    /// A Claude subscription: 5-hour and weekly quota windows.
+    #[default]
+    Subscription,
+    /// A Console API key: pay as you go from API credits.
+    ApiKey,
+}
+
+/// Where an API account's dollar figures came from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum BillingSource {
+    /// The organisation's cost report, read with an Admin key. Matches the
+    /// Console's own spend figure.
+    AdminApi,
+    /// Claude Code's local transcripts priced per model, counting only the
+    /// time this account was in use here.
+    Estimate,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct DailySpend {
+    /// UTC calendar day, `YYYY-MM-DD`.
+    pub day: String,
+    pub usd: f64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct ModelSpend {
+    pub model: String,
+    pub usd: f64,
+}
+
+/// What an API-key account has spent, and against what.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct Billing {
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub source: Option<BillingSource>,
+    /// Spend since 00:00 UTC on the first of this month.
+    pub month_to_date_usd: f64,
+    pub today_usd: f64,
+    pub last7d_usd: f64,
+    /// Up to the last 31 UTC days, oldest first.
+    pub daily: Vec<DailySpend>,
+    /// This month, largest first.
+    pub by_model: Vec<ModelSpend>,
+    /// When the monthly figure starts over: 00:00 UTC on the first.
+    pub resets_at: String,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub fetched_at: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub error: Option<String>,
+    pub has_admin_key: bool,
+    /// Last four characters of the Admin key, for recognising it.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub admin_key_hint: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub monthly_limit_usd: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub prepaid_balance_usd: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub balance_set_at: Option<String>,
+    /// The prepaid balance less everything spent since it was entered.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub balance_left_usd: Option<f64>,
+}
+
+/// The money limits a user entered for an API account, kept in its registry
+/// record next to its alias.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct BillingLimits {
+    pub monthly_limit_usd: Option<f64>,
+    pub prepaid_balance_usd: Option<f64>,
+    pub balance_set_at: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -164,6 +250,14 @@ pub struct Account {
     /// integer type. Caught by the fixture test against a live capture.
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub usage_age_seconds: Option<f64>,
+    #[serde(default)]
+    pub kind: AccountKind,
+    /// Present on API-key accounts only.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub billing: Option<Billing>,
+    /// Backend-only: read from the registry, surfaced through `billing`.
+    #[serde(skip)]
+    pub billing_limits: BillingLimits,
 }
 
 impl Account {
@@ -255,6 +349,54 @@ impl Account {
                 self.usage_status,
                 UsageStatus::Disabled | UsageStatus::ReloginRequired
             )
+    }
+
+    /// A Console API key, billed per request rather than against quota.
+    pub fn is_pay_as_you_go(&self) -> bool {
+        self.kind == AccountKind::ApiKey
+    }
+
+    /// Whether a known money limit is already used up: the monthly limit, or
+    /// the prepaid balance. Unknown limits never count as used up.
+    pub fn is_out_of_credit(&self) -> bool {
+        let Some(billing) = &self.billing else {
+            return false;
+        };
+        let over_limit = billing
+            .monthly_limit_usd
+            .is_some_and(|limit| billing.month_to_date_usd >= limit);
+        let no_balance = billing.balance_left_usd.is_some_and(|left| left <= 0.0);
+        over_limit || no_balance
+    }
+
+    /// How much of a known money limit is used, 0..=100: the monthly limit,
+    /// or else the prepaid balance. `None` when neither is set.
+    pub fn credit_utilisation(&self) -> Option<f64> {
+        let billing = self.billing.as_ref()?;
+        let monthly = billing
+            .monthly_limit_usd
+            .filter(|limit| *limit > 0.0)
+            .map(|limit| billing.month_to_date_usd / limit * 100.0);
+        let balance = billing
+            .prepaid_balance_usd
+            .zip(billing.balance_left_usd)
+            .filter(|(balance, _)| *balance > 0.0)
+            .map(|(balance, left)| (balance - left) / balance * 100.0);
+        monthly
+            .into_iter()
+            .chain(balance)
+            .reduce(f64::max)
+            .map(|pct| pct.clamp(0.0, 100.0))
+    }
+
+    /// Eligible as the last-resort automatic target: an API account that is
+    /// not held out of rotation and still has credit. See
+    /// [`crate::switcher::pick_target`] for when it is used.
+    pub fn is_fallback_target(&self) -> bool {
+        !self.active
+            && self.is_pay_as_you_go()
+            && self.usage_status == UsageStatus::PayAsYouGo
+            && !self.is_out_of_credit()
     }
 
     /// Eligible for unattended activation. Automatic selection is

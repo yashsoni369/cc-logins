@@ -94,6 +94,8 @@ export type UsageStatus =
   | "unavailable"
   /** The CLI reported an error state for this account. */
   | "error"
+  /** A Console API key: billed per request, so there is no quota to read. */
+  | "payAsYouGo"
   /** No usage has ever been read, or a status this build does not know. */
   | "unknown"
   // eslint-disable-next-line @typescript-eslint/ban-types
@@ -116,6 +118,47 @@ export interface Account {
   usageFetchedAt?: string;
   /** Age of the measurement. Drives the staleness badge. */
   usageAgeSeconds?: number;
+  /** What the account bills against. Absent from older backends: a subscription. */
+  kind?: AccountKind;
+  /** Dollar figures, on API-key accounts only. */
+  billing?: Billing;
+}
+
+/** A Claude subscription (quota windows) or a Console API key (pay as you go). */
+export type AccountKind = "subscription" | "apiKey";
+
+export interface DailySpend {
+  /** UTC day, `YYYY-MM-DD`. */
+  day: string;
+  usd: number;
+}
+
+export interface ModelSpend {
+  model: string;
+  usd: number;
+}
+
+/** What an API-key account has spent, and against what. Mirrors `model::Billing`. */
+export interface Billing {
+  /** `adminApi`: the organisation's cost report, exact. `estimate`: local Claude Code logs. */
+  source?: "adminApi" | "estimate";
+  monthToDateUsd: number;
+  todayUsd: number;
+  last7dUsd: number;
+  /** The last 31 UTC days, oldest first. */
+  daily: DailySpend[];
+  /** This month, largest first. */
+  byModel: ModelSpend[];
+  /** 00:00 UTC on the first of next month. */
+  resetsAt: string;
+  fetchedAt?: string;
+  error?: string;
+  hasAdminKey: boolean;
+  adminKeyHint?: string;
+  monthlyLimitUsd?: number;
+  prepaidBalanceUsd?: number;
+  balanceSetAt?: string;
+  balanceLeftUsd?: number;
 }
 
 /** A distinct credential store — native Windows, a WSL distro, or a profile dir. */
@@ -196,6 +239,58 @@ export function bindingWindow(u: Usage | undefined): UsageWindow | null {
  */
 export function bindingUtilisation(u: Usage | undefined): number | null {
   return bindingWindow(u)?.pct ?? null;
+}
+
+/** A Console API key account, billed per request from API credits. */
+export function isApiAccount(account: Pick<Account, "kind">): boolean {
+  return account.kind === "apiKey";
+}
+
+/** "$14.41". */
+export function formatUsd(value: number): string {
+  return new Intl.NumberFormat(undefined, { style: "currency", currency: "USD" }).format(value);
+}
+
+/**
+ * How much of a known money limit is used, 0..100: the monthly limit, or the
+ * prepaid balance, whichever is further along. `null` when neither is set.
+ * Mirrors `Account::credit_utilisation`.
+ */
+export function creditUtilisation(account: Account): number | null {
+  const b = account.billing;
+  if (!b) return null;
+  const pcts: number[] = [];
+  if (b.monthlyLimitUsd != null && b.monthlyLimitUsd > 0) pcts.push((b.monthToDateUsd / b.monthlyLimitUsd) * 100);
+  if (b.prepaidBalanceUsd != null && b.prepaidBalanceUsd > 0 && b.balanceLeftUsd != null) {
+    pcts.push(((b.prepaidBalanceUsd - b.balanceLeftUsd) / b.prepaidBalanceUsd) * 100);
+  }
+  return pcts.length ? Math.min(100, Math.max(0, ...pcts)) : null;
+}
+
+/** Whether a known money limit is used up. Mirrors `Account::is_out_of_credit`. */
+export function isOutOfCredit(account: Account): boolean {
+  const b = account.billing;
+  if (!b) return false;
+  const overLimit = b.monthlyLimitUsd != null && b.monthToDateUsd >= b.monthlyLimitUsd;
+  const noBalance = b.balanceLeftUsd != null && b.balanceLeftUsd <= 0;
+  return overLimit || noBalance;
+}
+
+/** "≈ $14.41 of $50.00 this month · $185.59 left", the one-line money summary. */
+export function apiSpendLine(billing: Billing | undefined): string {
+  if (!billing) return "pay as you go";
+  const approx = billing.source === "estimate" ? "≈ " : "";
+  const spent = formatUsd(billing.monthToDateUsd);
+  const month =
+    billing.monthlyLimitUsd != null
+      ? `${approx}${spent} of ${formatUsd(billing.monthlyLimitUsd)} this month`
+      : `${approx}${spent} this month`;
+  return billing.balanceLeftUsd != null ? `${month} · ${formatUsd(billing.balanceLeftUsd)} left` : month;
+}
+
+/** "$14.41/mo", for narrow cells. */
+export function apiSpendShort(billing: Billing | undefined): string {
+  return billing ? `${formatUsd(billing.monthToDateUsd)}/mo` : "API";
 }
 
 /** Remaining percentage before the account hits a limit. */

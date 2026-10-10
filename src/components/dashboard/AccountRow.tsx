@@ -3,10 +3,14 @@ import { useId, useState } from "react";
 import { useClockFormat } from "@/lib/clockFormat";
 import { formatClock, formatCountdown } from "@/lib/time";
 import {
+  apiSpendLine,
   bindingUtilisation,
   bindingWindow,
+  creditUtilisation,
   displayName,
   formatSpend,
+  formatUsd,
+  isApiAccount,
   isEnterprise,
   quotaState,
   type Account,
@@ -14,6 +18,7 @@ import {
   type Sample,
   type ScopedSample,
 } from "@/types";
+import { DailySpendBars } from "@/components/home/ApiBilling";
 import { Loading } from "@/components/Loading";
 import UsageMeter from "@/components/UsageMeter";
 import PlanBadge from "@/components/PlanBadge";
@@ -115,7 +120,10 @@ export default function AccountRow({
   const drawerId = useId();
 
   const name = displayName(account);
-  const binding = bindingUtilisation(account.usage);
+  // An API account has no quota; its meter is the share of a money limit used.
+  const api = isApiAccount(account);
+  const billing = account.billing;
+  const binding = api ? creditUtilisation(account) : bindingUtilisation(account.usage);
   const state = quotaState(binding);
   const cls = state === "ok" ? "" : state;
   const status = statusLabel(account);
@@ -124,7 +132,9 @@ export default function AccountRow({
   // account there is no five-hour window, and its monthly cap is the only
   // reset there is.
   const bindingWin = bindingWindow(account.usage);
-  const resets = formatCountdown(bindingWin?.resetsAt, now) ?? bindingWin?.countdown ?? "—";
+  const resets =
+    (api ? formatCountdown(billing?.resetsAt, now) : (formatCountdown(bindingWin?.resetsAt, now) ?? bindingWin?.countdown)) ??
+    "—";
   const enterprise = isEnterprise(account.usage);
   const spend = account.usage?.spend;
 
@@ -175,7 +185,7 @@ export default function AccountRow({
           <span className="row-name" title={name}>
             {name}
           </span>
-          <PlanBadge usage={account.usage} />
+          <PlanBadge usage={account.usage} apiKey={api} />
           {account.active && <span className="pill on">active</span>}
           {status && <span className={`pill${status === "re-login" || status === "mismatch" ? " danger" : ""}`}>{status}</span>}
         </span>
@@ -184,7 +194,12 @@ export default function AccountRow({
           <UsageMeter pct={binding} />
           <small>limit</small>
         </span>
-        {enterprise && spend ? (
+        {api ? (
+          <span className="row-cell" title={apiSpendLine(billing)}>
+            {billing ? formatUsd(billing.monthToDateUsd) : "··"}
+            <small>this month</small>
+          </span>
+        ) : enterprise && spend ? (
           <span className="row-cell" title={formatSpend(spend)}>
             {formatSpend(spend).split(" of ")[0]}
             <small>of {formatSpend(spend).split(" of ")[1]}</small>
@@ -204,7 +219,31 @@ export default function AccountRow({
       {/* Always in the tree so `aria-controls` resolves; the class alone
           governs visibility. `hidden` would fight the class's own display. */}
       <div className={`drawer${expanded ? " open" : ""}`} id={drawerId}>
-        {expanded && (
+        {expanded &&
+          api &&
+          (billing ? (
+            <>
+              <DailySpendBars daily={billing.daily} />
+              <div className="stats">
+                <Stat k="This month" v={formatUsd(billing.monthToDateUsd)} />
+                <Stat k="Today" v={formatUsd(billing.todayUsd)} />
+                <Stat k="Last 7 days" v={formatUsd(billing.last7dUsd)} />
+                <Stat k="Resets" v={resets === "—" ? "unknown" : resets} />
+              </div>
+              <p className="dash-note">
+                An API-key account is billed per request from API credits, so it has no 5-hour or 7-day windows to
+                chart.{" "}
+                {billing.source === "estimate"
+                  ? "These figures are estimated from Claude Code's logs on this machine."
+                  : "These figures come from your organisation's cost report."}
+              </p>
+            </>
+          ) : (
+            <div className="empty">
+              <p>No spend has been read for this account yet.</p>
+            </div>
+          ))}
+        {expanded && !api && (
           <>
             <div className="tabs" role="tablist" aria-label={`${name} detail`}>
               <button type="button" role="tab" aria-selected={tab === "windows"} onClick={() => setTab("windows")}>

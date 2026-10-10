@@ -9,7 +9,7 @@
  */
 
 import type { Account, DayStat, Sample } from "@/types";
-import { bindingUtilisation, displayName } from "@/types";
+import { bindingUtilisation, displayName, isApiAccount } from "@/types";
 
 // ── ranges ───────────────────────────────────────────────────────────────────
 
@@ -342,7 +342,8 @@ export function pooledHeadroom(accounts: Account[]): Headroom {
       number: account.number,
       name: displayName(account),
       free: binding == null ? 0 : Math.max(0, 100 - binding),
-      excluded: heldOut || unreadable,
+      // API accounts bill money, not quota: nothing here to pool.
+      excluded: heldOut || unreadable || isApiAccount(account),
       binding,
     };
   });

@@ -363,3 +363,19 @@ describe("formatRunway", () => {
     expect(formatRunway(Number.NaN)).toBe("unknown");
   });
 });
+
+describe("pooledRunway with an API-key account", () => {
+  it("leaves it out of the pool without calling the estimate stale", () => {
+    const accounts = [
+      account({ number: 1, active: true }),
+      account({ number: 2, email: "api@example.com", kind: "apiKey", usageStatus: "payAsYouGo", usage: undefined }),
+    ];
+    const samples = new Map<string, Sample[]>([["a@example.com", RISING]]);
+    expect(pooledRunway(accounts, samples, keyFor, NOW)).toEqual({
+      seconds: 21_600,
+      pctPerHour: 10,
+      degraded: false,
+      contributing: 1,
+    });
+  });
+});
