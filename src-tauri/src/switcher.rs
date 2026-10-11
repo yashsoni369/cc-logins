@@ -451,7 +451,7 @@ fn accounts_from_sequence(data: &Map<String, Value>) -> Vec<Account> {
             .and_then(Value::as_bool)
             .unwrap_or(false);
         let active = active_num.as_deref() == Some(num_str.as_str());
-        let kind = if record.get("kind").and_then(Value::as_str) == Some("api_key") {
+        let kind = if is_pay_as_you_go_record(record) {
             AccountKind::ApiKey
         } else {
             AccountKind::Subscription
@@ -2190,7 +2190,7 @@ fn add_current_account_with_timeout(
 /// trimmed token on success.
 ///
 /// Every real Claude API key and OAuth setup-token upstream ever issues
-/// starts with `sk-ant-` (`sk-ant-api...` / `sk-ant-usr...` / `sk-ant-oat...`); this is a
+/// starts with `sk-ant-` (`sk-ant-api...` / `sk-ant-oat...`); this is a
 /// coarse sanity check, not a full format validator, so it only rejects
 /// input that is empty, obviously JSON (a common paste mistake — pasting a
 /// whole credentials blob instead of just the token), or missing that
@@ -2224,7 +2224,7 @@ fn validate_token(token: &str) -> Result<String, SwitchError> {
 ///
 /// Useful without any prior Claude Code login on this machine — e.g. a
 /// headless install, or a token copied from another machine. The kind is
-/// auto-detected via [`credentials::looks_like_api_key`]: an `sk-ant-api...` / `sk-ant-usr...`
+/// auto-detected via [`credentials::looks_like_api_key`]: an `sk-ant-api...`
 /// value is stored raw and activated on Claude Code's managed-key axis;
 /// anything else is treated as an OAuth setup-token and wrapped in the same
 /// `claudeAiOauth` JSON shape Claude Code itself uses. The token itself is
@@ -2277,14 +2277,10 @@ fn add_token_with_timeout(
     let is_api_key = credentials::looks_like_api_key(Some(&trimmed));
 
     // Resolve identity BEFORE the lock (rule 2 — never hold a lock across a
-    // network call). Advisory: a failure here only degrades the duplicate
-    // check below to the fingerprint fallback. An API key is never sent to
-    // the OAuth profile endpoint — it can't authenticate there.
-    let resolved_account = if is_api_key {
-        None
-    } else {
-        resolve_identity(&trimmed)
-    };
+    // network call). Advisory: a failure here (or an API key that simply
+    // can't authenticate against the profile endpoint) only degrades the
+    // duplicate check below to the fingerprint fallback.
+    let resolved_account = resolve_identity(&trimmed);
     let identity_resolved = resolved_account.is_some();
     let new_identity: ResolvedIdentity = resolved_account
         .map(ResolvedIdentity::from)
@@ -2327,7 +2323,7 @@ fn add_token_with_timeout(
             return Err(SwitchError::AlreadyRegistered(existing_num));
         }
     }
-    if !identity_resolved && !is_api_key {
+    if !identity_resolved {
         log::warn!(
             "add_token: could not resolve account identity via the OAuth profile lookup \
              (offline, an API key, or the endpoint failed); duplicate check degraded to \
@@ -2376,6 +2372,8 @@ fn add_token_with_timeout(
     }
     if is_api_key {
         record.insert("kind".to_string(), Value::String("api_key".to_string()));
+    } else if credentials::is_console_key(&trimmed) {
+        record.insert("consoleKey".to_string(), Value::Bool(true));
     }
     if let Some(a) = alias.map(str::trim).filter(|s| !s.is_empty()) {
         record.insert("alias".to_string(), Value::String(a.to_string()));
@@ -2915,7 +2913,7 @@ fn set_billing_limits_with_timeout(
     else {
         return Err(SwitchError::UnknownAccount(num));
     };
-    if record.get("kind").and_then(Value::as_str) != Some("api_key") {
+    if !is_pay_as_you_go_record(record) {
         return Err(SwitchError::InvalidInput(
             "only API-key accounts have a money limit".to_string(),
         ));
@@ -3550,35 +3548,42 @@ fn import_profile_logins_with_timeout(timeout: Duration) -> Result<usize, Switch
     Ok(imported)
 }
 
-/// Save back API keys an older build registered as setup tokens.
-///
-/// Before `sk-ant-usr…` keys were recognised, `add_token` wrapped one as
-/// `{"claudeAiOauth":{"accessToken":"sk-ant-usr…"}}`. Claude Code then sent
-/// the key as an OAuth bearer token instead of as `primaryApiKey`. This
-/// unwraps each such slot to the raw key, marks it `kind: "api_key"`, and,
-/// when that slot is the live login, re-activates it on the managed-key axis.
-/// Returns how many slots were repaired; idempotent.
-pub fn repair_misclassified_api_keys() -> Result<usize, SwitchError> {
-    repair_misclassified_api_keys_with_timeout(crate::locking::DEFAULT_TIMEOUT)
+/// Whether a registry record bills from API credits: a raw managed API key
+/// (`kind: "api_key"`) or a Console key stored as a setup token
+/// (`consoleKey: true`).
+fn is_pay_as_you_go_record(record: &Map<String, Value>) -> bool {
+    record.get("kind").and_then(Value::as_str) == Some("api_key")
+        || record.get("consoleKey").and_then(Value::as_bool) == Some(true)
 }
 
-/// The raw API key inside an OAuth-shaped wrapper, if that is all it is: an
-/// API-key `accessToken` and no refresh token (a real OAuth login always
-/// carries one).
-fn wrapped_api_key(credentials: &str) -> Option<String> {
-    let oauth = oauth::extract_oauth_data(credentials.trim())?;
+/// Tag Console keys added before `consoleKey` existed, so they show spend in
+/// dollars. Only `sequence.json` is written; the stored credential and how
+/// Claude Code uses it are left alone. Returns how many were tagged.
+pub fn tag_console_keys() -> Result<usize, SwitchError> {
+    tag_console_keys_with_timeout(crate::locking::DEFAULT_TIMEOUT)
+}
+
+/// A setup-token-shaped credential carrying a Console key: an `sk-ant-usr`
+/// access token and no refresh token.
+fn wraps_console_key(credentials: &str) -> bool {
+    let Some(oauth) = oauth::extract_oauth_data(credentials.trim()) else {
+        return false;
+    };
     let has_refresh = oauth
         .get("refreshToken")
         .and_then(Value::as_str)
         .is_some_and(|value| !value.is_empty());
-    let access = oauth.get("accessToken").and_then(Value::as_str)?.trim();
-    (!has_refresh && credentials::looks_like_api_key(Some(access))).then(|| access.to_string())
+    !has_refresh
+        && oauth
+            .get("accessToken")
+            .and_then(Value::as_str)
+            .is_some_and(credentials::is_console_key)
 }
 
-fn misclassified_slots(
+fn untagged_console_key_slots(
     data: &Map<String, Value>,
     store: &mut CredentialStore<GuiStoreHost>,
-) -> Vec<(String, String, String)> {
+) -> Vec<String> {
     let Some(accounts) = data.get("accounts").and_then(Value::as_object) else {
         return Vec::new();
     };
@@ -3586,60 +3591,49 @@ fn misclassified_slots(
         .iter()
         .filter_map(|(num, record)| {
             let record = record.as_object()?;
-            if record.get("kind").and_then(Value::as_str) == Some("api_key") {
+            if is_pay_as_you_go_record(record) {
                 return None;
             }
             let email = record
                 .get("email")
                 .and_then(Value::as_str)
                 .filter(|email| !email.is_empty())?;
-            let key = wrapped_api_key(&store.read_account_credentials(num, email))?;
-            Some((num.clone(), email.to_string(), key))
+            wraps_console_key(&store.read_account_credentials(num, email)).then(|| num.clone())
         })
         .collect()
 }
 
-fn repair_misclassified_api_keys_with_timeout(timeout: Duration) -> Result<usize, SwitchError> {
+fn tag_console_keys_with_timeout(timeout: Duration) -> Result<usize, SwitchError> {
     let Some(data) = read_sequence_data() else {
         return Ok(0);
     };
     let mut store = CredentialStore::new(GuiStoreHost);
-    if misclassified_slots(&data, &mut store).is_empty() {
+    if untagged_console_key_slots(&data, &mut store).is_empty() {
         return Ok(0);
     }
 
-    // May rewrite Claude Code's active credential, so take the full lock set.
-    let _locks = crate::switch_transaction::acquire_live_state_locks(timeout)?;
-    if crate::switch_transaction::recovery_requirement().is_some() {
-        return Err(crate::switch_transaction::TransactionError::RecoveryRequired.into());
-    }
+    let _lock = crate::locking::acquire_or_err(vault_lock_path(), timeout)?;
+    refuse_pending_recovery()?;
     let mut data = read_sequence_data().unwrap_or_default();
-    let slots = misclassified_slots(&data, &mut store);
-    let active = current_account_number(&data);
-    for (num, email, key) in &slots {
-        store.write_account_credentials(num, email, key)?;
-        if active.as_deref() == Some(num.as_str()) {
-            // Only replace the live login if it is still this wrapped key.
-            let live = store.read_credentials().unwrap_or_default();
-            if wrapped_api_key(&live).as_deref() == Some(key.as_str()) {
-                store.write_credentials(key)?;
-            }
-        }
+    let slots = untagged_console_key_slots(&data, &mut store);
+    for num in &slots {
         if let Some(record) = data
             .get_mut("accounts")
             .and_then(Value::as_object_mut)
             .and_then(|accounts| accounts.get_mut(num))
             .and_then(Value::as_object_mut)
         {
-            record.insert("kind".to_string(), Value::String("api_key".to_string()));
+            record.insert("consoleKey".to_string(), Value::Bool(true));
         }
-        log::info!("account {num}: re-registered a mis-classified API key");
+        log::info!("account {num}: tagged as a Console key");
     }
-    data.insert(
-        "lastUpdated".to_string(),
-        Value::String(chrono::Utc::now().to_rfc3339()),
-    );
-    write_sequence_data(&data)?;
+    if !slots.is_empty() {
+        data.insert(
+            "lastUpdated".to_string(),
+            Value::String(chrono::Utc::now().to_rfc3339()),
+        );
+        write_sequence_data(&data)?;
+    }
     Ok(slots.len())
 }
 
@@ -5758,44 +5752,29 @@ mod tests {
     }
 
     #[test]
-    fn add_token_stores_a_personal_console_key_as_an_api_key() {
+    fn add_token_keeps_a_console_key_wrapped_and_tags_it() {
         let _env = setup_env();
         let key = "sk-ant-usr01-abcdefghijklmnopqrstuvwxyz";
-        let slot = add_token_with_timeout(
-            key,
-            None,
-            None,
-            crate::locking::DEFAULT_TIMEOUT,
-            // An API key must never be sent to the OAuth profile lookup.
-            &|_| panic!("identity lookup called for an API key"),
-        )
-        .unwrap();
+        let slot =
+            add_token_with_timeout(key, None, None, crate::locking::DEFAULT_TIMEOUT, &|_| None)
+                .unwrap();
 
         let seq: Value =
             serde_json::from_str(&std::fs::read_to_string(accounts_file()).unwrap()).unwrap();
-        assert_eq!(seq["accounts"]["1"]["email"], "api-key-1@token.local");
-        assert_eq!(seq["accounts"]["1"]["kind"], "api_key");
+        assert_eq!(seq["accounts"]["1"]["email"], "setup-token-1@token.local");
+        assert_eq!(seq["accounts"]["1"]["consoleKey"], true);
+        assert!(seq["accounts"]["1"].get("kind").is_none());
         let mut store = CredentialStore::new(GuiStoreHost);
-        assert_eq!(
-            store.read_account_credentials(&slot.to_string(), "api-key-1@token.local"),
-            key
-        );
-    }
+        let stored = store.read_account_credentials(&slot.to_string(), "setup-token-1@token.local");
+        assert_eq!(oauth::extract_access_token(&stored).as_deref(), Some(key));
 
-    fn seed_wrapped_api_key_slot(num: &str, email: &str, key: &str) -> String {
-        let wrapped = serde_json::json!({
-            "claudeAiOauth": {"accessToken": key, "scopes": ["user:inference"]}
-        })
-        .to_string();
-        let mut store = CredentialStore::new(GuiStoreHost);
-        store
-            .write_account_credentials(num, email, &wrapped)
-            .unwrap();
-        wrapped
+        let account = read_accounts().unwrap().remove(0);
+        assert_eq!(account.kind, AccountKind::ApiKey);
+        assert_eq!(account.usage_status, UsageStatus::PayAsYouGo);
     }
 
     #[test]
-    fn repair_unwraps_an_inactive_misclassified_api_key() {
+    fn console_keys_added_earlier_are_tagged_without_touching_credentials() {
         let _env = setup_env();
         let key = "sk-ant-usr01-abcdefghijklmnopqrstuvwxyz";
         write_json_file(
@@ -5813,63 +5792,39 @@ mod tests {
         store
             .write_account_credentials("1", "alpha@example.com", &real_oauth)
             .unwrap();
-        seed_wrapped_api_key_slot("2", "setup-token-2@token.local", key);
+        let wrapped = serde_json::json!({
+            "claudeAiOauth": {"accessToken": key, "scopes": ["user:inference"]}
+        })
+        .to_string();
+        store
+            .write_account_credentials("2", "setup-token-2@token.local", &wrapped)
+            .unwrap();
 
         assert_eq!(
-            repair_misclassified_api_keys_with_timeout(crate::locking::DEFAULT_TIMEOUT).unwrap(),
+            tag_console_keys_with_timeout(crate::locking::DEFAULT_TIMEOUT).unwrap(),
             1
         );
+        let seq: Value =
+            serde_json::from_str(&std::fs::read_to_string(accounts_file()).unwrap()).unwrap();
+        assert_eq!(seq["accounts"]["2"]["consoleKey"], true);
+        assert_eq!(seq["accounts"]["2"]["alias"], "credits");
+        assert!(seq["accounts"]["2"].get("kind").is_none());
+        assert!(seq["accounts"]["1"].get("consoleKey").is_none());
+        // Credentials are left exactly as they were.
         assert_eq!(
             store.read_account_credentials("2", "setup-token-2@token.local"),
-            key
+            wrapped
         );
-        // A real OAuth login (it has a refresh token) is left alone.
         assert_eq!(
             store.read_account_credentials("1", "alpha@example.com"),
             real_oauth
         );
-        let seq: Value =
-            serde_json::from_str(&std::fs::read_to_string(accounts_file()).unwrap()).unwrap();
-        assert_eq!(seq["accounts"]["2"]["kind"], "api_key");
-        assert_eq!(seq["accounts"]["2"]["alias"], "credits");
-        assert!(seq["accounts"]["1"].get("kind").is_none());
 
         // Idempotent.
         assert_eq!(
-            repair_misclassified_api_keys_with_timeout(crate::locking::DEFAULT_TIMEOUT).unwrap(),
+            tag_console_keys_with_timeout(crate::locking::DEFAULT_TIMEOUT).unwrap(),
             0
         );
-    }
-
-    #[test]
-    fn repair_moves_an_active_misclassified_api_key_onto_the_managed_key_axis() {
-        let _env = setup_env();
-        let key = "sk-ant-usr01-abcdefghijklmnopqrstuvwxyz";
-        write_json_file(
-            &accounts_file(),
-            &serde_json::json!({
-                "sequence": [1],
-                "accounts": {"1": {"email": "setup-token-1@token.local", "organizationUuid": ""}}
-            }),
-        );
-        let wrapped = seed_wrapped_api_key_slot("1", "setup-token-1@token.local", key);
-        write_json_file(
-            &paths::global_config_path(),
-            &serde_json::json!({"oauthAccount": {"emailAddress": "setup-token-1@token.local", "organizationUuid": ""}}),
-        );
-        std::fs::create_dir_all(paths::claude_config_home()).unwrap();
-        std::fs::write(paths::credentials_path(), &wrapped).unwrap();
-
-        assert_eq!(
-            repair_misclassified_api_keys_with_timeout(crate::locking::DEFAULT_TIMEOUT).unwrap(),
-            1
-        );
-        let mut store = CredentialStore::new(GuiStoreHost);
-        assert_eq!(store.read_credentials().unwrap(), key);
-        let config: Value =
-            serde_json::from_str(&std::fs::read_to_string(paths::global_config_path()).unwrap())
-                .unwrap();
-        assert_eq!(config["primaryApiKey"], key);
     }
 
     #[test]

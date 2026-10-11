@@ -13,8 +13,8 @@ A breaking change to any of those bumps the minor version, since major is pinned
 
 ### Added
 
-- **API-key accounts in dollars.** An account added with a Console API key now shows spend instead
-  of empty 5-hour and weekly cards: this month (with its reset), today, the last 7 days, daily
+- **API-key accounts in dollars.** An account added with a Console key (`sk-ant-usr-…`, or a
+  classic `sk-ant-api-…` API key) now shows spend instead of empty 5-hour and weekly cards: this month (with its reset), today, the last 7 days, daily
   bars, and the top models. Figures are exact from your organisation's cost report when you add
   an Admin key to the account, and otherwise estimated from Claude Code's logs on this machine.
   You can set a monthly limit and enter your credit balance; spend is taken off it from then on.
@@ -26,11 +26,8 @@ A breaking change to any of those bumps the minor version, since major is pinned
 
 - An active API-key account no longer reads as "usage unknown". Before, after a few polls,
   auto-switch would move away from it, and the coverage headline was marked stale.
-
-- Console API keys that start with `sk-ant-usr-` (the newer personal and workspace keys) were
-  saved as setup tokens, so Claude Code sent them as a subscription login instead of using your
-  API credits. They are now recognised as API keys, and accounts already added this way are
-  repaired on the next launch. If such an account is the one in use, it switches to the API key.
+  Console keys are still stored and used exactly as before; accounts already added with one are
+  recognised on the next launch.
 
 ## [0.3.0] - 2026-10-09
 

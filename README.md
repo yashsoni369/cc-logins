@@ -81,9 +81,9 @@ Two things follow, and both are deliberate:
   cap of about thirty, the budget is remembered across restarts so relaunching cannot spend it
   twice, and a rate-limit response backs the app off rather than retrying into it.
 
-**API-key accounts** (a Console API key, billed from API credits) have no quota, so the app
-never sends their key anywhere — not even to the usage endpoint. It shows their spend in dollars
-instead, from one of two places:
+**API-key accounts** (a Console key, billed from API credits) have no quota, so the app never
+polls the usage endpoint with their key. It shows their spend in dollars instead, from one of two
+places:
 
 - By default, an estimate from Claude Code's own logs on your machine (model and token counts
   per reply, priced per model), counted only for the time that account was in use. Nothing is

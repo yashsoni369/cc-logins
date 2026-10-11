@@ -551,7 +551,7 @@ function AppContent() {
       list.push({
         id: "add-token",
         group: "Actions",
-        label: "Paste a setup token or API key",
+        label: "Paste a setup token",
         run: () => {
           setScreen("home");
           setShowToken(true);
