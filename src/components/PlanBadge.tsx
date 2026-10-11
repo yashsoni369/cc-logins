@@ -13,7 +13,17 @@ import { formatSpend, isEnterprise, type Usage } from "@/types";
  * which is the opposite of what the badge is for. `--plan-badge` sits at a
  * warmer hue so the two never trade places.
  */
-export default function PlanBadge({ usage }: { usage: Usage | undefined }) {
+export default function PlanBadge({ usage, apiKey = false }: { usage: Usage | undefined; apiKey?: boolean }) {
+  if (apiKey) {
+    const title =
+      "Console API key — pay as you go from API credits. No 5-hour or weekly limits; " +
+      "auto-switch uses it only when every subscription is at its limit.";
+    return (
+      <span className="plan-badge" title={title} aria-label={title}>
+        API
+      </span>
+    );
+  }
   if (!isEnterprise(usage)) return null;
 
   const spend = usage?.spend;

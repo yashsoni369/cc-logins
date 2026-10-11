@@ -254,6 +254,15 @@ pub fn looks_like_api_key(credentials: Option<&str>) -> bool {
     text.starts_with("sk-ant-api") && !text.starts_with('{')
 }
 
+/// Whether a pasted token is a Console key (`sk-ant-usr…`).
+///
+/// Claude Code accepts one as an OAuth bearer, so it is stored and activated
+/// exactly like a setup token; this only marks the account as billed from
+/// API credits, for the dollar view. It never changes how the key is used.
+pub fn is_console_key(token: &str) -> bool {
+    token.trim().starts_with("sk-ant-usr")
+}
+
 /// True if `raw` is structurally plausible as an active credential: a bare
 /// API key, or valid JSON. Anything else is more likely a truncated or
 /// corrupted read than a genuine new format.
@@ -2273,6 +2282,16 @@ mod tests {
     fn looks_like_api_key_accepts_bare_managed_keys() {
         assert!(looks_like_api_key(Some("sk-ant-api03-abc123")));
         assert!(looks_like_api_key(Some("  sk-ant-api03-abc123  ")));
+    }
+
+    #[test]
+    fn console_keys_stay_on_the_setup_token_path() {
+        // Claude Code authenticates an `sk-ant-usr` key as an OAuth bearer;
+        // routing it to `primaryApiKey` breaks it.
+        assert!(!looks_like_api_key(Some("sk-ant-usr01-abc123")));
+        assert!(is_console_key("  sk-ant-usr01-abc123"));
+        assert!(!is_console_key("sk-ant-api03-abc123"));
+        assert!(!is_console_key("sk-ant-oat01-abc123"));
     }
 
     #[test]

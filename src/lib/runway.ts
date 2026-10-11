@@ -26,7 +26,7 @@
  */
 
 import { formatCountdown } from "@/lib/time";
-import { windowHeadroom, type Account, type Sample } from "@/types";
+import { isApiAccount, windowHeadroom, type Account, type Sample } from "@/types";
 
 /**
  * How far back a burn rate is measured. Long enough to survive the gaps
@@ -194,13 +194,16 @@ export function pooledRunway(
 
   // A rate borrowed from an account other than the one being spent is a
   // substitution, and substitutions get labelled rather than hidden.
-  let degraded = activeRate === null && rate !== null;
+  // On an API account nothing quota-metered is burning, so borrowing a
+  // subscription's rate is expected there, not a gap.
+  let degraded = activeRate === null && rate !== null && !live.some(isApiAccount);
   let headroomPct = 0;
   let contributing = 0;
 
   for (const account of accounts) {
     // Unusable accounts are not a gap in the estimate; they are outside it.
-    if (UNUSABLE_STATUSES.has(account.usageStatus)) continue;
+    // So are pay-as-you-go accounts: they bill money, not quota.
+    if (UNUSABLE_STATUSES.has(account.usageStatus) || isApiAccount(account)) continue;
 
     // Rate-limit windows only. An enterprise spend cap gates the account and
     // counts as binding everywhere else, but it resets monthly — folding 98%

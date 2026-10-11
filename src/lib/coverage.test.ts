@@ -141,3 +141,58 @@ describe("weeklyPaceMark", () => {
     expect(weeklyPaceMark({ fiveHour: { pct: 30 } }, NOW)).toBeNull();
   });
 });
+
+describe("API-key accounts (pay as you go)", () => {
+  const api = (patch: Partial<Account> = {}): Account =>
+    account(9, { kind: "apiKey", usageStatus: "payAsYouGo", usage: undefined, ...patch });
+  const spent = (number: number, patch: Partial<Account> = {}) =>
+    account(number, { usage: { fiveHour: { pct: 100 }, sevenDay: { pct: 40 } }, ...patch });
+
+  it("is the auto-switch target only once every subscription is at its limit", () => {
+    const fleet = [spent(1, { active: true }), spent(2), api()];
+    expect(predictTarget(fleet, "most-headroom", NOW)?.number).toBe(9);
+  });
+
+  it("is never chosen while any subscription has headroom", () => {
+    const fleet = [spent(1, { active: true }), account(2, { usage: { fiveHour: { pct: 97 } } }), api()];
+    expect(predictTarget(fleet, "most-headroom", NOW)?.number).toBe(2);
+  });
+
+  it("is never chosen on an unknown reading, so a network blip cannot spend credit", () => {
+    const fleet = [spent(1, { active: true }), account(2, { usageStatus: "unknown", usage: undefined }), api()];
+    expect(predictTarget(fleet, "most-headroom", NOW)).toBeNull();
+  });
+
+  it("is skipped when held out or out of credit", () => {
+    expect(predictTarget([spent(1, { active: true }), api({ usageStatus: "disabled" })], "most-headroom", NOW)).toBeNull();
+    const broke = api({
+      billing: {
+        monthToDateUsd: 60,
+        todayUsd: 0,
+        last7dUsd: 0,
+        daily: [],
+        byModel: [],
+        resetsAt: "2026-08-01T00:00:00Z",
+        hasAdminKey: false,
+        monthlyLimitUsd: 50,
+      },
+    });
+    expect(predictTarget([spent(1, { active: true }), broke], "most-headroom", NOW)).toBeNull();
+  });
+
+  it("draws as in use when active and never as unknown", () => {
+    const plan = coveragePlan({
+      accounts: [api({ active: true }), account(2)],
+      activeSamples: [],
+      now: NOW,
+      horizonHours: 12,
+      autoSwitch: true,
+      threshold: 95,
+      strategy: "most-headroom",
+    });
+    const lane = plan.lanes[0];
+    expect(lane?.payg).toBe(true);
+    expect(lane?.unknown).toBe(false);
+    expect(lane?.segments).toEqual([{ state: "inUse", from: 0, to: 12 }]);
+  });
+});

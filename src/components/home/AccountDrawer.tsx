@@ -7,7 +7,8 @@ import Dialog from "../ui/Dialog";
 import { useClockFormat } from "../../lib/clockFormat";
 import { weeklyPaceMark, type Projection } from "../../lib/coverage";
 import { formatClock, formatWhen } from "../../lib/time";
-import { ageLabel, displayName, formatSpend, isEnterprise, maskEmail, type Account } from "../../types";
+import { ageLabel, displayName, formatSpend, isApiAccount, isEnterprise, maskEmail, type Account } from "../../types";
+import ApiBilling from "./ApiBilling";
 
 export type DrawerIntent = "view" | "rename" | "remove";
 
@@ -150,7 +151,7 @@ function DrawerBody({
           ) : (
             <div className="adrawer-name">
               <h3>
-                {displayName(account)} <PlanBadge usage={usage} />
+                {displayName(account)} <PlanBadge usage={usage} apiKey={isApiAccount(account)} />
               </h3>
               <button type="button" className="btn ghost btn-sm" onClick={() => setEditing(true)} disabled={mutationInFlight}>
                 Rename
@@ -175,7 +176,9 @@ function DrawerBody({
       )}
 
       <div className="adrawer-body">
-        {isEnterprise(usage) && usage?.spend ? (
+        {isApiAccount(account) ? (
+          <ApiBilling account={account} now={now} disabled={mutationInFlight} />
+        ) : isEnterprise(usage) && usage?.spend ? (
           <div className="limit-card">
             <div className="lc-head">
               <span className="lab">Monthly spend cap</span>
@@ -237,11 +240,16 @@ function DrawerBody({
         )}
 
         <dl className="adrawer-facts">
-          <dt>Measured</dt>
-          <dd className="num">
-            {account.usageFetchedAt ? (formatClock(account.usageFetchedAt, clockFormat, now) ?? "—") : "never"}
-            {age ? ` · ${age}` : ""}
-          </dd>
+          {/* An API account has no quota reading; its spend card says when spend was read. */}
+          {!isApiAccount(account) && (
+            <>
+              <dt>Measured</dt>
+              <dd className="num">
+                {account.usageFetchedAt ? (formatClock(account.usageFetchedAt, clockFormat, now) ?? "—") : "never"}
+                {age ? ` · ${age}` : ""}
+              </dd>
+            </>
+          )}
           <dt>Available to auto-switch</dt>
           <dd>
             <Toggle

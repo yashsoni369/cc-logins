@@ -11,7 +11,26 @@ A breaking change to any of those bumps the minor version, since major is pinned
 
 ## [Unreleased]
 
-Nothing yet.
+### Added
+
+- **API-key accounts in dollars.** An account added with a Console key (`sk-ant-usr-…`, or a
+  classic `sk-ant-api-…` API key) now shows spend instead of empty 5-hour and weekly cards: this month (with its reset), today, the last 7 days, daily
+  bars, and the top models. Figures are exact from your organisation's cost report when you add
+  an Admin key to the account, and otherwise estimated from Claude Code's logs on this machine.
+  You can set a monthly limit and enter your credit balance; spend is taken off it from then on.
+- Auto-switch treats an API-key account as a fallback. It moves there only when every subscription
+  is known to be at its limit, never on an unknown reading. It moves back as soon as a subscription
+  has quota again, and stops using the account once a limit you set is reached.
+
+### Fixed
+
+- An active API-key account no longer reads as "usage unknown". Before, after a few polls,
+  auto-switch would move away from it, and the coverage headline was marked stale.
+  Console keys are still stored and used exactly as before; accounts already added with one are
+  recognised on the next launch.
+- The spend estimate updates on every poll instead of every 30 minutes. It counts each reply at
+  its final size (it was missing part of the output), and keeps counting while cc-logins is
+  closed, as long as the same account is still the one in use.
 
 ## [0.3.0] - 2026-10-09
 

@@ -78,6 +78,12 @@ pub fn account_label(account: &Account, mode: DisplayMode) -> String {
     if account.usage_status == UsageStatus::ReloginRequired {
         return format!("{name} — sign in again");
     }
+    if account.is_pay_as_you_go() {
+        return match &account.billing {
+            Some(billing) => format!("{name} — ${:.2} this month", billing.month_to_date_usd),
+            None => format!("{name} — API credits"),
+        };
+    }
     match account.binding_utilisation() {
         Some(used) => {
             let used = used.clamp(0.0, 100.0);

@@ -9,7 +9,17 @@
  */
 
 import { accountBurn } from "@/lib/runway";
-import { bindingUtilisation, bindingWindow, headroom, isEnterprise, type Account, type Sample, type Settings } from "@/types";
+import {
+  bindingUtilisation,
+  bindingWindow,
+  headroom,
+  isApiAccount,
+  isEnterprise,
+  isOutOfCredit,
+  type Account,
+  type Sample,
+  type Settings,
+} from "@/types";
 
 export type Strategy = Settings["strategy"];
 
@@ -21,6 +31,27 @@ export function isAutomaticTarget(account: Account): boolean {
   if (account.active || account.usageStatus !== "ok") return false;
   const h = headroom(account.usage);
   return h !== null && h > 0;
+}
+
+/**
+ * The last resort, mirroring `pick_pay_as_you_go_fallback`: an API account,
+ * which spends real money, only once every subscription that could be used
+ * (the one in use included) is *known* to be at its limit. An unknown reading
+ * is never enough.
+ */
+function payAsYouGoFallback(accounts: Account[]): Account | null {
+  const usable = (a: Account) =>
+    a.active || (a.usageStatus !== "disabled" && a.usageStatus !== "reloginrequired");
+  const subscriptions = accounts.filter((a) => !isApiAccount(a) && usable(a));
+  if (subscriptions.length === 0) return null;
+  const allSpent = subscriptions.every((a) => {
+    const h = headroom(a.usage);
+    return h !== null && h <= 0;
+  });
+  if (!allSpent) return null;
+  return (
+    accounts.find((a) => !a.active && isApiAccount(a) && a.usageStatus === "payAsYouGo" && !isOutOfCredit(a)) ?? null
+  );
 }
 
 /** Epoch ms of the weekly reset, or +∞ when unknown or already past (as `seven_day_reset_ts`). */
@@ -37,7 +68,7 @@ function weeklyResetMs(account: Account, now: number): number {
  */
 export function predictTarget(accounts: Account[], strategy: Strategy, now: number): Account | null {
   const candidates = accounts.filter(isAutomaticTarget);
-  if (candidates.length === 0) return null;
+  if (candidates.length === 0) return payAsYouGoFallback(accounts);
   if (strategy === "next-available") return candidates[0] ?? null;
 
   let best: Account | null = null;
@@ -123,6 +154,8 @@ export interface Lane {
   unavailable: boolean;
   /** Usage unknown — drawn as unknown, never as free. */
   unknown: boolean;
+  /** A Console API key: billed per request, so there is no quota to draw. */
+  payg?: boolean;
 }
 
 export interface Handoff {
@@ -171,6 +204,24 @@ export function coveragePlan(options: {
   }
 
   const lanes = accounts.map((account): Lane => {
+    // In use, or about to be: drawn as such. Otherwise an empty track, since
+    // there is no limit to run into, only money to spend.
+    if (isApiAccount(account)) {
+      const segments: LaneSegment[] = account.active
+        ? [{ state: "inUse", from: 0, to: horizonHours }]
+        : handoff?.to === account.number
+          ? [{ state: "inUse", from: handoff.at, to: horizonHours }]
+          : [];
+      return {
+        account,
+        segments,
+        reset: null,
+        limit: null,
+        unavailable: account.usageStatus === "disabled",
+        unknown: false,
+        payg: true,
+      };
+    }
     const unavailable = UNAVAILABLE.has(account.usageStatus);
     const util = bindingUtilisation(account.usage);
     const resetIso = bindingWindow(account.usage)?.resetsAt;

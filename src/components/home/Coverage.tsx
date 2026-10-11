@@ -5,7 +5,7 @@ import type { CoveragePlan, Lane, Projection } from "../../lib/coverage";
 import { pooledHeadroom } from "../../lib/dashboard";
 import { formatRunway, type RunwayEstimate } from "../../lib/runway";
 import { formatClock, formatDayClock } from "../../lib/time";
-import { bindingUtilisation, displayName, headroom, type Account } from "../../types";
+import { apiSpendLine, apiSpendShort, bindingUtilisation, displayName, headroom, isApiAccount, type Account } from "../../types";
 
 /** Stale or unknown figures dim to this — the value meters already use. */
 const DIM: CSSProperties = { opacity: 0.55 };
@@ -43,6 +43,8 @@ export function CoverageKpis({ accounts, runway, activeProjection, bestNext, aut
   const qualLabel = !measurable || unknownRunway ? "unknown" : stale ? "stale estimate" : "estimate";
   const active = accounts.find((a) => a.active) ?? null;
   const activeUtil = active ? bindingUtilisation(active.usage) : null;
+  // Pay-as-you-go accounts have no quota, so they are never part of the runway.
+  const subscriptionCount = accounts.filter((a) => !isApiAccount(a)).length;
 
   let cover: string;
   let coverSub: string;
@@ -57,15 +59,17 @@ export function CoverageKpis({ accounts, runway, activeProjection, bestNext, aut
     coverSub = "nothing is burning right now, so there is nothing to project";
   } else if ((runway.seconds ?? 0) > HORIZON_SECONDS) {
     cover = "> 7 days";
-    coverSub = `at the current pace · from ${runway.contributing} of ${accounts.length} accounts`;
+    coverSub = `at the current pace · from ${runway.contributing} of ${subscriptionCount} accounts`;
   } else {
     cover = formatDayClock(iso(now + (runway.seconds ?? 0) * 1_000), clockFormat, now) ?? "unknown";
-    coverSub = `≈ ${formatRunway(runway.seconds)} at the current pace · from ${runway.contributing} of ${accounts.length} accounts`;
+    coverSub = `≈ ${formatRunway(runway.seconds)} at the current pace · from ${runway.contributing} of ${subscriptionCount} accounts`;
   }
 
   let usingSub = "no reading yet";
   let usingTone = "";
-  if (active && activeUtil !== null) {
+  if (active && isApiAccount(active)) {
+    usingSub = `${apiSpendLine(active.billing)} · pay as you go`;
+  } else if (active && activeUtil !== null) {
     const at = activeProjection?.at ?? null;
     if (at !== null && activeProjection?.beforeReset) {
       usingSub = at <= now ? "at its limit now" : `runs out ~${formatClock(iso(at), clockFormat, now) ?? "soon"}`;
@@ -98,7 +102,9 @@ export function CoverageKpis({ accounts, runway, activeProjection, bestNext, aut
         <div className="kpi-v kpi-name">{bestNext ? displayName(bestNext) : "none ready"}</div>
         <div className="kpi-h">
           {bestNext
-            ? `${Math.round(headroom(bestNext.usage) ?? 0)}% left`
+            ? isApiAccount(bestNext)
+              ? "API credits · every subscription is at its limit"
+              : `${Math.round(headroom(bestNext.usage) ?? 0)}% left`
             : "no other account has measured headroom"}
         </div>
       </div>
@@ -107,6 +113,7 @@ export function CoverageKpis({ accounts, runway, activeProjection, bestNext, aut
 }
 
 function laneNote(lane: Lane): string {
+  if (lane.payg) return lane.unavailable ? "held out" : `pay as you go · ${apiSpendShort(lane.account.billing)}`;
   if (lane.unknown) return "no reading";
   if (lane.unavailable) {
     const status = lane.account.usageStatus;
