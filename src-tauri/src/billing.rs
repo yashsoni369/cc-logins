@@ -18,13 +18,17 @@
 //!   (`<config>/projects/**/*.jsonl`) record the model and token usage of every
 //!   reply. Replies timestamped inside the periods this account was seen in
 //!   use here are priced with [`price_per_mtok`]. It counts Claude Code
-//!   traffic on this machine only, so the UI labels it an estimate.
+//!   traffic on this machine only, so the UI labels it an estimate. The
+//!   transcripts are read incrementally (only bytes appended since the last
+//!   read), so the estimate is brought up to date on every snapshot.
 //!
 //! Nothing here touches quota polling: API accounts are skipped by the usage
 //! fetch entirely (see `switcher::read_snapshot_inner`).
 
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap};
+use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, OnceLock};
 use std::time::Duration;
 
@@ -35,7 +39,9 @@ use serde_json::Value;
 use crate::model::{Account, Billing, BillingSource, DailySpend, ModelSpend};
 
 const SCHEMA_VERSION: u32 = 1;
-/// How often API spend is re-read in the background.
+/// How often the cost report is re-read, and the transcript index fully
+/// re-checked, in the background. The estimate itself also moves on every
+/// snapshot (see [`attach`]).
 pub const REFRESH_EVERY: Duration = Duration::from_secs(30 * 60);
 const COST_REPORT_URL: &str = "https://api.anthropic.com/v1/organizations/cost_report";
 const USER_AGENT: &str = concat!("cc-logins/", env!("CARGO_PKG_VERSION"));
@@ -292,13 +298,29 @@ pub fn attach(accounts: &mut [Account]) {
     }
     let now = Utc::now();
     with_cache(|cache| {
+        for account in accounts.iter().filter(|a| a.is_pay_as_you_go() && a.active) {
+            note_active(cache.rows.entry(account.stable_key()).or_default(), now);
+        }
+    });
+    // Only once the background refresh has built the index: the first full
+    // read can take seconds and must not hold up a snapshot. A refresh in
+    // progress has the lock, and this snapshot keeps the last figures.
+    if INDEX_READY.load(Ordering::Acquire) {
+        if let Ok(mut index) = transcripts().try_lock() {
+            let keys: Vec<String> = accounts
+                .iter()
+                .filter(|a| a.is_pay_as_you_go())
+                .map(Account::stable_key)
+                .filter(|key| !key_file(key).exists())
+                .collect();
+            update_estimates(&mut index, &keys, now);
+        }
+    }
+    with_cache(|cache| {
         for account in accounts.iter_mut().filter(|a| a.is_pay_as_you_go()) {
             let key = account.stable_key();
             let has_admin_key = key_file(&key).exists();
             let row = cache.rows.entry(key).or_default();
-            if account.active {
-                note_active(row, now);
-            }
             account.billing = Some(view(row, account, has_admin_key, now));
         }
     });
@@ -489,26 +511,67 @@ fn jsonl_files(dir: &Path, modified_since: std::time::SystemTime, out: &mut Vec<
     }
 }
 
-/// Spend per day and per model for replies inside `spans`, read from the
-/// transcripts under `projects`. Each request is counted once: a reply with
-/// several content blocks is written as several lines sharing a request id.
-fn estimate(
-    projects: &Path,
-    spans: &[Span],
-) -> (BTreeMap<String, f64>, HashMap<(String, String), f64>) {
-    let mut daily = BTreeMap::new();
-    let mut by_model: HashMap<(String, String), f64> = HashMap::new();
-    let Some(earliest) = spans.iter().map(|span| span.from).min() else {
-        return (daily, by_model);
-    };
-    let mut files = Vec::new();
-    jsonl_files(projects, earliest.into(), &mut files);
-    let mut seen = HashSet::new();
-    for file in files {
-        let Ok(text) = std::fs::read_to_string(&file) else {
-            continue;
-        };
-        for line in text.lines() {
+/// One priced reply.
+#[derive(Debug, Clone)]
+struct Reply {
+    at: DateTime<Utc>,
+    model: String,
+    usd: f64,
+}
+
+/// Every priced reply in Claude Code's transcripts since `since`, kept up to
+/// date by reading only what was appended to each file since the last scan.
+#[derive(Debug, Default)]
+struct TranscriptIndex {
+    /// Replies older than this were never read.
+    since: Option<DateTime<Utc>>,
+    /// How far into each transcript has been read: always just after a
+    /// newline, so a line still being written is read whole next time.
+    read_to: HashMap<PathBuf, u64>,
+    /// By request id: a reply with several content blocks is written as
+    /// several lines sharing one id, and is counted once.
+    replies: HashMap<String, Reply>,
+}
+
+impl TranscriptIndex {
+    fn scan(&mut self, projects: &Path, since: DateTime<Utc>) {
+        if self.since.is_none_or(|indexed| since < indexed) {
+            // An earlier start than anything read so far: read it all again.
+            *self = Self {
+                since: Some(since),
+                ..Self::default()
+            };
+        }
+        let since = self.since.unwrap_or(since);
+        let mut files = Vec::new();
+        jsonl_files(projects, since.into(), &mut files);
+        for file in files {
+            let offset = self.read_to.get(&file).copied().unwrap_or(0);
+            if let Some(read_to) = self.read_file(&file, offset, since) {
+                self.read_to.insert(file, read_to);
+            }
+        }
+        let horizon = Utc::now() - chrono::Duration::days(KEEP_DAYS);
+        self.replies.retain(|_, reply| reply.at >= horizon);
+    }
+
+    /// Read `file` from `offset` (from the start, if it has been rewritten
+    /// shorter) to its last complete line. Returns the new offset.
+    fn read_file(&mut self, file: &Path, offset: u64, since: DateTime<Utc>) -> Option<u64> {
+        let mut handle = std::fs::File::open(file).ok()?;
+        let len = handle.metadata().ok()?.len();
+        let offset = if len < offset { 0 } else { offset };
+        if len == offset {
+            return Some(offset);
+        }
+        handle.seek(SeekFrom::Start(offset)).ok()?;
+        let mut bytes = Vec::new();
+        handle.read_to_end(&mut bytes).ok()?;
+        let complete = bytes.iter().rposition(|b| *b == b'\n').map_or(0, |i| i + 1);
+        for (index, line) in bytes[..complete].split(|b| *b == b'\n').enumerate() {
+            let Ok(line) = std::str::from_utf8(line) else {
+                continue;
+            };
             if !line.contains("\"usage\"") {
                 continue;
             }
@@ -526,19 +589,10 @@ fn estimate(
             else {
                 continue;
             };
-            if !in_spans(spans, at) {
+            if at < since {
                 continue;
             }
             let message = entry.get("message").unwrap_or(&Value::Null);
-            let id = entry
-                .get("requestId")
-                .and_then(Value::as_str)
-                .or_else(|| message.get("id").and_then(Value::as_str));
-            if let Some(id) = id {
-                if !seen.insert(id.to_string()) {
-                    continue;
-                }
-            }
             let model = message.get("model").and_then(Value::as_str).unwrap_or("");
             let Some(usd) = message
                 .get("usage")
@@ -546,14 +600,101 @@ fn estimate(
             else {
                 continue;
             };
-            let day = day_key(at.date_naive());
-            *daily.entry(day.clone()).or_insert(0.0) += usd;
-            *by_model
-                .entry((day[..7].to_string(), model.to_string()))
-                .or_insert(0.0) += usd;
+            let id = entry
+                .get("requestId")
+                .and_then(Value::as_str)
+                .or_else(|| message.get("id").and_then(Value::as_str))
+                .map(str::to_string)
+                .unwrap_or_else(|| format!("{}#{offset}:{index}", file.display()));
+            self.replies.entry(id).or_insert(Reply {
+                at,
+                model: model.to_string(),
+                usd,
+            });
         }
+        Some(offset + complete as u64)
     }
-    (daily, by_model)
+
+    /// Spend per day and per `(month, model)` for replies inside `spans`.
+    fn tally(&self, spans: &[Span]) -> (BTreeMap<String, f64>, HashMap<(String, String), f64>) {
+        let mut daily = BTreeMap::new();
+        let mut by_model: HashMap<(String, String), f64> = HashMap::new();
+        for reply in self.replies.values().filter(|r| in_spans(spans, r.at)) {
+            let day = day_key(reply.at.date_naive());
+            *daily.entry(day.clone()).or_insert(0.0) += reply.usd;
+            *by_model
+                .entry((day[..7].to_string(), reply.model.clone()))
+                .or_insert(0.0) += reply.usd;
+        }
+        (daily, by_model)
+    }
+}
+
+/// Spend per day and per model for replies inside `spans`, read from the
+/// transcripts under `projects` (incrementally, through `index`).
+fn estimate(
+    index: &mut TranscriptIndex,
+    projects: &Path,
+    spans: &[Span],
+) -> (BTreeMap<String, f64>, HashMap<(String, String), f64>) {
+    let Some(earliest) = spans.iter().map(|span| span.from).min() else {
+        return (BTreeMap::new(), HashMap::new());
+    };
+    index.scan(projects, earliest);
+    index.tally(spans)
+}
+
+fn transcripts() -> &'static Mutex<TranscriptIndex> {
+    static INDEX: OnceLock<Mutex<TranscriptIndex>> = OnceLock::new();
+    INDEX.get_or_init(|| Mutex::new(TranscriptIndex::default()))
+}
+
+/// Set once a background refresh has read the transcripts in full, after
+/// which each snapshot only reads what was appended.
+static INDEX_READY: AtomicBool = AtomicBool::new(false);
+
+/// Bring the estimate of these accounts up to date. The cache lock is not
+/// held while the transcripts are read.
+fn update_estimates(index: &mut TranscriptIndex, keys: &[String], now: DateTime<Utc>) {
+    if keys.is_empty() {
+        return;
+    }
+    let spans: Vec<(String, Vec<Span>)> = with_cache(|cache| {
+        keys.iter()
+            .map(|key| {
+                let spans = cache
+                    .rows
+                    .get(key)
+                    .map(|row| row.active_spans.clone())
+                    .unwrap_or_default();
+                (key.clone(), spans)
+            })
+            .collect()
+    });
+    let projects = crate::paths::claude_config_home().join("projects");
+    let estimates: Vec<_> = spans
+        .iter()
+        .map(|(key, spans)| (key, estimate(index, &projects, spans)))
+        .collect();
+    let today = now.date_naive();
+    let month = month_start(now).format("%Y-%m").to_string();
+    with_cache(|cache| {
+        for (key, (daily, by_model)) in estimates {
+            let row = cache.rows.entry(key.clone()).or_default();
+            row.daily = daily;
+            row.by_model = month_breakdown(
+                by_model
+                    .into_iter()
+                    .map(|((month, model), usd)| (month, model, usd)),
+                &month,
+            );
+            row.by_model_month = month.clone();
+            row.source = Some(BillingSource::Estimate);
+            row.fetched_at = Some(now.to_rfc3339());
+            row.error = None;
+            prune(row, today);
+        }
+    });
 }
 
 // ---------------------------------------------------------------------------
@@ -583,6 +724,7 @@ pub async fn refresh(accounts: &[Account]) {
     let now = Utc::now();
     let today = now.date_naive();
     let month = month_start(now).format("%Y-%m").to_string();
+    let mut estimated = Vec::new();
     for account in accounts.iter().filter(|a| a.is_pay_as_you_go()) {
         let key = account.stable_key();
         match read_admin_key(&key) {
@@ -632,36 +774,16 @@ pub async fn refresh(accounts: &[Account]) {
                     prune(row, today);
                 });
             }
-            None => {
-                let projects = crate::paths::claude_config_home().join("projects");
-                let spans = with_cache(|cache| {
-                    cache
-                        .rows
-                        .get(&key)
-                        .map(|row| row.active_spans.clone())
-                        .unwrap_or_default()
-                });
-                let (daily, by_model) =
-                    tokio::task::spawn_blocking(move || estimate(&projects, &spans))
-                        .await
-                        .unwrap_or_default();
-                with_cache(|cache| {
-                    let row = cache.rows.entry(key.clone()).or_default();
-                    row.daily = daily;
-                    row.by_model = month_breakdown(
-                        by_model
-                            .into_iter()
-                            .map(|((month, model), usd)| (month, model, usd)),
-                        &month,
-                    );
-                    row.by_model_month = month.clone();
-                    row.source = Some(BillingSource::Estimate);
-                    row.fetched_at = Some(now.to_rfc3339());
-                    row.error = None;
-                    prune(row, today);
-                });
-            }
+            None => estimated.push(key),
         }
+    }
+    let ready = tokio::task::spawn_blocking(move || {
+        let mut index = transcripts().lock().unwrap_or_else(|p| p.into_inner());
+        update_estimates(&mut index, &estimated, now);
+    })
+    .await;
+    if ready.is_ok() {
+        INDEX_READY.store(true, Ordering::Release);
     }
 }
 
@@ -770,12 +892,58 @@ mod tests {
             from: at("2026-10-10T09:55:00Z"),
             to: at("2026-10-10T10:30:00Z"),
         }];
-        let (daily, by_model) = estimate(dir.path(), &spans);
+        let (daily, by_model) = estimate(&mut TranscriptIndex::default(), dir.path(), &spans);
         assert!((daily["2026-10-10"] - 4.0).abs() < 1e-9);
         assert!(
             (by_model[&("2026-10".to_string(), "claude-sonnet-5-5".to_string())] - 4.0).abs()
                 < 1e-9
         );
+    }
+
+    #[test]
+    fn estimate_reads_only_what_was_appended() {
+        use std::io::Write;
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("s.jsonl");
+        let line = |ts: &str, req: &str| {
+            json!({
+                "type": "assistant", "timestamp": ts, "requestId": req,
+                "message": {"model": "claude-sonnet-5-5", "usage": {"input_tokens": 1_000_000, "output_tokens": 0}}
+            })
+            .to_string()
+        };
+        let spans = [Span {
+            from: at("2026-10-10T09:00:00Z"),
+            to: at("2026-10-10T11:00:00Z"),
+        }];
+        let mut index = TranscriptIndex::default();
+        let total = |index: &mut TranscriptIndex| {
+            estimate(index, dir.path(), &spans).0.values().sum::<f64>()
+        };
+
+        // The second line is still being written: no newline yet.
+        let first = line("2026-10-10T10:00:00Z", "req_a");
+        let second = line("2026-10-10T10:05:00Z", "req_b");
+        std::fs::write(&file, format!("{first}\n{}", &second[..20])).unwrap();
+        assert!((total(&mut index) - 2.0).abs() < 1e-9);
+
+        let mut handle = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&file)
+            .unwrap();
+        // The rest of that line, then a second block of a request already counted.
+        write!(
+            handle,
+            "{}\n{}\n",
+            &second[20..],
+            line("2026-10-10T10:05:01Z", "req_b")
+        )
+        .unwrap();
+        drop(handle);
+        assert!((total(&mut index) - 4.0).abs() < 1e-9);
+        assert_eq!(index.replies.len(), 2);
+        // Nothing new: nothing changes.
+        assert!((total(&mut index) - 4.0).abs() < 1e-9);
     }
 
     #[test]
