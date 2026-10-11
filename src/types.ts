@@ -159,6 +159,8 @@ export interface Billing {
   prepaidBalanceUsd?: number;
   balanceSetAt?: string;
   balanceLeftUsd?: number;
+  /** For an estimate: when this account was first seen in use here. */
+  estimatedSince?: string;
 }
 
 /** A distinct credential store — native Windows, a WSL distro, or a profile dir. */

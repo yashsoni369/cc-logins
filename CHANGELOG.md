@@ -28,6 +28,9 @@ A breaking change to any of those bumps the minor version, since major is pinned
   auto-switch would move away from it, and the coverage headline was marked stale.
   Console keys are still stored and used exactly as before; accounts already added with one are
   recognised on the next launch.
+- The spend estimate updates on every poll instead of every 30 minutes. It counts each reply at
+  its final size (it was missing part of the output), and keeps counting while cc-logins is
+  closed, as long as the same account is still the one in use.
 
 ## [0.3.0] - 2026-10-09
 

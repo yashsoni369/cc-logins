@@ -47,12 +47,12 @@ const COST_REPORT_URL: &str = "https://api.anthropic.com/v1/organizations/cost_r
 const USER_AGENT: &str = concat!("cc-logins/", env!("CARGO_PKG_VERSION"));
 /// Days of spend kept per account, enough for a balance entered a year ago.
 const KEEP_DAYS: i64 = 400;
-/// Two sightings of an account in use this close together count as one
-/// continuous period, so a short gap between polls does not drop spend.
+/// A switch to another account seen within this long of the last sighting
+/// is taken to have happened just now: the switch commands publish a
+/// snapshot at once, so the previous account was live until then. After a
+/// longer gap (cc-logins was not running) the previous period ends at its
+/// last sighting instead, so a manual `/login` meanwhile is not counted.
 const SPAN_JOIN_GAP_S: i64 = 20 * 60;
-/// Replies a little after the last sighting still belong to the period: a
-/// switch away is noticed on the next poll, not instantly.
-const SPAN_TAIL_S: i64 = 5 * 60;
 
 // ---------------------------------------------------------------------------
 // Admin key storage
@@ -151,11 +151,21 @@ struct Row {
 struct Persisted {
     schema_version: u32,
     rows: HashMap<String, Row>,
+    #[serde(default)]
+    last_live: Option<Sighting>,
+}
+
+/// The account last seen live in Claude Code, of any kind.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+struct Sighting {
+    key: String,
+    at: DateTime<Utc>,
 }
 
 #[derive(Default)]
 struct BillingCache {
     rows: HashMap<String, Row>,
+    last_live: Option<Sighting>,
 }
 
 fn cache_path() -> PathBuf {
@@ -164,19 +174,22 @@ fn cache_path() -> PathBuf {
 
 impl BillingCache {
     fn load(path: &Path) -> Self {
-        let rows = std::fs::read(path)
+        std::fs::read(path)
             .ok()
             .and_then(|bytes| serde_json::from_slice::<Persisted>(&bytes).ok())
             .filter(|p| p.schema_version == SCHEMA_VERSION)
-            .map(|p| p.rows)
-            .unwrap_or_default();
-        Self { rows }
+            .map(|p| Self {
+                rows: p.rows,
+                last_live: p.last_live,
+            })
+            .unwrap_or_default()
     }
 
     fn save(&self, path: &Path) {
         let body = Persisted {
             schema_version: SCHEMA_VERSION,
             rows: self.rows.clone(),
+            last_live: self.last_live.clone(),
         };
         let Ok(bytes) = serde_json::to_vec_pretty(&body) else {
             return;
@@ -205,13 +218,52 @@ fn with_cache<T>(f: impl FnOnce(&mut BillingCache) -> T) -> T {
     out
 }
 
-fn note_active(row: &mut Row, now: DateTime<Utc>) {
-    match row.active_spans.last_mut() {
-        Some(span) if (now - span.to).num_seconds() <= SPAN_JOIN_GAP_S => span.to = now,
-        _ => row.active_spans.push(Span { from: now, to: now }),
+/// Record which account is live in Claude Code right now (`active`: its key
+/// and whether it bills from API credits), extending periods of use.
+///
+/// Accounts only change through cc-logins (or a manual `/login`), so an
+/// account seen live twice was live in between, however long the gap: the
+/// period runs on. On a switch the previous account's period is extended to
+/// now when it was seen recently (see [`SPAN_JOIN_GAP_S`]).
+fn note_live(cache: &mut BillingCache, active: Option<(&str, bool)>, now: DateTime<Utc>) {
+    let previous = cache.last_live.take();
+    let continuing = previous
+        .as_ref()
+        .is_some_and(|prev| active.is_some_and(|(key, _)| key == prev.key));
+    if let Some(prev) = previous.as_ref().filter(|_| !continuing) {
+        if (now - prev.at).num_seconds() <= SPAN_JOIN_GAP_S {
+            if let Some(span) = cache
+                .rows
+                .get_mut(&prev.key)
+                .and_then(|row| row.active_spans.last_mut())
+                .filter(|span| span.to == prev.at)
+            {
+                span.to = now;
+            }
+        }
     }
-    let horizon = now - chrono::Duration::days(KEEP_DAYS);
-    row.active_spans.retain(|span| span.to >= horizon);
+    let Some((key, pay_as_you_go)) = active else {
+        return;
+    };
+    if pay_as_you_go {
+        let row = cache.rows.entry(key.to_string()).or_default();
+        match row.active_spans.last_mut() {
+            Some(span) if continuing => span.to = now,
+            // A cache written before `last_live` existed.
+            Some(span)
+                if previous.is_none() && (now - span.to).num_seconds() <= SPAN_JOIN_GAP_S =>
+            {
+                span.to = now
+            }
+            _ => row.active_spans.push(Span { from: now, to: now }),
+        }
+        let horizon = now - chrono::Duration::days(KEEP_DAYS);
+        row.active_spans.retain(|span| span.to >= horizon);
+    }
+    cache.last_live = Some(Sighting {
+        key: key.to_string(),
+        at: now,
+    });
 }
 
 // ---------------------------------------------------------------------------
@@ -287,6 +339,11 @@ fn view(row: &Row, account: &Account, has_admin_key: bool, now: DateTime<Utc>) -
         prepaid_balance_usd: limits.prepaid_balance_usd,
         balance_set_at: limits.balance_set_at.clone(),
         balance_left_usd,
+        estimated_since: row
+            .active_spans
+            .first()
+            .filter(|_| row.source == Some(BillingSource::Estimate))
+            .map(|span| span.from.to_rfc3339()),
     }
 }
 
@@ -297,10 +354,16 @@ pub fn attach(accounts: &mut [Account]) {
         return;
     }
     let now = Utc::now();
+    let active = accounts
+        .iter()
+        .find(|a| a.active)
+        .map(|a| (a.stable_key(), a.is_pay_as_you_go()));
     with_cache(|cache| {
-        for account in accounts.iter().filter(|a| a.is_pay_as_you_go() && a.active) {
-            note_active(cache.rows.entry(account.stable_key()).or_default(), now);
-        }
+        note_live(
+            cache,
+            active.as_ref().map(|(key, payg)| (key.as_str(), *payg)),
+            now,
+        )
     });
     // Only once the background refresh has built the index: the first full
     // read can take seconds and must not hold up a snapshot. A refresh in
@@ -489,9 +552,7 @@ fn price_usage(model: &str, usage: &Value) -> Option<f64> {
 }
 
 fn in_spans(spans: &[Span], at: DateTime<Utc>) -> bool {
-    spans
-        .iter()
-        .any(|span| at >= span.from && at <= span.to + chrono::Duration::seconds(SPAN_TAIL_S))
+    spans.iter().any(|span| at >= span.from && at <= span.to)
 }
 
 fn jsonl_files(dir: &Path, modified_since: std::time::SystemTime, out: &mut Vec<PathBuf>) {
@@ -606,11 +667,23 @@ impl TranscriptIndex {
                 .or_else(|| message.get("id").and_then(Value::as_str))
                 .map(str::to_string)
                 .unwrap_or_else(|| format!("{}#{offset}:{index}", file.display()));
-            self.replies.entry(id).or_insert(Reply {
+            // Later lines of one request repeat its usage with the output
+            // grown so far: keep the final, largest one.
+            let reply = Reply {
                 at,
                 model: model.to_string(),
                 usd,
-            });
+            };
+            match self.replies.entry(id) {
+                std::collections::hash_map::Entry::Occupied(mut seen) => {
+                    if usd > seen.get().usd {
+                        seen.insert(reply);
+                    }
+                }
+                std::collections::hash_map::Entry::Vacant(slot) => {
+                    slot.insert(reply);
+                }
+            }
         }
         Some(offset + complete as u64)
     }
@@ -946,14 +1019,77 @@ mod tests {
         assert!((total(&mut index) - 4.0).abs() < 1e-9);
     }
 
+    fn spans(cache: &BillingCache, key: &str) -> Vec<(DateTime<Utc>, DateTime<Utc>)> {
+        cache.rows[key]
+            .active_spans
+            .iter()
+            .map(|span| (span.from, span.to))
+            .collect()
+    }
+
     #[test]
-    fn sightings_close_together_join_one_period() {
-        let mut row = Row::default();
-        note_active(&mut row, at("2026-10-10T10:00:00Z"));
-        note_active(&mut row, at("2026-10-10T10:10:00Z"));
-        note_active(&mut row, at("2026-10-10T11:00:00Z"));
-        assert_eq!(row.active_spans.len(), 2);
-        assert_eq!(row.active_spans[0].to, at("2026-10-10T10:10:00Z"));
+    fn an_account_seen_live_twice_was_live_in_between() {
+        let mut cache = BillingCache::default();
+        note_live(&mut cache, Some(("api", true)), at("2026-10-10T10:00:00Z"));
+        // cc-logins was closed overnight; Claude Code kept using the key.
+        note_live(&mut cache, Some(("api", true)), at("2026-10-11T09:00:00Z"));
+        assert_eq!(
+            spans(&cache, "api"),
+            [(at("2026-10-10T10:00:00Z"), at("2026-10-11T09:00:00Z"))]
+        );
+    }
+
+    #[test]
+    fn a_switch_ends_the_period_when_it_happens() {
+        let mut cache = BillingCache::default();
+        note_live(&mut cache, Some(("api", true)), at("2026-10-10T10:00:00Z"));
+        note_live(&mut cache, Some(("api", true)), at("2026-10-10T10:04:00Z"));
+        // Switched to a subscription; the switch publishes a snapshot at once.
+        note_live(&mut cache, Some(("sub", false)), at("2026-10-10T10:06:00Z"));
+        note_live(&mut cache, Some(("sub", false)), at("2026-10-10T12:00:00Z"));
+        note_live(&mut cache, Some(("api", true)), at("2026-10-10T13:00:00Z"));
+        assert_eq!(
+            spans(&cache, "api"),
+            [
+                (at("2026-10-10T10:00:00Z"), at("2026-10-10T10:06:00Z")),
+                (at("2026-10-10T13:00:00Z"), at("2026-10-10T13:00:00Z")),
+            ]
+        );
+        assert!(!cache.rows.contains_key("sub"));
+    }
+
+    #[test]
+    fn a_change_found_after_a_long_gap_is_not_counted_as_use() {
+        let mut cache = BillingCache::default();
+        note_live(&mut cache, Some(("api", true)), at("2026-10-10T10:00:00Z"));
+        // Next launch, a day later, finds another account live.
+        note_live(&mut cache, Some(("sub", false)), at("2026-10-11T10:00:00Z"));
+        assert_eq!(
+            spans(&cache, "api"),
+            [(at("2026-10-10T10:00:00Z"), at("2026-10-10T10:00:00Z"))]
+        );
+    }
+
+    #[test]
+    fn a_request_counts_at_its_final_size() {
+        let dir = tempfile::tempdir().unwrap();
+        let line = |out: u64| {
+            json!({
+                "type": "assistant", "timestamp": "2026-10-10T10:00:00Z", "requestId": "req_a",
+                "message": {"model": "claude-sonnet-5-5", "usage": {"input_tokens": 0, "output_tokens": out}}
+            })
+            .to_string()
+        };
+        // One line per content block, output growing as the reply streams.
+        let text = [line(100_000), line(500_000), line(1_000_000)].join("\n") + "\n";
+        std::fs::write(dir.path().join("s.jsonl"), text).unwrap();
+        let spans = [Span {
+            from: at("2026-10-10T09:00:00Z"),
+            to: at("2026-10-10T11:00:00Z"),
+        }];
+        let (daily, _) = estimate(&mut TranscriptIndex::default(), dir.path(), &spans);
+        // 1M output tokens at $10/MTok.
+        assert!((daily["2026-10-10"] - 10.0).abs() < 1e-9);
     }
 
     #[test]

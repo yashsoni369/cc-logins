@@ -212,6 +212,10 @@ pub struct Billing {
     /// The prepaid balance less everything spent since it was entered.
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub balance_left_usd: Option<f64>,
+    /// For an estimate: when this account was first seen in use here. Spend
+    /// before that is not in the figures.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub estimated_since: Option<String>,
 }
 
 /// The money limits a user entered for an API account, kept in its registry

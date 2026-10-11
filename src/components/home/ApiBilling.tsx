@@ -224,7 +224,9 @@ export default function ApiBilling({ account, now, disabled }: { account: Accoun
           <form className="api-key-form" onSubmit={(e) => void saveKey(e)}>
             <span className="lc-foot">
               {estimate
-                ? "Estimated from Claude Code's logs on this machine, for the time this account was in use. "
+                ? `Estimated from Claude Code's logs on this machine while this account was in use${
+                    billing?.estimatedSince ? `, since ${dayLabel(billing.estimatedSince) ?? "it was added"}` : ""
+                  }. Spend before that, or on other machines, isn't included. `
                 : "Not read yet. "}
               For exact figures that match the Console, add an Admin key (Console → Settings → Admin keys). It is
               used only to read your organisation&apos;s cost report.
